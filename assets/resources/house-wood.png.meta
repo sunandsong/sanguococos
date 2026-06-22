@@ -1,0 +1,134 @@
+{
+  "ver": "1.0.27",
+  "importer": "image",
+  "imported": true,
+  "uuid": "c7176502-32c3-4dd9-b1cb-8138d9fcb7e7",
+  "files": [
+    ".json",
+    ".png"
+  ],
+  "subMetas": {
+    "6c48a": {
+      "importer": "texture",
+      "uuid": "c7176502-32c3-4dd9-b1cb-8138d9fcb7e7@6c48a",
+      "displayName": "house-wood",
+      "id": "6c48a",
+      "name": "texture",
+      "userData": {
+        "wrapModeS": "clamp-to-edge",
+        "wrapModeT": "clamp-to-edge",
+        "imageUuidOrDatabaseUri": "c7176502-32c3-4dd9-b1cb-8138d9fcb7e7",
+        "isUuid": true,
+        "visible": false,
+        "minfilter": "linear",
+        "magfilter": "linear",
+        "mipfilter": "none",
+        "anisotropy": 0
+      },
+      "ver": "1.0.22",
+      "imported": true,
+      "files": [
+        ".json"
+      ],
+      "subMetas": {}
+    },
+    "f9941": {
+      "importer": "sprite-frame",
+      "uuid": "c7176502-32c3-4dd9-b1cb-8138d9fcb7e7@f9941",
+      "displayName": "house-wood",
+      "id": "f9941",
+      "name": "spriteFrame",
+      "userData": {
+        "trimThreshold": 1,
+        "rotated": false,
+        "offsetX": 5,
+        "offsetY": -5,
+        "trimX": 10,
+        "trimY": 10,
+        "width": 382,
+        "height": 212,
+        "rawWidth": 392,
+        "rawHeight": 222,
+        "borderTop": 0,
+        "borderBottom": 0,
+        "borderLeft": 0,
+        "borderRight": 0,
+        "packable": true,
+        "pixelsToUnit": 100,
+        "pivotX": 0.5,
+        "pivotY": 0.5,
+        "meshType": 0,
+        "vertices": {
+          "rawPosition": [
+            -191,
+            -106,
+            0,
+            191,
+            -106,
+            0,
+            -191,
+            106,
+            0,
+            191,
+            106,
+            0
+          ],
+          "indexes": [
+            0,
+            1,
+            2,
+            2,
+            1,
+            3
+          ],
+          "uv": [
+            10,
+            212,
+            392,
+            212,
+            10,
+            0,
+            392,
+            0
+          ],
+          "nuv": [
+            0.025510204081632654,
+            0,
+            1,
+            0,
+            0.025510204081632654,
+            0.954954954954955,
+            1,
+            0.954954954954955
+          ],
+          "minPos": [
+            -191,
+            -106,
+            0
+          ],
+          "maxPos": [
+            191,
+            106,
+            0
+          ]
+        },
+        "isUuid": true,
+        "imageUuidOrDatabaseUri": "c7176502-32c3-4dd9-b1cb-8138d9fcb7e7@6c48a",
+        "atlasUuid": "",
+        "trimType": "auto"
+      },
+      "ver": "1.0.12",
+      "imported": true,
+      "files": [
+        ".json"
+      ],
+      "subMetas": {}
+    }
+  },
+  "userData": {
+    "type": "sprite-frame",
+    "fixAlphaTransparencyArtifacts": false,
+    "hasAlpha": true,
+    "redirect": "c7176502-32c3-4dd9-b1cb-8138d9fcb7e7@6c48a"
+  }
+}
