@@ -20,7 +20,7 @@ interface SoldierInst {
 @ccclass('Soldiers')
 export class Soldiers extends Component {
   @property
-  soldierScale = 0.5;
+  soldierScale = 0.1;
   @property
   groundFy = 0.78;       // 兵所在高度（容器中心）
   @property
@@ -32,7 +32,9 @@ export class Soldiers extends Component {
   @property
   pokeDur = 0.4;
   @property
-  headPop = 1.25;        // 凸眼时头放大倍数
+  headPop = 0.9;         // 凸眼时头放大倍数
+  @property
+  headDy = 300;          // 头相对身子的上下偏移（正=往上；单位大，屏幕约 ×0.1）
 
   private list: SoldierInst[] = [];
   private t = 0;
@@ -40,15 +42,16 @@ export class Soldiers extends Component {
   onLoad() {
     const { width: W, height: H } = view.getVisibleSize();
     const baseY = (0.5 - this.groundFy) * H;
-    const defs: [string, number, number][] = [
-      ['soldier-black', 0.28, 0],
-      ['soldier-white', 0.50, 1.5],
-      ['soldier-red', 0.72, 3.0],
+    // [图前缀, 横向 fx, 节奏相位, 头上下偏移]（每个兵单独调头）
+    const defs: [string, number, number, number][] = [
+      ['soldier-black', 0.28, 0, 300],
+      ['soldier-white', 0.50, 1.5, 420],   // 白脸单独再高一点
+      ['soldier-red', 0.72, 3.0, 300],
     ];
-    defs.forEach(([prefix, fx, phase]) => this.build(prefix, (fx - 0.5) * W, baseY, phase));
+    defs.forEach(([prefix, fx, phase, hdy]) => this.build(prefix, (fx - 0.5) * W, baseY, phase, hdy));
   }
 
-  private build(prefix: string, baseX: number, baseY: number, phase: number) {
+  private build(prefix: string, baseX: number, baseY: number, phase: number, hdy: number) {
     // 点击容器（小尺寸命中区）
     const hit = new Node(prefix); hit.layer = this.node.layer; hit.parent = this.node;
     const hui = hit.addComponent(UITransform); hui.setAnchorPoint(0.5, 0.5); hui.setContentSize(130, 220);
@@ -67,7 +70,7 @@ export class Soldiers extends Component {
     headN.addComponent(UITransform).setAnchorPoint(0.5, 0.377);
     const headSp = headN.addComponent(Sprite); headSp.sizeMode = Sprite.SizeMode.CUSTOM;
     headN.getComponent(UITransform)!.setContentSize(600, 780);
-    headN.setPosition(0, this.childY, 0);
+    headN.setPosition(0, this.childY + hdy, 0);
 
     const inst: SoldierInst = {
       hit, bodySp, headSp, headNode: headN,
