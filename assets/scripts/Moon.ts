@@ -1,5 +1,6 @@
 import { _decorator, Component, Sprite, SpriteFrame, resources, view, UIOpacity, UITransform } from 'cc';
 import { GameState } from './GameState';
+import { DESIGN_W, DESIGN_H } from './Constants';
 const { ccclass, property } = _decorator;
 
 // 月牙（带脸）：夜里出现在左上天空，随夜色淡入淡出，轻微浮动。
@@ -17,7 +18,7 @@ export class Moon extends Component {
   private t = 0;
 
   onLoad() {
-    const { width: W, height: H } = view.getVisibleSize();
+    const W = DESIGN_W, H = DESIGN_H;
     this.op = this.getComponent(UIOpacity) || this.addComponent(UIOpacity)!;
     const sp = this.getComponent(Sprite) || this.addComponent(Sprite)!;
     const ui = this.getComponent(UITransform) || this.addComponent(UITransform)!;
@@ -34,7 +35,8 @@ export class Moon extends Component {
   update(dt: number) {
     this.t += dt;
     const nl = GameState.i.nightLevel;
-    this.op.opacity = Math.round(Math.max(0, Math.min(1, (nl - 0.3) / 0.4)) * 255);
+    // 阈值降低 + 区间缩窄 → 太阳一下山就立刻亮起来
+    this.op.opacity = Math.round(Math.max(0, Math.min(1, (nl - 0.4) / 0.2)) * 255);
     this.node.setPosition(this.node.position.x, this.baseY + Math.sin(this.t * 0.6) * 5, 0);
   }
 }

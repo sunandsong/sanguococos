@@ -1,14 +1,15 @@
-import { _decorator, Component, Node, Sprite, SpriteFrame, Label, resources, view, UITransform, Color, Vec3, UIOpacity } from 'cc';
+import { _decorator, Component, Node, Sprite, SpriteFrame, Label, resources, UITransform, Color, Vec3, UIOpacity } from 'cc';
 import { GameState } from './GameState';
+import { DESIGN_W, DESIGN_H } from './Constants';
 const { ccclass, property } = _decorator;
 
 // 城墙：4 档立绘。点击 → 建设中（进度条 + 3 个小人抡锤 + 黄色高光 + 冒烟 + 抖动）→ 升级。
 @ccclass('City')
 export class City extends Component {
   @property
-  widthFrac = 0.72;
+  widthFrac = 0.5;
   @property
-  bottomFy = 0.59;
+  bottomFy = 0.55;
   @property
   buildDur = 3;
 
@@ -38,8 +39,8 @@ export class City extends Component {
   private hamT = 0;
 
   onLoad() {
-    const sz = view.getVisibleSize();
-    this.W = sz.width; this.H = sz.height;
+    // 锁死设计尺寸（不用 view.getVisibleSize，避免不同手机变形）
+    this.W = DESIGN_W; this.H = DESIGN_H;
     this.sp = this.getComponent(Sprite) || this.addComponent(Sprite)!;
     this.ui = this.getComponent(UITransform) || this.addComponent(UITransform)!;
     this.sp.type = Sprite.Type.SIMPLE;

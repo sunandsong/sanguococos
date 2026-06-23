@@ -1,5 +1,6 @@
 import { _decorator, Component, Node, Sprite, SpriteFrame, resources, view, UIOpacity, UITransform } from 'cc';
 import { GameState } from './GameState';
+import { DESIGN_W, DESIGN_H } from './Constants';
 const { ccclass, property } = _decorator;
 
 // 星星：夜里出现、轻微闪烁（照 H5 的 10 颗位置）。
@@ -12,7 +13,7 @@ export class Stars extends Component {
   private t = 0;
 
   onLoad() {
-    const { width: W, height: H } = view.getVisibleSize();
+    const W = DESIGN_W, H = DESIGN_H;
     const pos = [[0.30,0.10],[0.40,0.07],[0.52,0.12],[0.63,0.06],[0.72,0.10],
                  [0.82,0.08],[0.88,0.15],[0.46,0.05],[0.58,0.17],[0.35,0.16]];
     resources.load('star/spriteFrame', SpriteFrame, (err, sf) => {

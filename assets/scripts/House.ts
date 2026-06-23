@@ -16,6 +16,7 @@ import {
   UITransform,
 } from "cc";
 import { GameState } from "./GameState";
+import { DESIGN_W, DESIGN_H } from './Constants';
 const { ccclass, property } = _decorator;
 
 // 主公府：按等级切换 4 档立绘（茅草/木/石/宫），叠在城里上方。
@@ -38,7 +39,7 @@ export class House extends Component {
   private H = 0;
 
   onLoad() {
-    const sz = view.getVisibleSize();
+    const sz = { width: DESIGN_W, height: DESIGN_H };
     this.W = sz.width;
     this.H = sz.height;
     this.sp = this.getComponent(Sprite) || this.addComponent(Sprite)!;

@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>凸眼头 phead 3 张</title>
+<style>
+  body { margin:0; padding:20px; background:#222; color:#fff; font-family:sans-serif; text-align:center; }
+  .row { display:flex; gap:20px; justify-content:center; margin:20px 0; flex-wrap:wrap; }
+  .frame { background:#444; border:2px solid #888; border-radius:8px; padding:12px; }
+  canvas { display:block; margin-bottom:8px;
+    background-image:linear-gradient(45deg,#666 25%,transparent 25%),linear-gradient(-45deg,#666 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#666 75%),linear-gradient(-45deg,transparent 75%,#666 75%);
+    background-size:20px 20px; background-position:0 0,0 10px,10px -10px,-10px 0px;
+  }
+  button { background:#5a8aff; color:#fff; border:none; padding:8px 16px; border-radius:6px; cursor:pointer; font-size:14px; }
+  .big { background:#1e7a3a; font-size:16px; padding:12px 24px; }
+  h1 { margin: 0 0 6px; }
+  .hint { color:#aaa; font-size:13px; margin: 0 0 16px; }
+</style>
+</head>
+<body>
+<h1>3 张凸眼头 phead（从 sanguo-demo-online.html 提取）</h1>
+<p class="hint">两眼分开 + 大瞳 + 红血丝 + 张嘴 + 头放大 1.7 倍；尺寸 600×780 匹配现有 nhead</p>
+
+<div class="row" id="frames"></div>
+
+<button class="big" onclick="downloadAll()">📦 一键下载 3 张</button>
+
+<script>
+const SIZE_W = 600;
+const SIZE_H = 780;
+const SCALE = 5.5;
+
+// 3 个兵种的脸配置（跟 H5 demo 第 5078-5082 行一致）
+const FACES = [
+  { name: 'black', color: '#222',    faceW: 1.08, faceH: 0.95 },
+  { name: 'white', color: '#ffffff', faceW: 0.82, faceH: 1.18 },
+  { name: 'red',   color: '#c0392b', faceW: 0.88, faceH: 1.05 },
+];
+
+// 手绘风圆/椭圆：把圆采样成若干段，每段半径轻微抖动（seed 固定，画出来稳定）
+function seedBow(a, b, c, d) {
+  const s = Math.sin(a * 12.9898 + b * 78.233 + c * 37.719 + d * 11.317) * 43758.5453;
+  return (s - Math.floor(s)) * 2 - 1;
+}
+function handEllipse(g, cx, cy, rx, ry, wobble, segs, fill, stroke, lw) {
+  g.fillStyle = fill;
+  g.strokeStyle = stroke;
+  g.lineWidth = lw;
+  g.beginPath();
+  for (let i = 0; i <= segs; i++) {
+    const a = (i / segs) * Math.PI * 2;
+    const wx = 1 + wobble * seedBow(cx, cy, a * 100, rx);
+    const wy = 1 + wobble * seedBow(cx + 7, cy + 13, a * 100, ry);
+    const x = cx + Math.cos(a) * rx * wx;
+    const y = cy + Math.sin(a) * ry * wy;
+    if (i === 0) g.moveTo(x, y); else g.lineTo(x, y);
+  }
+  g.closePath();
+  g.fill();
+  g.stroke();
+}
+function handLine(g, x0, y0, x1, y1, lw, color) {
+  const dx = x1 - x0, dy = y1 - y0;
+  const len = Math.hypot(dx, dy) || 1;
+  const nx = -dy / len, ny = dx / len;
+  const bow = Math.min(8, len * 0.08) * seedBow(x0, y0, x1, y1);
+  const mx = (x0 + x1) / 2 + nx * bow;
+  const my = (y0 + y1) / 2 + ny * bow;
+  g.strokeStyle = color;
+  g.lineWidth = lw;
+  g.lineCap = 'round';
+  g.beginPath();
+  g.moveTo(x0, y0);
+  g.quadraticCurveTo(mx, my, x1, y1);
+  g.stroke();
+}
+
+function drawPoppingHead(g, faceColor, faceW, faceH) {
+  const hx = SIZE_W / 2;
+  const hy = SIZE_H / 2;
+  const scale = SCALE;
+  const HS = 2;
+
+  // 头（手绘风椭圆，边线轻微抖动）
+  const __pop = 1;
+  const hr = 8 * scale * HS * (1 + __pop * 0.7);
+  handEllipse(g, hx, hy, hr * faceW, hr * faceH, 0.04, 36, faceColor, '#222', 1.8 * scale);
+
+  // 凸眼（两眼分开，bo 必须 >= ber 避免重叠）
+  const eyeR = 2.6 * scale * HS;
+  const eyeOff = 3 * scale * HS;
+  const big = 3.5;                          // 凸眼放大倍数（更夸张！眼睛远大于脸）
+  const ber = eyeR * big;                   // 凸眼半径
+  const bpr = eyeR * big * 0.40;            // 瞳孔半径
+  const bo  = eyeOff * 3.5;                 // 间距同步加大，保证不重叠
+  const ey  = hy - 1 * HS;
+
+  for (const sgn of [-1, 1]) {
+    const ex = hx + sgn * bo;
+    // 白眼底（手绘风）
+    handEllipse(g, ex, ey, ber, ber, 0.06, 28, '#fff', '#222', 1.8 * scale);
+    // 血丝（手绘短线带抖动）
+    for (let k = 0; k < 9; k++) {
+      const a = (k / 9) * Math.PI * 2 + sgn * 0.4;
+      const x0 = ex + Math.cos(a) * ber * 0.92;
+      const y0 = ey + Math.sin(a) * ber * 0.92;
+      const x1 = ex + Math.cos(a) * bpr * 1.3;
+      const y1 = ey + Math.sin(a) * bpr * 1.3;
+      handLine(g, x0, y0, x1, y1, 1.5 * scale, 'rgba(122,5,5,1)');
+    }
+    // 黑瞳（手绘风圆）
+    handEllipse(g, ex, ey, bpr, bpr, 0.05, 20, '#111', '#111', 1);
+    // 高光（小白点，保持正圆，肉眼看不出形状）
+    g.fillStyle = '#fff';
+    g.beginPath();
+    g.arc(ex - bpr * 0.3, ey - bpr * 0.3, bpr * 0.32, 0, Math.PI * 2);
+    g.fill();
+  }
+
+  // 张大嘴 "啊!"（更大更圆，像被揍懵）
+  const mr = 3.5 * scale * HS;
+  handEllipse(g, hx, hy + 7 * scale * HS, mr, mr * 1.1, 0.09, 22, '#3a0a0a', '#222', 1.8 * scale);
+  // 嘴里的红舌头
+  handEllipse(g, hx, hy + 8 * scale * HS, mr * 0.45, mr * 0.4, 0.1, 14, '#c41e1e', '#7a1010', 1 * scale);
+
+  // 一颗大汗珠（蓝色，挂在右脸边）
+  const dropX = hx + hr * faceW * 0.8;
+  const dropY = hy - hr * 0.2;
+  g.fillStyle = '#5fb3ff';
+  g.strokeStyle = '#1e60a0';
+  g.lineWidth = 1.5 * scale;
+  g.beginPath();
+  g.moveTo(dropX, dropY - 12 * scale);
+  g.quadraticCurveTo(dropX - 8 * scale, dropY + 2 * scale, dropX, dropY + 10 * scale);
+  g.quadraticCurveTo(dropX + 8 * scale, dropY + 2 * scale, dropX, dropY - 12 * scale);
+  g.closePath();
+  g.fill();
+  g.stroke();
+  // 汗珠高光
+  g.fillStyle = '#fff';
+  g.beginPath();
+  g.arc(dropX - 2 * scale, dropY - 4 * scale, 2 * scale, 0, Math.PI * 2);
+  g.fill();
+}
+
+// 五角星
+function drawStar(g, cx, cy, rIn, rOut, fill, stroke, lw) {
+  g.fillStyle = fill; g.strokeStyle = stroke; g.lineWidth = lw;
+  g.beginPath();
+  for (let i = 0; i < 10; i++) {
+    const r = i % 2 === 0 ? rOut : rIn;
+    const a = (i / 10) * Math.PI * 2 - Math.PI / 2;
+    const x = cx + Math.cos(a) * r;
+    const y = cy + Math.sin(a) * r;
+    if (i === 0) g.moveTo(x, y); else g.lineTo(x, y);
+  }
+  g.closePath();
+  g.fill();
+  g.stroke();
+}
+
+function createFrame(face) {
+  const wrap = document.createElement('div');
+  wrap.className = 'frame';
+  const c = document.createElement('canvas');
+  c.width = SIZE_W;
+  c.height = SIZE_H;
+  c.style.width = '180px';
+  c.style.height = '234px';
+  wrap.appendChild(c);
+  drawPoppingHead(c.getContext('2d'), face.color, face.faceW, face.faceH);
+  const label = document.createElement('div');
+  label.textContent = `soldier-${face.name}-phead.png`;
+  label.style.cssText = 'font-size:12px;margin:6px 0;color:#bbb';
+  wrap.appendChild(label);
+  const btn = document.createElement('button');
+  btn.textContent = '下载 PNG';
+  btn.onclick = () => download(c, `soldier-${face.name}-phead.png`);
+  wrap.appendChild(btn);
+  return wrap;
+}
+
+function download(canvas, filename) {
+  const url = canvas.toDataURL('image/png');
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+}
+
+const root = document.getElementById('frames');
+const canvases = [];
+const names = [];
+FACES.forEach(face => {
+  const node = createFrame(face);
+  root.appendChild(node);
+  canvases.push(node.querySelector('canvas'));
+  names.push(`soldier-${face.name}-phead.png`);
+});
+
+function downloadAll() {
+  canvases.forEach((c, i) => {
+    setTimeout(() => download(c, names[i]), i * 200);
+  });
+}
+</script>
+</body>
+</html>

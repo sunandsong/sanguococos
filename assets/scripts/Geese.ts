@@ -1,4 +1,5 @@
 import { _decorator, Component, Graphics, Color, view } from 'cc';
+import { DESIGN_W, DESIGN_H } from './Constants';
 const { ccclass, property } = _decorator;
 
 // 小鸟（照搬 H5 drawBirds）：3 只在不同高度连续横飞、翅膀扇动、循环掠过。
@@ -21,7 +22,7 @@ export class Geese extends Component {
     this.t += dt;
     const g = this.g;
     g.clear();
-    const { width: W, height: H } = view.getVisibleSize();
+    const W = DESIGN_W, H = DESIGN_H;
     const range = W + 60;
     g.strokeColor = new Color(51, 51, 51, 255);
     g.lineWidth = 3;

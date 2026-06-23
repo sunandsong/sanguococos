@@ -1,5 +1,6 @@
 import { _decorator, Component, Graphics, Color, view } from 'cc';
 import { GameState } from './GameState';
+import { DESIGN_W, DESIGN_H } from './Constants';
 const { ccclass, property } = _decorator;
 
 // 挂在一个全屏的 SkyOverlay 节点上（节点要有 Graphics 组件）。
@@ -17,7 +18,7 @@ export class DayNightController extends Component {
     GameState.i.tick(dt);             // 推进时间（每帧只真正加一次）
     const g = this.overlay;
     if (!g) return;
-    const { width: W, height: H } = view.getVisibleSize();
+    const W = DESIGN_W, H = DESIGN_H;
     const s = GameState.i.skyAt(GameState.i.dayPhase);
     g.clear();
     if (s.a > 0.001) {

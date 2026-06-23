@@ -1,4 +1,5 @@
 import { _decorator, Component, Node, Sprite, SpriteFrame, Label, LabelOutline, resources, view, UITransform, tween, Vec3, Color } from 'cc';
+import { DESIGN_W, DESIGN_H } from './Constants';
 const { ccclass, property } = _decorator;
 
 // 底部四个菜单按钮：内政 / 酒馆 / 出征 / 战事（图标 + 文字 + 点击反馈）。
@@ -10,7 +11,7 @@ export class BottomMenu extends Component {
   barFy = 0.88;        // 菜单条高度（越大越靠下）
 
   onLoad() {
-    const { width: W, height: H } = view.getVisibleSize();
+    const W = DESIGN_W, H = DESIGN_H;
     const items = [
       { icon: 'icon-farm', label: '内政' },
       { icon: 'icon-tavern', label: '酒馆' },

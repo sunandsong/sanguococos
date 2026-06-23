@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>进城兵 2 帧（gate enterer）</title>
+<style>
+  body { margin:0; padding:20px; background:#222; color:#fff; font-family:sans-serif; text-align:center; }
+  .row { display:flex; gap:20px; justify-content:center; margin:20px 0; flex-wrap:wrap; }
+  .frame { background:#444; border:2px solid #888; border-radius:8px; padding:12px; }
+  canvas {
+    display:block; margin-bottom:8px;
+    background-image:linear-gradient(45deg,#666 25%,transparent 25%),linear-gradient(-45deg,#666 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#666 75%),linear-gradient(-45deg,transparent 75%,#666 75%);
+    background-size:20px 20px; background-position:0 0,0 10px,10px -10px,-10px 0px;
+  }
+  button { background:#5a8aff; color:#fff; border:none; padding:8px 16px; border-radius:6px; cursor:pointer; font-size:14px; }
+  .big { background:#1e7a3a; font-size:16px; padding:12px 24px; }
+  h1 { margin: 0 0 6px; }
+  .hint { color:#aaa; font-size:13px; margin: 0 0 16px; }
+</style>
+</head>
+<body>
+<h1>进城兵 2 帧（完整复刻 H5 drawDetailedStickman）</h1>
+<p class="hint">灰色，无武器无帽，spear 单位；2 帧切换 = 走路；面向右（左用 Cocos scaleX=-1 翻转）</p>
+
+<div class="row" id="frames"></div>
+<button class="big" onclick="downloadAll()">📦 一键下载 2 张</button>
+
+<script>
+const SIZE_W = 200;
+const SIZE_H = 320;
+const SCALE = 4;             // 给个清晰但不太占空间的尺寸
+
+function drawEnterer(g, walkPhase) {
+  // === 完全照搬 drawDetailedStickman 中 unit='spear', weapon='none', hat='none' 的部分 ===
+  const x = SIZE_W / 2;
+  const y = SIZE_H - 40;      // 脚底位置
+  const scale = SCALE;
+  const f = 1;                // 朝右
+  const color = '#3a3a3a';
+  const faceColor = '#f5e6c8';
+
+  g.lineCap = 'round';
+  g.lineJoin = 'round';
+  const lw = 2.5 * scale;
+
+  // 影子
+  g.fillStyle = 'rgba(0,0,0,0.25)';
+  g.beginPath();
+  g.ellipse(x, y + 5 * scale, 8 * scale, 2 * scale, 0, 0, Math.PI * 2);
+  g.fill();
+
+  // 身体
+  g.strokeStyle = color;
+  g.lineWidth = lw + 1;
+  g.beginPath();
+  g.moveTo(x, y - 15 * scale);
+  g.lineTo(x, y - 8 * scale);
+  g.stroke();
+
+  // 手
+  g.beginPath();
+  g.moveTo(x, y - 13 * scale);
+  g.lineTo(x - 7 * f * scale, y - 9 * scale);
+  g.stroke();
+  g.beginPath();
+  g.moveTo(x, y - 13 * scale);
+  g.lineTo(x + 8 * f * scale, y - 11 * scale);
+  g.stroke();
+  // weapon='none' → 跳过 drawWeapon
+
+  // 腿（走路）
+  g.beginPath();
+  g.moveTo(x, y - 8 * scale);
+  g.lineTo(x - 5 * scale, y + walkPhase * scale);
+  g.stroke();
+  g.beginPath();
+  g.moveTo(x, y - 8 * scale);
+  g.lineTo(x + 5 * scale, y - walkPhase * scale);
+  g.stroke();
+
+  // 头（HS=2，放大一倍）
+  const HS = 2;
+  const hx = x, hy = y - 31 * scale;
+  const hr = 8 * scale * HS;
+  g.fillStyle = faceColor;
+  g.strokeStyle = '#222';
+  g.lineWidth = 1.5;
+  g.beginPath();
+  g.ellipse(hx, hy, hr * 0.95, hr * 1, 0, 0, Math.PI * 2);
+  g.fill();
+  g.stroke();
+
+  // 大眼（两颗黑点）
+  const eyeR = 2.6 * scale * HS;
+  const eyeOff = 3 * scale * HS;
+  g.fillStyle = '#222';
+  g.beginPath(); g.arc(hx - eyeOff, hy - 1 * HS, eyeR * 0.45, 0, Math.PI * 2); g.fill();
+  g.beginPath(); g.arc(hx + eyeOff, hy - 1 * HS, eyeR * 0.45, 0, Math.PI * 2); g.fill();
+  // 嘴
+  g.strokeStyle = '#3a0a0a'; g.lineWidth = 1.5;
+  g.beginPath();
+  g.moveTo(hx - 3 * scale, hy + 6 * scale);
+  g.lineTo(hx + 3 * scale, hy + 6 * scale);
+  g.stroke();
+  // hat='none' → 不画
+}
+
+function createFrame(walkPhase, idx) {
+  const wrap = document.createElement('div');
+  wrap.className = 'frame';
+  const c = document.createElement('canvas');
+  c.width = SIZE_W;
+  c.height = SIZE_H;
+  c.style.width = '100px';
+  c.style.height = '160px';
+  wrap.appendChild(c);
+  drawEnterer(c.getContext('2d'), walkPhase);
+  const label = document.createElement('div');
+  label.textContent = `enterer-${idx}.png`;
+  label.style.cssText = 'font-size:12px;margin:6px 0;color:#bbb';
+  wrap.appendChild(label);
+  const btn = document.createElement('button');
+  btn.textContent = '下载 PNG';
+  btn.onclick = () => download(c, `enterer-${idx}.png`);
+  wrap.appendChild(btn);
+  return wrap;
+}
+
+function download(canvas, filename) {
+  const url = canvas.toDataURL('image/png');
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+}
+
+const root = document.getElementById('frames');
+const canvases = [];
+[5, -5].forEach((p, i) => {
+  const node = createFrame(p, i);
+  root.appendChild(node);
+  canvases.push(node.querySelector('canvas'));
+});
+
+function downloadAll() {
+  canvases.forEach((c, i) => {
+    setTimeout(() => download(c, `enterer-${i}.png`), i * 200);
+  });
+}
+</script>
+</body>
+</html>

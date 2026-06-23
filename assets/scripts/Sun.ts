@@ -1,5 +1,6 @@
 import { _decorator, Component, Graphics, Color, view, Node, UITransform } from 'cc';
 import { GameState } from './GameState';
+import { DESIGN_W, DESIGN_H } from './Constants';
 const { ccclass } = _decorator;
 
 // 太阳：随昼夜走天空弧线、夜里淡出、点击弹一下（占位“说话”）。
@@ -22,7 +23,7 @@ export class Sun extends Component {
   update(dt: number) {
     if (this.pop > 0) this.pop = Math.max(0, this.pop - dt * 3);
     const gs = GameState.i;
-    const { width: W, height: H } = view.getVisibleSize();
+    const W = DESIGN_W, H = DESIGN_H;
 
     // 拂晓东升 → 正午最高 → 黄昏落下
     const up = Math.max(0, Math.min(1, (gs.dayPhase - 0.05) / 0.50));

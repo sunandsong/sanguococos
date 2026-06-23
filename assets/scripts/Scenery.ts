@@ -1,5 +1,6 @@
 import { _decorator, Component, Graphics, Color, view } from 'cc';
 import { hLine, hPoly, hArc } from './HandDraw';
+import { DESIGN_W, DESIGN_H } from './Constants';
 const { ccclass } = _decorator;
 
 // 手绘线条风的静态城池：山 + 城墙(带垛口) + 城门 + 主公府。
@@ -14,7 +15,7 @@ export class Scenery extends Component {
   }
 
   draw() {
-    const { width: W, height: H } = view.getVisibleSize();
+    const W = DESIGN_W, H = DESIGN_H;
     const g = this.g;
     const px = (fx: number) => (fx - 0.5) * W;   // 居中坐标系
     const py = (fy: number) => (0.5 - fy) * H;   // y 轴翻转

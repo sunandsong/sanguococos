@@ -7,6 +7,7 @@ import {
   resources,
   view,
 } from "cc";
+import { DESIGN_W, DESIGN_H } from './Constants';
 const { ccclass, property } = _decorator;
 
 // 蚂蚱：几只在地面一跳一跳（照 H5 drawHopper 的跳跃节奏）。
@@ -37,7 +38,7 @@ export class Hoppers extends Component {
   private t = 0;
 
   onLoad() {
-    const { width: W, height: H } = view.getVisibleSize();
+    const W = DESIGN_W, H = DESIGN_H;
     const px = (fx: number) => (fx - 0.5) * W;
     const py = (fy: number) => (0.5 - fy) * H;
     // 先加载影子，再加载蚂蚱，成对创建

@@ -14,6 +14,7 @@ import {
   Vec3,
 } from "cc";
 import { GameState } from "./GameState";
+import { DESIGN_W, DESIGN_H } from './Constants';
 const { ccclass, property } = _decorator;
 
 const CROPS = [
@@ -41,7 +42,7 @@ export class Farms extends Component {
   @property
   farmScale = 0.34;
   @property
-  farmFy = 0.68;
+  farmFy = 0.64;   // 越小越往上
   @property
   gapFx = 0.17;
   // —— 苗 ——
@@ -64,7 +65,7 @@ export class Farms extends Component {
   private H = 0;
 
   onLoad() {
-    const sz = view.getVisibleSize();
+    const sz = { width: DESIGN_W, height: DESIGN_H };
     this.W = sz.width;
     this.H = sz.height;
     resources.load("crop/spriteFrame", SpriteFrame, (e, sf) => {

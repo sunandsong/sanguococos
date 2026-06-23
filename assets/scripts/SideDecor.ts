@@ -7,6 +7,7 @@ import {
   resources,
   view,
 } from "cc";
+import { DESIGN_W, DESIGN_H } from './Constants';
 const { ccclass, property } = _decorator;
 
 // 城池两侧装饰：左右散点小草(speckles.png) + 左侧石头(rock.png) 5 块。全用 Sprite。
@@ -32,7 +33,7 @@ export class SideDecor extends Component {
   rockDy = 0; // 石头整体上下偏移（+下 -上）
 
   onLoad() {
-    const { width: W, height: H } = view.getVisibleSize();
+    const W = DESIGN_W, H = DESIGN_H;
     const px = (fx: number) => (fx - 0.5) * W;
     const py = (fy: number) => (0.5 - fy) * H;
 

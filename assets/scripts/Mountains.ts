@@ -1,4 +1,5 @@
 import { _decorator, Component, Sprite, SpriteFrame, resources, view, UITransform } from 'cc';
+import { DESIGN_W, DESIGN_H } from './Constants';
 const { ccclass, property } = _decorator;
 
 // 山：直接用 H5 导出的 mountains.png，铺满宽度、对齐到山脊位置。
@@ -18,14 +19,14 @@ export class Mountains extends Component {
     resources.load('mountains/spriteFrame', SpriteFrame, (err, sf) => {
       if (err) { console.warn('mountains 加载失败：', err); return; }
       sp.spriteFrame = sf;
-      const { width: W, height: H } = view.getVisibleSize();
+      const W = DESIGN_W;   // Constants 已自动按屏幕缩放
+      const H = DESIGN_H;
       const sz = sf.originalSize;
       const iw = (sz && sz.width) || 1440;
       const ih = (sz && sz.height) || 152;
-      const w = W;                            // 铺满屏幕宽度
-      const h = w * ih / iw * this.heightScale; // 按比例 ×高度倍数
-      ui.setContentSize(w, h);
-      ui.setAnchorPoint(0.5, 1);   // 顶部为锚，便于对齐山脊
+      const h = W * ih / iw * this.heightScale;
+      ui.setContentSize(W, h);
+      ui.setAnchorPoint(0.5, 1);
       this.node.setPosition(0, (0.5 - this.ridgeTop) * H, 0);
     });
   }

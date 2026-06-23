@@ -1,5 +1,6 @@
 import { _decorator, Component, Sprite, SpriteFrame, resources, view, UIOpacity, UITransform } from 'cc';
 import { GameState } from './GameState';
+import { DESIGN_W, DESIGN_H } from './Constants';
 const { ccclass, property } = _decorator;
 
 // 山上忍者：夜里才出现，在山脊来回巡逻、偶尔跳、定时藏到山后再探头。
@@ -42,7 +43,7 @@ export class Ninja extends Component {
     if (!night) { this.op.opacity = 0; return; }   // 白天不出现
     this.op.opacity = 255;
 
-    const { width: W, height: H } = view.getVisibleSize();
+    const W = DESIGN_W, H = DESIGN_H;
     // 横向巡逻（很慢，边到边）
     const xf = 0.5 + 0.40 * Math.sin(this.t * 0.22);
     // 跳跃

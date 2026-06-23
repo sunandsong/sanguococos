@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>白脸骑兵 4 帧截图（从 H5 demo 提取）</title>
+<style>
+  body { margin:0; padding:20px; background:#222; color:#fff; font-family:sans-serif; text-align:center; }
+  .row { display:flex; gap:20px; justify-content:center; margin:20px 0; flex-wrap:wrap; }
+  .frame { background:#444; border:2px solid #888; border-radius:8px; padding:12px; }
+  canvas {
+    display:block; margin-bottom:8px;
+    background-image:linear-gradient(45deg,#666 25%,transparent 25%),linear-gradient(-45deg,#666 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#666 75%),linear-gradient(-45deg,transparent 75%,#666 75%);
+    background-size:20px 20px; background-position:0 0,0 10px,10px -10px,-10px 0px;
+  }
+  button { background:#5a8aff; color:#fff; border:none; padding:8px 16px; border-radius:6px; cursor:pointer; font-size:14px; }
+  button:hover { background:#7aa0ff; }
+  .big { background:#1e7a3a; font-size:16px; padding:12px 24px; }
+  h1 { margin: 0 0 6px; }
+  .hint { color:#aaa; font-size:13px; margin: 0 0 16px; }
+</style>
+</head>
+<body>
+<h1>白脸骑兵 4 帧（无头身子 + 马，从 sanguo-demo-online.html 提取）</h1>
+<p class="hint">每张 PNG 已命名好 → 下载到 Mac → 拖进 Cocos resources/ → Cocos 自动导入</p>
+
+<div class="row" id="frames"></div>
+
+<button class="big" onclick="downloadAll()">📦 一键下载全部 4 张</button>
+
+<script>
+// === 完全复刻 sanguo-demo-online.html 里的 drawDetailedStickman 中骑兵部分 ===
+const SIZE_W = 600;   // 跟 nhead.png 完全一致 → 直接重叠对齐
+const SIZE_H = 780;
+const SCALE = 5.5;    // 600×780 大画布需要的放大倍数
+
+// 白脸的配置（line 5080 from online demo）
+const OPT = {
+  color: '#dc2626',          // 兵种颜色（白脸用红色描线，原 demo 也是 red 兵种）
+  weapon: 'sword',
+  faceColor: '#ffffff',      // 脸色（这个我们不用，因为不画头）
+  unit: 'cavalry',
+  facing: 1,
+};
+
+// 画完整白脸骑兵（头+身+剑+马+动腿）—— 跟原 nhead 在同位置重叠
+// 切换 w0-w3 = 马腿动画；nhead/phead 在上层切头表情
+function drawCavalryHeadless(g, walkPhase) {
+  // 600×780 画布跟 nhead 一致，便于完美对齐
+  const x = 300;
+  const y = 600;
+  const f = OPT.facing;
+  const scale = SCALE;
+
+  g.lineCap = 'round';
+  g.lineJoin = 'round';
+  const lw = 4 * scale;   // 加粗身子线条，跟其他兵种一致
+
+  // （去掉了影子）
+
+  // 马（线条比身子细一点，更有层次）
+  g.strokeStyle = '#111';
+  g.lineWidth = 2.5 * scale;   // 介于身子(4)和原版(1.5)之间
+  const hy = y - 3 * scale;
+  g.beginPath();
+  g.ellipse(x, hy, 18 * scale, 7 * scale, 0, 0, Math.PI * 2);
+  g.stroke();
+  const gallop = walkPhase * 0.6;
+  g.beginPath();
+  g.moveTo(x - 12 * scale, hy + 3); g.lineTo(x - 12 * scale - gallop, hy + 14 * scale);
+  g.moveTo(x - 5 * scale,  hy + 3); g.lineTo(x - 5 * scale - gallop,  hy + 14 * scale);
+  g.moveTo(x + 5 * scale,  hy + 3); g.lineTo(x + 5 * scale + gallop,  hy + 14 * scale);
+  g.moveTo(x + 12 * scale, hy + 3); g.lineTo(x + 12 * scale + gallop, hy + 14 * scale);
+  g.stroke();
+  g.beginPath();
+  g.moveTo(x + 18 * scale * f - 2 * f, hy - 1);
+  g.lineTo(x + 24 * scale * f, hy - 10 * scale);
+  g.lineTo(x + 20 * scale * f, hy + 2);
+  g.stroke();
+  g.beginPath();
+  g.moveTo(x + 8 * scale * f, hy - 6 * scale);
+  g.lineTo(x + 14 * scale * f, hy - 4);
+  g.stroke();
+
+  // 身子
+  g.strokeStyle = OPT.color;
+  g.lineWidth = lw + 1;
+  g.beginPath();
+  g.moveTo(x, y - 22 * scale);
+  g.lineTo(x, y - 8 * scale);
+  g.stroke();
+  g.beginPath();
+  g.moveTo(x, y - 18 * scale); g.lineTo(x - 7 * f * scale, y - 10 * scale);
+  g.stroke();
+  g.beginPath();
+  g.moveTo(x, y - 18 * scale); g.lineTo(x + 8 * f * scale, y - 14 * scale);
+  g.stroke();
+
+  // 长剑
+  const wx = x + 8 * f * scale, wy = y - 14 * scale;
+  g.strokeStyle = '#aaaaff'; g.lineWidth = 2 * scale;
+  g.beginPath(); g.moveTo(wx, wy); g.lineTo(wx + 4 * f * scale, wy - 22 * scale); g.stroke();
+  g.fillStyle = '#aaaaff'; g.strokeStyle = '#222'; g.lineWidth = 1;
+  g.beginPath();
+  g.moveTo(wx + 4 * f * scale - 4, wy - 22 * scale);
+  g.lineTo(wx + 4 * f * scale, wy - 30 * scale);
+  g.lineTo(wx + 4 * f * scale + 4, wy - 22 * scale);
+  g.closePath(); g.fill(); g.stroke();
+
+  // 白脸头（透明！画一个隐形圆占位，nhead 会在上层重叠真头）
+  // 不画头 = 这就是 "body" 部分，head 由 nhead.png 单独叠加显示
+}
+
+function createFrame(walkPhase, idx) {
+  const wrap = document.createElement('div');
+  wrap.className = 'frame';
+  const c = document.createElement('canvas');
+  c.width = SIZE_W;
+  c.height = SIZE_H;
+  c.style.width = '180px';   // 显示时缩小
+  c.style.height = '234px';
+  wrap.appendChild(c);
+  drawCavalryHeadless(c.getContext('2d'), walkPhase);
+  const label = document.createElement('div');
+  label.textContent = `soldier-white-w${idx}.png`;
+  label.style.cssText = 'font-size:12px;margin:6px 0;color:#bbb';
+  wrap.appendChild(label);
+  const btn = document.createElement('button');
+  btn.textContent = '下载 PNG';
+  btn.onclick = () => download(c, `soldier-white-w${idx}.png`);
+  wrap.appendChild(btn);
+  return wrap;
+}
+
+function download(canvas, filename) {
+  const url = canvas.toDataURL('image/png');
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+}
+
+// 4 帧 = 4 个不同 walkPhase（对应 sin(cityT*6) 在不同时刻的值）
+const phases = [0, 6, 0, -6];   // 跟原 demo 的 Math.sin(cityT*6) 四个相位一致
+const root = document.getElementById('frames');
+const canvases = [];
+phases.forEach((p, i) => {
+  const node = createFrame(p, i);
+  root.appendChild(node);
+  canvases.push(node.querySelector('canvas'));
+});
+
+function downloadAll() {
+  canvases.forEach((c, i) => {
+    setTimeout(() => download(c, `soldier-white-w${i}.png`), i * 200);
+  });
+}
+</script>
+</body>
+</html>

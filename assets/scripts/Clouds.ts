@@ -1,4 +1,5 @@
 import { _decorator, Component, Node, Sprite, SpriteFrame, resources, view } from 'cc';
+import { DESIGN_W, DESIGN_H } from './Constants';
 const { ccclass, property } = _decorator;
 
 // 云：加载 cloud.png，生成几朵在天上缓慢横向飘动（飘出右边从左边回来）。
@@ -14,7 +15,7 @@ export class Clouds extends Component {
   private t = 0;
 
   onLoad() {
-    const sz = view.getVisibleSize();
+    const sz = { width: DESIGN_W, height: DESIGN_H };
     this.W = sz.width; this.H = sz.height;
     resources.load('cloud/spriteFrame', SpriteFrame, (err, sf) => {
       if (err) { console.warn('cloud 加载失败：', err); return; }

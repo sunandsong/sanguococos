@@ -1,4 +1,5 @@
-import { _decorator, Component, Node, UITransform, view, Layers } from 'cc';
+import { _decorator, Component, Node, UITransform, view, Layers, Mask, Graphics } from 'cc';
+import { DESIGN_W, DESIGN_H } from './Constants';
 import { Background } from './Background';
 import { Mountains } from './Mountains';
 import { Clouds } from './Clouds';
@@ -14,6 +15,7 @@ import { SideDecor } from './SideDecor';
 import { Hoppers } from './Hoppers';
 import { Farms } from './Farms';
 import { Soldiers } from './Soldiers';
+import { CityEnterers } from './CityEnterers';
 import { BottomMenu } from './BottomMenu';
 import { HUD } from './HUD';
 const { ccclass } = _decorator;
@@ -24,8 +26,21 @@ const { ccclass } = _decorator;
 @ccclass('GameRoot')
 export class GameRoot extends Component {
   onLoad() {
-    // 强制 GameRoot 节点自己也是 UI_2D 层（避免编辑器里设置成 DEFAULT 导致黑屏）
+    console.log('🎮 GameRoot 启动了！');
+    // 强制 GameRoot 节点是 UI_2D 层
     this.node.layer = Layers.Enum.UI_2D;
+    // 强制 GameRoot 居中、跟屏幕一样大、锚点中心
+    this.node.setPosition(0, 0, 0);
+    const rootUI = this.node.getComponent(UITransform) || this.node.addComponent(UITransform)!;
+    rootUI.setContentSize(DESIGN_W, DESIGN_H);
+    rootUI.setAnchorPoint(0.5, 0.5);
+    // 加 Mask 裁切：所有超出 720×1280 的内容（草、石头、蚂蚱）自动隐藏
+    if (!this.node.getComponent(Mask)) {
+      // Mask 需要 Graphics 作为 stencil
+      if (!this.node.getComponent(Graphics)) this.node.addComponent(Graphics);
+      const mask = this.node.addComponent(Mask);
+      mask.type = Mask.Type.GRAPHICS_RECT;
+    }
     const make = (name: string, comp?: any) => {
       const n = new Node(name);
       n.layer = Layers.Enum.UI_2D;      // 强制 UI 层，Graphics/Sprite 才会渲染
@@ -46,6 +61,7 @@ export class GameRoot extends Component {
     make('Farms', Farms);              // 农田（城前菱形田）
     make('Hoppers', Hoppers);          // 蚂蚱（地面跳）
     make('Soldiers', Soldiers);        // 城外脸谱兵（先黑脸）
+    make('CityEnterers', CityEnterers); // 3 路小人从地图边走进城门（模仿 H5 demo）
     make('SkyOverlay', DayNightController); // 昼夜遮罩（盖在场景上）
     make('Stars', Stars);              // 星星（在遮罩之上，夜空发亮）
     make('Moon', Moon);                // 月亮（在遮罩之上，夜空发亮）
@@ -53,8 +69,7 @@ export class GameRoot extends Component {
 
     // HUD 顶部状态条
     const hud = make('HUD', HUD);
-    const { width: W, height: H } = view.getVisibleSize();
     hud.getComponent(UITransform)!.setAnchorPoint(0, 1);
-    hud.setPosition(-W / 2 + 16, H / 2 - 12, 0);
+    hud.setPosition(-DESIGN_W / 2 + 16, DESIGN_H / 2 - 12, 0);
   }
 }
