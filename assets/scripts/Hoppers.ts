@@ -18,7 +18,7 @@ export class Hoppers extends Component {
   @property
   frogScale = 0.3; // 青蛙大小
   @property
-  frogX = 0.9; // 青蛙位置 x
+  frogX = 0.82; // 青蛙位置 x
   @property
   frogY = 0.43; // 青蛙位置 y（越小越靠上/靠近山）
 
@@ -47,11 +47,11 @@ export class Hoppers extends Component {
         if (err) { console.warn("hopper 加载失败：", err); return; }
         // [fx, fy, 朝向(1右 -1左), 大小]
         const defs = [
-          [0.06, 0.53, 1, 1.0],
-          [0.1, 0.56, -1, 0.85],
-          [0.94, 0.53, -1, 1.0],
-          [0.9, 0.57, 1, 0.85],
-          [0.11, 0.46, 1, 0.7],
+          [0.14, 0.53, 1, 1.0],
+          [0.18, 0.56, -1, 0.85],
+          [0.86, 0.49, -1, 1.0],
+          [0.82, 0.53, 1, 0.85],
+          [0.19, 0.46, 1, 0.7],
         ];
         defs.forEach((d, i) => {
           const s = this.hopScale * d[3];

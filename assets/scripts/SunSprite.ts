@@ -25,9 +25,9 @@ export class SunSprite extends Component {
   @property
   riseLine = 0.28;     // 🔆 升起露头线：升到山脊以上才开始渐显
   @property
-  setLine = 0.36;      // 🌅 落山消失线：沉到山一半才渐隐消失
+  setLine = 0.33;      // 🌅 落山消失线：沉到 0.33 完全消失（与 sunSetLow 对齐）
   @property
-  fadeBand = 0.07;     // 🌫️ 渐显/渐隐过渡宽度
+  fadeBand = 0.035;    // 🌫️ 渐显/渐隐过渡宽度（越小，太阳/月亮切换越干脆）
   // ====================================================================
 
   op!: UIOpacity;
@@ -78,10 +78,12 @@ export class SunSprite extends Component {
     const lowAtUp = this.sunRiseLow + (this.sunSetLow - this.sunRiseLow) * up;
     const fy = lowAtUp - (lowAtUp - this.sunPeak) * Math.sin(up * Math.PI);
     this.node.setPosition((fx - 0.5) * W, (0.5 - fy) * H, 0);
+    gs.sunFy = fy;                                   // 给月亮用：太阳当前高度
     const rising = up < 0.5;
     const line = rising ? this.riseLine : this.setLine;
     let vis = (line - fy) / this.fadeBand;
     vis = Math.max(0, Math.min(1, vis));
-    this.op.opacity = Math.round(Math.max(0, 1 - gs.nightLevel) * vis * 255);
+    gs.sunVis = vis;                 // 给月亮用：月亮=1−sunVis
+    this.op.opacity = Math.round(vis * 255);
   }
 }

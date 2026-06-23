@@ -28,7 +28,7 @@ export class SideDecor extends Component {
   @property
   speckleAngle = 90; // 整片散点旋转角度（90 = 竖过来）
   @property
-  rockDx = 0; // 石头整体左右偏移（+右 -左）
+  rockDx = 0.08; // 石头整体左右偏移（+右 -左）；往城池(中间)靠
   @property
   rockDy = 0; // 石头整体上下偏移（+下 -上）
 
@@ -55,6 +55,7 @@ export class SideDecor extends Component {
       n.setScale(sx, sy, 1);
       n.setPosition(px(fx), py(fy), 0);
       if (angle) n.angle = angle;
+      return n;
     };
 
     // 散点小草：整片竖过来（旋转 90°），左右各一片
@@ -98,7 +99,8 @@ export class SideDecor extends Component {
       ];
       rocks.forEach((r, i) => {
         const s = r[2] * this.rockScale;
-        place(sf, r[0] + this.rockDx, r[1] + this.rockDy, s, s, "rock" + i);
+        const n = place(sf, r[0] + this.rockDx, r[1] + this.rockDy, s, s, "rock" + i);
+        n.setSiblingIndex(9999);   // 石头置到最前，盖住草
       });
     });
   }

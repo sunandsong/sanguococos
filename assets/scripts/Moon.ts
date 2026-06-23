@@ -34,9 +34,8 @@ export class Moon extends Component {
 
   update(dt: number) {
     this.t += dt;
-    const nl = GameState.i.nightLevel;
-    // 阈值降低 + 区间缩窄 → 太阳一下山就立刻亮起来
-    this.op.opacity = Math.round(Math.max(0, Math.min(1, (nl - 0.4) / 0.2)) * 255);
+    // 月亮 = 1 − 太阳可见度：太阳淡出月亮淡入，太阳一露头月亮就消失
+    this.op.opacity = Math.round((1 - GameState.i.sunVis) * 255);
     this.node.setPosition(this.node.position.x, this.baseY + Math.sin(this.t * 0.6) * 5, 0);
   }
 }

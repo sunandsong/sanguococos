@@ -4,13 +4,13 @@ const { ccclass, property } = _decorator;
 
 interface SoldierInst {
   hit: Node;            // 点击容器
+  shadow: Node;         // 地面影子
+  shScale: number;      // 影子基准大小
   bodySp: Sprite;       // 无头身子
   headSp: Sprite;       // 头（正常/凸眼）
-  body0: SpriteFrame | null;
-  body1: SpriteFrame | null;
-  walkFrames: (SpriteFrame | null)[];   // w0..w3（骑兵 4 帧马腿）
+  walkFrames: (SpriteFrame | null)[];   // 步兵/骑兵都用 4 帧（body0..3 / w0..3）
   nhead: SpriteFrame | null;
-  phead: SpriteFrame | null;
+  pokeFrames: (SpriteFrame | null)[];   // 点击爆头序列 poke0..3（鼓胀递减）
   headNode: Node;
   baseX: number;
   baseY: number;
@@ -42,6 +42,10 @@ export class Soldiers extends Component {
   headPop = 1.5;         // 点击时头放大倍数（1.5 = 1.5 倍）
   @property
   headDy = 300;          // 头相对身子的上下偏移（正=往上；单位大，屏幕约 ×0.1）
+  @property
+  shadowScale = 0.6;     // 影子大小
+  @property
+  shadowDy = -42;        // 影子相对兵脚的上下偏移（负=往下贴地）
 
   private list: SoldierInst[] = [];
   private t = 0;
@@ -65,6 +69,14 @@ export class Soldiers extends Component {
   }
 
   private build(prefix: string, baseX: number, baseY: number, phase: number, hdy: number, hdx: number = 0, bodyScale: number = 1, headBobAmp: number = 0, headBobSpeed: number = 1) {
+    // 地面影子（先建 = 在兵后面，留在地面）
+    const shadow = new Node(prefix + '-shadow'); shadow.layer = this.node.layer; shadow.parent = this.node;
+    const shSp = shadow.addComponent(Sprite); shSp.sizeMode = Sprite.SizeMode.TRIMMED;
+    const shScale = this.shadowScale * bodyScale;
+    shadow.setScale(shScale, shScale * 0.45, 1);
+    shadow.setPosition(baseX, baseY + this.shadowDy, 0);
+    resources.load('shadow/spriteFrame', SpriteFrame, (e, sf) => { if (!e) shSp.spriteFrame = sf; });
+
     // 点击容器（足够大覆盖整个角色含头部，因为头偏移可达 +500）
     const hit = new Node(prefix); hit.layer = this.node.layer; hit.parent = this.node;
     const hui = hit.addComponent(UITransform); hui.setAnchorPoint(0.5, 0.5); hui.setContentSize(600, 1400);
@@ -91,9 +103,9 @@ export class Soldiers extends Component {
     // 白脸头本身偏长（原 H5 faceH=1.18），Y 压扁让脸更圆
     if (isCavalry) headN.setScale(1, 0.75, 1);
     const inst: SoldierInst = {
-      hit, bodySp, headSp, headNode: headN,
-      body0: null, body1: null, walkFrames: [null, null, null, null],
-      nhead: null, phead: null,
+      hit, shadow, shScale, bodySp, headSp, headNode: headN,
+      walkFrames: [null, null, null, null],
+      nhead: null, pokeFrames: [null, null, null, null],
       baseX, baseY, phase, pokeUntil: 0, isCavalry,
       hdx, hdy, headBobAmp, headBobSpeed,
     };
@@ -106,11 +118,16 @@ export class Soldiers extends Component {
         ld(nm, sf => { inst.walkFrames[i] = sf; if (!bodySp.spriteFrame) bodySp.spriteFrame = sf; });
       });
     } else {
-      ld('body0', sf => { inst.body0 = sf; if (!bodySp.spriteFrame) bodySp.spriteFrame = sf; });
-      ld('body1', sf => { inst.body1 = sf; });
+      // 步兵：加载 body0-body3 四帧走路（顺滑）
+      ['body0','body1','body2','body3'].forEach((nm, i) => {
+        ld(nm, sf => { inst.walkFrames[i] = sf; if (!bodySp.spriteFrame) bodySp.spriteFrame = sf; });
+      });
     }
-    ld('nhead', sf => { inst.nhead = sf; headSp.spriteFrame = sf; });
-    ld('phead', sf => { inst.phead = sf; });
+    ld('nhead', sf => { inst.nhead = sf; if (!headSp.spriteFrame) headSp.spriteFrame = sf; });
+    // 点击爆头序列 poke0..3（鼓胀最大 → 逐级收回）
+    ['poke0','poke1','poke2','poke3'].forEach((nm, i) => {
+      ld(nm, sf => { inst.pokeFrames[i] = sf; });
+    });
     hit.on(Node.EventType.TOUCH_END, () => { inst.pokeUntil = this.t + this.pokeDur; }, this);
   }
 
@@ -118,45 +135,43 @@ export class Soldiers extends Component {
     this.t += dt;
     for (const s of this.list) {
       const tt = this.t + s.phase;
-      // 身子动画：骑兵 4 帧（马腿快循环）；步兵 2 帧
-      let frame: SpriteFrame | null = null;
-      if (s.isCavalry) {
-        const idx = Math.floor(tt * this.walkFps * 2) % 4;   // 骑兵速度 ×2
-        frame = s.walkFrames[idx];
-      } else {
-        frame = Math.floor(tt * this.walkFps) % 2 === 0 ? s.body0 : s.body1;
-      }
+      // 身子动画：都用 4 帧循环（骑兵马腿速度 ×2）
+      const fps = s.isCavalry ? this.walkFps * 2 : this.walkFps;
+      const idx = Math.floor(tt * fps) % 4;
+      const frame = s.walkFrames[idx];
       if (frame) s.bodySp.spriteFrame = frame;
       // 巡逻 + 小跳（骑兵跳更高，步兵也跳但小；整个 hit 容器跳，头自动跟着）
       const x = s.baseX + Math.sin(tt * 0.8) * this.sway;
       const bounceAmp = s.isCavalry ? 8 : 12;    // 白脸跳低（8）
       const bounceFreq = s.isCavalry ? this.walkFps : this.walkFps;   // 白脸跳慢（×1）
-      const y = s.baseY + Math.abs(Math.sin(tt * bounceFreq * Math.PI / 2)) * bounceAmp;
+      const bounceN = Math.abs(Math.sin(tt * bounceFreq * Math.PI / 2));   // 0→1 跳起程度
+      const y = s.baseY + bounceN * bounceAmp;
       s.hit.setPosition(x, y, 0);
+      // 影子：留在地面跟随水平，跳得越高影子越小
+      const ss = s.shScale * (1 - bounceN * 0.4);
+      s.shadow.setScale(ss, s.shScale * 0.45, 1);
+      s.shadow.setPosition(x, s.baseY + this.shadowDy, 0);
       // 头位置 = 静态偏移 + 额外颠（STEP 函数，跟身子帧切换瞬间同步，不再用 sin）
       let extraBob = 0;
       if (s.headBobAmp > 0) {
         // 用跟身子帧切换完全相同的整数计数器 → 头 Y 在帧切换瞬间跳动 → 完美同步
-        let frameIdx = 0;
-        if (s.isCavalry) {
-          frameIdx = Math.floor(tt * this.walkFps * 2 * s.headBobSpeed) % 4;
-          extraBob = (frameIdx === 1 || frameIdx === 3) ? s.headBobAmp : 0;
-        } else {
-          frameIdx = Math.floor(tt * this.walkFps * s.headBobSpeed) % 2;
-          extraBob = frameIdx === 1 ? s.headBobAmp : 0;
-        }
+        const fps2 = (s.isCavalry ? this.walkFps * 2 : this.walkFps) * s.headBobSpeed;
+        const frameIdx = Math.floor(tt * fps2) % 4;
+        extraBob = (frameIdx === 1 || frameIdx === 3) ? s.headBobAmp : 0;
       }
       // 身子向上的瞬间，头也跟着向上（+extraBob 而非 -）
       s.headNode.setPosition(s.hdx, this.childY + s.hdy + extraBob, 0);
 
-      // 头：凸眼时换大头 + 原地放大
-      const poking = this.t < s.pokeUntil;
-      if (poking && s.phead) {
-        if (s.headSp.spriteFrame !== s.phead) s.headSp.spriteFrame = s.phead;
-        s.headNode.setScale(this.headPop, this.headPop, 1);
+      // 头：点击时按序播放爆头帧 poke0→poke3→正常头（眼球逐渐爆出再收回，大小烤进帧里）
+      s.headNode.setScale(1, 1, 1);
+      const remain = s.pokeUntil - this.t;
+      if (remain > 0 && s.pokeFrames[0]) {
+        const e = 1 - remain / this.pokeDur;          // 0→1 已过比例
+        const idx = Math.min(4, Math.floor(e * 5));   // 0..3=爆头帧, 4=回正常头
+        const f = idx < 4 ? s.pokeFrames[idx] : s.nhead;
+        if (f && s.headSp.spriteFrame !== f) s.headSp.spriteFrame = f;
       } else {
         if (s.nhead && s.headSp.spriteFrame !== s.nhead) s.headSp.spriteFrame = s.nhead;
-        s.headNode.setScale(1, 1, 1);
       }
     }
   }

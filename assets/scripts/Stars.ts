@@ -37,7 +37,7 @@ export class Stars extends Component {
 
   update(dt: number) {
     this.t += dt;
-    const night = Math.max(0, Math.min(1, (GameState.i.nightLevel - 0.3) / 0.4));
+    const night = 1 - GameState.i.sunVis;   // 跟太阳互补：太阳露头就消失，落山就出来
     for (const s of this.stars) {
       const tw = 0.5 + 0.5 * Math.sin(this.t * 2.2 + s.phase);   // 闪烁
       s.op.opacity = Math.round(night * (0.25 + 0.75 * tw) * 255);
