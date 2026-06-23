@@ -1,4 +1,4 @@
-import { _decorator, Component, Node, UITransform, view } from 'cc';
+import { _decorator, Component, Node, UITransform, view, Layers } from 'cc';
 import { Background } from './Background';
 import { Mountains } from './Mountains';
 import { Clouds } from './Clouds';
@@ -24,9 +24,11 @@ const { ccclass } = _decorator;
 @ccclass('GameRoot')
 export class GameRoot extends Component {
   onLoad() {
+    // 强制 GameRoot 节点自己也是 UI_2D 层（避免编辑器里设置成 DEFAULT 导致黑屏）
+    this.node.layer = Layers.Enum.UI_2D;
     const make = (name: string, comp?: any) => {
       const n = new Node(name);
-      n.layer = this.node.layer;        // 继承 UI 层，Graphics 才会渲染
+      n.layer = Layers.Enum.UI_2D;      // 强制 UI 层，Graphics/Sprite 才会渲染
       n.addComponent(UITransform);
       n.parent = this.node;
       if (comp) n.addComponent(comp);
