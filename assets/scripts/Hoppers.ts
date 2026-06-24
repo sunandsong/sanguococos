@@ -6,8 +6,10 @@ import {
   SpriteFrame,
   resources,
   view,
+  UIOpacity,
 } from "cc";
 import { DESIGN_W, DESIGN_H } from './Constants';
+import { GameState } from './GameState';
 const { ccclass, property } = _decorator;
 
 // 蚂蚱：几只在地面一跳一跳（照 H5 drawHopper 的跳跃节奏）。
@@ -35,6 +37,11 @@ export class Hoppers extends Component {
   private frogShadow: Node | null = null;
   private frogBaseX = 0;
   private frogBaseY = 0;
+  private frogZzz: Node | null = null;
+  private frogZzzOp: UIOpacity | null = null;
+  private frogSp: Sprite | null = null;
+  private frogAwakeSF: SpriteFrame | null = null;
+  private frogSleepSF: SpriteFrame | null = null;
   private t = 0;
 
   onLoad() {
@@ -105,6 +112,22 @@ export class Hoppers extends Component {
         n.setScale(this.frogScale, this.frogScale, 1);
         n.setPosition(this.frogBaseX, this.frogBaseY, 0);
         this.frog = n;
+        this.frogSp = sp;
+        this.frogAwakeSF = sf;
+        // 闭眼睡觉青蛙（夜里替换）
+        resources.load("frog-sleep/spriteFrame", SpriteFrame, (e, sf2) => { if (!e) this.frogSleepSF = sf2; });
+        // 青蛙睡觉时头顶飘的 Zzz（手绘贴图）
+        const z = new Node("frogZzz");
+        z.layer = this.node.layer;
+        z.parent = this.node;
+        const zsp = z.addComponent(Sprite);
+        zsp.sizeMode = Sprite.SizeMode.TRIMMED;
+        resources.load("zzz/spriteFrame", SpriteFrame, (e, zf) => { if (!e) zsp.spriteFrame = zf; });
+        z.setScale(0.22, 0.22, 1);
+        this.frogZzzOp = z.addComponent(UIOpacity);
+        this.frogZzzOp.opacity = 0;
+        z.setPosition(this.frogBaseX + 34, this.frogBaseY + 46, 0);
+        this.frogZzz = z;
       });
     });
   }
@@ -121,21 +144,39 @@ export class Hoppers extends Component {
       h.shadow.setScale(ss, h.base * 0.6, 1);
       h.shadow.setPosition(x, h.by - 4, 0);   // 跟随水平、固定在地面
     }
-    // 青蛙：平时呼吸，每隔几秒蹦一下
+    // 青蛙：白天蹦跶；夜里睡觉（闭眼、不蹦、慢呼吸、飘 Zzz）
+    const night = GameState.i.sunVis < 0.35;
+    if (this.frogSp) {
+      const want = night ? (this.frogSleepSF || this.frogAwakeSF) : this.frogAwakeSF;
+      if (want && this.frogSp.spriteFrame !== want) this.frogSp.spriteFrame = want;
+    }
     if (this.frog) {
-      const cyc = this.t % 4.5;                       // 4.5 秒一轮
       let hop = 0;
-      if (cyc < 0.55) hop = Math.sin((cyc / 0.55) * Math.PI);  // 半秒跳一下
+      if (!night) {
+        const cyc = this.t % 4.5;                       // 4.5 秒一轮
+        if (cyc < 0.55) hop = Math.sin((cyc / 0.55) * Math.PI);  // 半秒跳一下
+      }
       const x = this.frogBaseX - hop * 14 * this.frogScale;    // 往左小幅前移
       const y = this.frogBaseY + hop * 34 * this.frogScale;    // 跳起
       this.frog.setPosition(x, y, 0);
-      const breathe = hop > 0 ? 0 : Math.sin(this.t * 2) * 0.04;
+      // 夜里呼吸更慢更浅
+      const breathe = hop > 0 ? 0 : Math.sin(this.t * (night ? 1 : 2)) * (night ? 0.025 : 0.04);
       this.frog.setScale(this.frogScale, this.frogScale * (1 + breathe), 1);
       // 影子留地面，跳起时变小、跟随水平
       if (this.frogShadow) {
         const ss = this.frogScale * 1.3 * (1 - hop * 0.5);
         this.frogShadow.setScale(ss, this.frogScale, 1);
         this.frogShadow.setPosition(x, this.frogBaseY - 6, 0);
+      }
+      // 睡觉 Zzz：夜里淡入循环上飘
+      if (this.frogZzz && this.frogZzzOp) {
+        if (night) {
+          const zc = (this.t * 0.6) % 1;
+          this.frogZzzOp.opacity = Math.round((0.35 + 0.6 * Math.max(0, Math.sin(zc * Math.PI))) * 255);
+          this.frogZzz.setPosition(this.frogBaseX + 34, this.frogBaseY + 46 + zc * 50, 0);
+        } else {
+          this.frogZzzOp.opacity = 0;
+        }
       }
     }
   }

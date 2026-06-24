@@ -1,5 +1,6 @@
-import { _decorator, Component, Node, Sprite, SpriteFrame, resources, view, UITransform } from 'cc';
+import { _decorator, Component, Node, Sprite, SpriteFrame, resources, view, UITransform, Label, LabelOutline, UIOpacity, Color } from 'cc';
 import { DESIGN_W, DESIGN_H } from './Constants';
+import { GameState } from './GameState';
 const { ccclass, property } = _decorator;
 
 interface SoldierInst {
@@ -11,6 +12,12 @@ interface SoldierInst {
   walkFrames: (SpriteFrame | null)[];   // 步兵/骑兵都用 4 帧（body0..3 / w0..3）
   nhead: SpriteFrame | null;
   pokeFrames: (SpriteFrame | null)[];   // 点击爆头序列 poke0..3（鼓胀递减）
+  sleepFrames: (SpriteFrame | null)[];  // 渐渐闭眼序列 sleep0..3，白脸为空
+  sleepBody: SpriteFrame | null;        // 睡觉站立身子（双腿落地），白脸为空
+  sleeps: boolean;                      // 夜里是否睡觉（黑/红=true，白=false）
+  sleepT: number;                       // 0=醒，1=睡熟（渐变）
+  zzz: Node | null;                     // 飘 Zzz 的文字
+  zzzOp: UIOpacity | null;
   headNode: Node;
   baseX: number;
   baseY: number;
@@ -37,9 +44,13 @@ export class Soldiers extends Component {
   @property
   walkFps = 3;
   @property
-  pokeDur = 0.15;   // 点击放大持续时间（秒），越小越快闪过
+  pokeDur = 0.28;   // 点击爆头持续时间（秒），越大越慢
   @property
   headPop = 1.5;         // 点击时头放大倍数（1.5 = 1.5 倍）
+  @property
+  pokeScale = 1.3;       // 爆头时整体再放大（在烤进帧的大小基础上 ×，越大越夸张）
+  @property
+  sleepFadeDur = 2.5;    // 渐渐睡着/醒来的过渡时长（秒）
   @property
   headDy = 300;          // 头相对身子的上下偏移（正=往上；单位大，屏幕约 ×0.1）
   @property
@@ -102,10 +113,23 @@ export class Soldiers extends Component {
     if (bodyScale !== 1) bodyN.setScale(bodyScale, bodyScale, 1);
     // 白脸头本身偏长（原 H5 faceH=1.18），Y 压扁让脸更圆
     if (isCavalry) headN.setScale(1, 0.75, 1);
+    const sleeps = !isCavalry;   // 黑/红夜里睡觉，白脸继续巡逻
+    // 睡觉时飘的 Zzz（只给会睡的兵建）
+    let zzz: Node | null = null, zzzOp: UIOpacity | null = null;
+    if (sleeps) {
+      zzz = new Node('zzz'); zzz.layer = this.node.layer; zzz.parent = hit;
+      zzz.addComponent(UITransform).setAnchorPoint(0.5, 0.5);
+      const zsp = zzz.addComponent(Sprite); zsp.sizeMode = Sprite.SizeMode.TRIMMED;
+      resources.load('zzz/spriteFrame', SpriteFrame, (e, sf) => { if (!e) zsp.spriteFrame = sf; });
+      zzzOp = zzz.addComponent(UIOpacity); zzzOp.opacity = 0;
+      zzz.setScale(1.15, 1.15, 1);
+      zzz.setPosition(300, this.childY + hdy + 420, 0);          // 靠右上
+    }
     const inst: SoldierInst = {
       hit, shadow, shScale, bodySp, headSp, headNode: headN,
       walkFrames: [null, null, null, null],
       nhead: null, pokeFrames: [null, null, null, null],
+      sleepFrames: [null, null, null, null], sleepBody: null, sleeps, sleepT: 0, zzz, zzzOp,
       baseX, baseY, phase, pokeUntil: 0, isCavalry,
       hdx, hdy, headBobAmp, headBobSpeed,
     };
@@ -128,13 +152,58 @@ export class Soldiers extends Component {
     ['poke0','poke1','poke2','poke3'].forEach((nm, i) => {
       ld(nm, sf => { inst.pokeFrames[i] = sf; });
     });
+    if (sleeps) {
+      ['sleep0','sleep1','sleep2','sleep3'].forEach((nm, i) => {
+        ld(nm, sf => { inst.sleepFrames[i] = sf; });
+      });
+      ld('sleepbody', sf => { inst.sleepBody = sf; });
+    }
     hit.on(Node.EventType.TOUCH_END, () => { inst.pokeUntil = this.t + this.pokeDur; }, this);
   }
 
   update(dt: number) {
     this.t += dt;
+    const night = GameState.i.sunVis < 0.35;   // 太阳基本落下 = 夜
     for (const s of this.list) {
       const tt = this.t + s.phase;
+      // 夜里睡觉（黑/红）：站定后眼睛渐渐闭上，睡熟才飘 Zzz
+      const poking = this.t < s.pokeUntil;
+      // sleepT 渐变：想睡→升，白天→降；被戳时暂停（保持状态，戳完继续）
+      if (!poking) {
+        const wantSleep = night && s.sleeps;
+        s.sleepT = Math.max(0, Math.min(1, s.sleepT + (wantSleep ? 1 : -1) * dt / this.sleepFadeDur));
+      }
+      // Zzz 只在睡熟（sleepT≈1）后出现并上飘；被戳时不飘
+      if (s.zzz && s.zzzOp) {
+        if (s.sleepT >= 0.95 && !poking) {
+          const zc = (this.t * 0.6 + s.phase) % 1;     // 0→1 循环上飘
+          // 明显一点：淡入淡出，峰值接近全显
+          const a = 0.35 + 0.6 * Math.max(0, Math.sin(zc * Math.PI));
+          s.zzzOp.opacity = Math.round(a * 255);
+          s.zzz.setPosition(300, this.childY + s.hdy + 420 + zc * 140, 0);   // 靠右
+        } else {
+          s.zzzOp.opacity = 0;
+        }
+      }
+      // 一旦开始犯困（sleepT>0）就站定不走，眼睛按 sleepT 渐渐闭上
+      if (s.sleepT > 0) {
+        const standBody = s.sleepBody || s.walkFrames[0];              // 双腿落地的站立身子
+        if (standBody) s.bodySp.spriteFrame = standBody;
+        s.hit.setPosition(s.baseX, s.baseY, 0);                        // 不走动
+        s.shadow.setScale(s.shScale, s.shScale * 0.45, 1);
+        s.shadow.setPosition(s.baseX, s.baseY + this.shadowDy, 0);
+        s.headNode.setPosition(s.hdx, this.childY + s.hdy, 0);
+        if (poking) {
+          this.pokeHead(s);   // 睡着被戳：头爆大（身子是睡着站着，不是被冻结）
+        } else {
+          s.headNode.setScale(1, 1, 1);
+          // sleepT 0→1 映射：睁眼(nhead) → sleep0..3(渐闭)，共 5 档
+          const si = Math.min(4, Math.floor(s.sleepT * 5));   // 0..4
+          const f = si === 0 ? s.nhead : s.sleepFrames[si - 1];
+          if (f && s.headSp.spriteFrame !== f) s.headSp.spriteFrame = f;
+        }
+        continue;
+      }
       // 身子动画：都用 4 帧循环（骑兵马腿速度 ×2）
       const fps = s.isCavalry ? this.walkFps * 2 : this.walkFps;
       const idx = Math.floor(tt * fps) % 4;
@@ -162,17 +231,25 @@ export class Soldiers extends Component {
       // 身子向上的瞬间，头也跟着向上（+extraBob 而非 -）
       s.headNode.setPosition(s.hdx, this.childY + s.hdy + extraBob, 0);
 
-      // 头：点击时按序播放爆头帧 poke0→poke3→正常头（眼球逐渐爆出再收回，大小烤进帧里）
-      s.headNode.setScale(1, 1, 1);
-      const remain = s.pokeUntil - this.t;
-      if (remain > 0 && s.pokeFrames[0]) {
-        const e = 1 - remain / this.pokeDur;          // 0→1 已过比例
-        const idx = Math.min(4, Math.floor(e * 5));   // 0..3=爆头帧, 4=回正常头
-        const f = idx < 4 ? s.pokeFrames[idx] : s.nhead;
-        if (f && s.headSp.spriteFrame !== f) s.headSp.spriteFrame = f;
+      // 头：被戳→爆头帧（身子照常走）；否则正常头
+      if (poking) {
+        this.pokeHead(s);
       } else {
+        s.headNode.setScale(1, 1, 1);
         if (s.nhead && s.headSp.spriteFrame !== s.nhead) s.headSp.spriteFrame = s.nhead;
       }
     }
+  }
+
+  // 点击爆头：只换头帧 + 放大，不动身子。poke0→poke3 鼓胀递减，最后收回
+  private pokeHead(s: SoldierInst) {
+    const remain = s.pokeUntil - this.t;
+    const e = 1 - remain / this.pokeDur;             // 0→1 已过比例
+    const pi = Math.min(4, Math.floor(e * 5));       // 0..3=爆头帧, 4=收回
+    const back = s.sleepT > 0 ? (s.sleepFrames[3] || s.nhead) : s.nhead;   // 睡着收回到闭眼
+    const f = pi < 4 ? s.pokeFrames[pi] : back;
+    if (f && s.headSp.spriteFrame !== f) s.headSp.spriteFrame = f;
+    const k = pi < 4 ? this.pokeScale : 1;
+    s.headNode.setScale(k, k, 1);
   }
 }
