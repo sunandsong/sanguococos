@@ -9,8 +9,10 @@ interface SoldierInst {
   shScale: number;      // 影子基准大小
   bodySp: Sprite;       // 无头身子
   headSp: Sprite;       // 头（正常/凸眼）
+  smileCover: Node | null;  // 白脸夜里盖住笑容的小贴片
   walkFrames: (SpriteFrame | null)[];   // 步兵/骑兵都用 4 帧（body0..3 / w0..3）
   nhead: SpriteFrame | null;
+  nheadNight: SpriteFrame | null;   // 白脸夜里无表情头（仅白脸有）
   pokeFrames: (SpriteFrame | null)[];   // 点击爆头序列 poke0..3（鼓胀递减）
   sleepFrames: (SpriteFrame | null)[];  // 渐渐闭眼序列 sleep0..3，白脸为空
   sleepBody: SpriteFrame | null;        // 睡觉站立身子（双腿落地），白脸为空
@@ -47,6 +49,12 @@ export class Soldiers extends Component {
   pokeDur = 0.28;   // 点击爆头持续时间（秒），越大越慢
   @property
   headPop = 1.5;         // 点击时头放大倍数（1.5 = 1.5 倍）
+  // 白脸夜里去笑容：在脸上贴一个小肉色矩形盖住嘴弧线
+  @property whiteSmileCoverX = 0;      // 笑容覆盖 X（脸的横向中心）
+  @property whiteSmileCoverY = -60;    // 笑容覆盖 Y
+  @property whiteSmileCoverW = 170;    // 覆盖宽（再大一单）
+  @property whiteSmileCoverH = 75;     // 覆盖高
+  @property whiteSmileDebug = false;   // ⚙️ 调试：true=红色一直显示；false=肉色 + 只夜里显示
   @property
   pokeScale = 1.3;       // 爆头时整体再放大（在烤进帧的大小基础上 ×，越大越夸张）
   @property
@@ -113,6 +121,20 @@ export class Soldiers extends Component {
     if (bodyScale !== 1) bodyN.setScale(bodyScale, bodyScale, 1);
     // 白脸头本身偏长（原 H5 faceH=1.18），Y 压扁让脸更圆
     if (isCavalry) headN.setScale(1, 0.75, 1);
+    // 白脸：加一个肉色小贴片用来夜里盖住嘴笑（默认隐身，update 里根据 isNight 切显隐）
+    let smileCover: Node | null = null;
+    if (isCavalry) {
+      smileCover = new Node('smileCover'); smileCover.layer = this.node.layer; smileCover.parent = headN;
+      const sui = smileCover.addComponent(UITransform);
+      sui.setAnchorPoint(0.5, 0.5);
+      sui.setContentSize(this.whiteSmileCoverW, this.whiteSmileCoverH);
+      const ssp = smileCover.addComponent(Sprite);
+      ssp.sizeMode = Sprite.SizeMode.CUSTOM;
+      ssp.color = new Color(245, 230, 200, 255);   // 肉色（融入脸色）
+      resources.load('white/spriteFrame', SpriteFrame, (e, sf) => { if (!e) ssp.spriteFrame = sf; });
+      smileCover.setPosition(this.whiteSmileCoverX, this.whiteSmileCoverY, 0);
+      smileCover.active = this.whiteSmileDebug;     // 调试时一直显示
+    }
     const sleeps = !isCavalry;   // 黑/红夜里睡觉，白脸继续巡逻
     // 睡觉时飘的 Zzz（只给会睡的兵建）
     let zzz: Node | null = null, zzzOp: UIOpacity | null = null;
@@ -126,9 +148,9 @@ export class Soldiers extends Component {
       zzz.setPosition(300, this.childY + hdy + 420, 0);          // 靠右上
     }
     const inst: SoldierInst = {
-      hit, shadow, shScale, bodySp, headSp, headNode: headN,
+      hit, shadow, shScale, bodySp, headSp, smileCover, headNode: headN,
       walkFrames: [null, null, null, null],
-      nhead: null, pokeFrames: [null, null, null, null],
+      nhead: null, nheadNight: null, pokeFrames: [null, null, null, null],
       sleepFrames: [null, null, null, null], sleepBody: null, sleeps, sleepT: 0, zzz, zzzOp,
       baseX, baseY, phase, pokeUntil: 0, isCavalry,
       hdx, hdy, headBobAmp, headBobSpeed,
@@ -148,6 +170,8 @@ export class Soldiers extends Component {
       });
     }
     ld('nhead', sf => { inst.nhead = sf; if (!headSp.spriteFrame) headSp.spriteFrame = sf; });
+    // 白脸专属：夜里无表情头
+    if (isCavalry) ld('nhead-night', sf => { inst.nheadNight = sf; });
     // 点击爆头序列 poke0..3（鼓胀最大 → 逐级收回）
     ['poke0','poke1','poke2','poke3'].forEach((nm, i) => {
       ld(nm, sf => { inst.pokeFrames[i] = sf; });
@@ -165,6 +189,13 @@ export class Soldiers extends Component {
     this.t += dt;
     const night = GameState.i.sunVis < 0.35;   // 太阳基本落下 = 夜
     for (const s of this.list) {
+      // 白脸夜里：换无表情头（nhead → nhead-night）— 仅在非戳头时
+      if (s.isCavalry && s.nheadNight && s.nhead && !poking) {
+        const target = night ? s.nheadNight : s.nhead;
+        if (s.headSp.spriteFrame !== target) s.headSp.spriteFrame = target;
+      }
+      // 旧的肉色贴片关掉（不再用）
+      if (s.smileCover) s.smileCover.active = false;
       const tt = this.t + s.phase;
       // 夜里睡觉（黑/红）：站定后眼睛渐渐闭上，睡熟才飘 Zzz
       const poking = this.t < s.pokeUntil;
@@ -236,7 +267,9 @@ export class Soldiers extends Component {
         this.pokeHead(s);
       } else {
         s.headNode.setScale(1, 1, 1);
-        if (s.nhead && s.headSp.spriteFrame !== s.nhead) s.headSp.spriteFrame = s.nhead;
+        // 白脸夜里用无表情头，白天用 nhead；其他兵种始终 nhead
+        const target = (night && s.isCavalry && s.nheadNight) ? s.nheadNight : s.nhead;
+        if (target && s.headSp.spriteFrame !== target) s.headSp.spriteFrame = target;
       }
     }
   }

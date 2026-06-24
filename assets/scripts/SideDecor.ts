@@ -64,7 +64,7 @@ export class SideDecor extends Component {
         console.warn("speckles 加载失败：", err);
         return;
       }
-      place(
+      const sL = place(
         sf,
         this.speckleLX,
         this.speckleY,
@@ -73,7 +73,7 @@ export class SideDecor extends Component {
         "speckL",
         this.speckleAngle,
       );
-      place(
+      const sR = place(
         sf,
         this.speckleRX,
         this.speckleY,
@@ -82,6 +82,9 @@ export class SideDecor extends Component {
         "speckR",
         this.speckleAngle,
       );
+      // 草强制压到底层（不管 speckles 比 rock 先加载还是后加载）
+      sL.setSiblingIndex(0);
+      sR.setSiblingIndex(0);
     });
 
     // 石头：照 H5 左侧 5 块

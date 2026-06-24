@@ -16,6 +16,7 @@ import { Hoppers } from './Hoppers';
 import { Farms } from './Farms';
 import { Soldiers } from './Soldiers';
 import { CityEnterers } from './CityEnterers';
+import { Meteors } from './Meteors';
 import { BottomMenu } from './BottomMenu';
 import { HUD } from './HUD';
 const { ccclass } = _decorator;
@@ -53,7 +54,8 @@ export class GameRoot extends Component {
     make('Background', Background);     // 背景图（最底）
     make('SideDecor', SideDecor);      // 两侧石头 + 草点（垫在所有元素下面）
     make('Sun', SunSprite);            // 太阳（在山后面）
-    make('Mountains', Mountains);      // 山（挡住太阳）
+    make('Ninja', Ninja);              // 山上忍者（在山后面，下沉时被山挡住；夜里才现身）
+    make('Mountains', Mountains);      // 山（挡住太阳 + 忍者下沉部分）
     make('Clouds', Clouds);            // 云（在山前飘）
     make('Geese', Geese);              // 小鸟（横飞）
     make('City', City);                // 城墙（4 档，点击升级）
@@ -65,6 +67,7 @@ export class GameRoot extends Component {
     make('SkyOverlay', DayNightController); // 昼夜遮罩（盖在场景上）
     make('Stars', Stars);              // 星星（在遮罩之上，夜空发亮）
     make('Moon', Moon);                // 月亮（在遮罩之上，夜空发亮）
+    make('Meteors', Meteors);          // 流星（夜里偶尔划过）
     make('BottomMenu', BottomMenu);    // 底部四个菜单按钮
 
     // HUD 顶部状态条

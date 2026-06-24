@@ -123,7 +123,7 @@ export class Hoppers extends Component {
         const zsp = z.addComponent(Sprite);
         zsp.sizeMode = Sprite.SizeMode.TRIMMED;
         resources.load("zzz/spriteFrame", SpriteFrame, (e, zf) => { if (!e) zsp.spriteFrame = zf; });
-        z.setScale(0.22, 0.22, 1);
+        z.setScale(0.13, 0.13, 1);   // Zzz 大小（小一点：0.22 → 0.13）
         this.frogZzzOp = z.addComponent(UIOpacity);
         this.frogZzzOp.opacity = 0;
         z.setPosition(this.frogBaseX + 34, this.frogBaseY + 46, 0);

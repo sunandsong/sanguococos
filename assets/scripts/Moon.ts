@@ -1,17 +1,24 @@
-import { _decorator, Component, Sprite, SpriteFrame, resources, view, UIOpacity, UITransform } from 'cc';
+import { _decorator, Component, Sprite, SpriteFrame, resources, Node, UIOpacity, UITransform, tween, Vec3 } from 'cc';
 import { GameState } from './GameState';
 import { DESIGN_W, DESIGN_H } from './Constants';
 const { ccclass, property } = _decorator;
 
 // 月牙（带脸）：夜里出现在左上天空，随夜色淡入淡出，轻微浮动。
+// 点击月亮 → 弹大 1.4 倍再缩回（跟太阳同款手感）。
 @ccclass('Moon')
 export class Moon extends Component {
   @property
-  moonScale = 0.33;    // 月亮大小
+  moonScale = 0.33;      // 月亮基础大小
   @property
-  moonFx = 0.2;        // 横向位置
+  moonFx = 0.2;          // 横向位置
   @property
-  moonFy = 0.15;       // 高度
+  moonFy = 0.15;         // 高度
+  @property
+  popScale = 1.45;       // 点击放大倍数（相对 moonScale）
+  @property
+  popOutDur = 0.10;      // 弹大时长（秒）
+  @property
+  popBackDur = 0.18;     // 缩回时长（秒）
 
   private op!: UIOpacity;
   private baseY = 0;
@@ -30,6 +37,19 @@ export class Moon extends Component {
     resources.load('moon/spriteFrame', SpriteFrame, (err, sf) => {
       if (!err) sp.spriteFrame = sf; else console.warn('moon 加载失败：', err);
     });
+    // 点击月亮弹一下
+    this.node.on(Node.EventType.TOUCH_END, this.onTap, this);
+  }
+
+  private onTap() {
+    // 月亮不可见时不响应
+    if (this.op.opacity < 30) return;
+    const base = this.moonScale;
+    const big = base * this.popScale;
+    tween(this.node)
+      .to(this.popOutDur, { scale: new Vec3(big, big, 1) })
+      .to(this.popBackDur, { scale: new Vec3(base, base, 1) })
+      .start();
   }
 
   update(dt: number) {
