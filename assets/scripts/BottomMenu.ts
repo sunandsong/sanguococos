@@ -22,6 +22,7 @@ import {
   Color,
 } from "cc";
 import { DESIGN_W, DESIGN_H } from "./Constants";
+import { BattleScene } from "./BattleScene";
 const { ccclass, property } = _decorator;
 
 // 底部四个菜单按钮：内政 / 酒馆 / 出征 / 战事（图标 + 文字 + 点击反馈）。
@@ -84,13 +85,14 @@ export class BottomMenu extends Component {
       ol.width = 3;
       lblNode.setPosition(0, -56, 0);
 
-      // 点击弹一下
+      // 点击弹一下 + 触发功能
       const s = this.btnScale;
       btn.on(Node.EventType.TOUCH_END, () => {
         tween(btn)
           .to(0.08, { scale: new Vec3(s * 1.15, s * 1.15, 1) })
           .to(0.12, { scale: new Vec3(s, s, 1) })
           .start();
+        if (it.label === "出征") BattleScene.instance?.open();
       });
     });
   }

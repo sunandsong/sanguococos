@@ -18,6 +18,7 @@ import { Soldiers } from './Soldiers';
 import { CityEnterers } from './CityEnterers';
 import { Meteors } from './Meteors';
 import { BottomMenu } from './BottomMenu';
+import { BattleScene } from './BattleScene';
 import { HUD } from './HUD';
 const { ccclass } = _decorator;
 
@@ -74,5 +75,7 @@ export class GameRoot extends Component {
     const hud = make('HUD', HUD);
     hud.getComponent(UITransform)!.setAnchorPoint(0, 1);
     hud.setPosition(-DESIGN_W / 2 + 16, DESIGN_H / 2 - 12, 0);
+
+    make('Battle', BattleScene);       // 出征战场覆盖层（最上层，默认隐藏）
   }
 }
