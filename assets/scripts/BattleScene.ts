@@ -21,11 +21,14 @@ interface Stick {
   jumpY: number; jumpVy: number;   // 跳劈用的垂直高度/速度（怪恒 0）
   slamProg: number;     // 跳劈姿态进度 0→1（举刀→劈下）
   crouch: number;       // 蹲姿 -0.3~0.7（正=屈膝下蹲，负=踮脚起身）
+  scaleBoost: number;   // 整体放大倍数（1=常态，下劈瞬间放大）
 }
 
 interface Monster extends Stick {
   hp: number; hpMax: number;
   atkCd: number; vx: number;
+  attacking: boolean;   // 是否正在挥击（起手→命中→收招）
+  struck: boolean;      // 本次挥击是否已结算伤害
 }
 
 interface Spark { x: number; y: number; life: number; max: number; }
@@ -53,6 +56,11 @@ export class BattleScene extends Component {
   private readonly HIT_DUR = 0.3;
   private readonly COMBO_WINDOW = 0.55;   // 这么久内再点算连招
   private readonly SPECIAL_CD = 1.2;      // 剑气波冷却
+  private readonly PREJUMP_DUR = 0.14;    // 起跳前的蓄力下蹲时长
+  private readonly JUMP_PRE = 0.1;        // 普通跳跃：起跳前下蹲蓄力时长
+  private readonly JUMP_MOVE_VY = 900;    // 普通跳跃：起跳速度
+  private readonly GRAVITY_MOVE = 2500;   // 普通跳跃：重力
+  private readonly JUMP_LAND = 0.18;      // 普通跳跃：落地缓冲下蹲时长
   private readonly JUMP_VY = 980;         // 跳劈起跳速度
   private readonly GRAVITY_J = 2800;      // 跳劈重力
   private readonly LAND_DUR = 0.7;        // 落地深蹲→起身时长（越大起身越慢）
@@ -77,7 +85,7 @@ export class BattleScene extends Component {
 
   private groundY = 0;
 
-  private hero!: Stick & { hp: number; hpMax: number; invuln: number; atkTimer: number; attacking: boolean; hitApplied: boolean; kx: number; combo: number; specialCd: number; landT: number };
+  private hero!: Stick & { hp: number; hpMax: number; invuln: number; atkTimer: number; attacking: boolean; hitApplied: boolean; kx: number; combo: number; specialCd: number; landT: number; preJump: number; jumping: boolean; jmpPre: number; jmpLand: number };
   private monsters: Monster[] = [];
   private sparks: Spark[] = [];
   private bloods: Blood[] = [];
@@ -117,7 +125,7 @@ export class BattleScene extends Component {
     this.makeLabel('⚔ 闯 关 打 怪 ⚔', 0, H / 2 - 80, 38, new Color(255, 225, 150));
     this.zoneLbl = this.makeLabel('', 0, H / 2 - 130, 30, new Color(255, 235, 190));
     this.scoreLbl = this.makeLabel('', 0, H / 2 - 172, 28, new Color(255, 240, 200));
-    this.hintLbl = this.makeLabel('移动 A·D　连按3下→跳劈　剑气 K', 0, H / 2 - 210, 22, new Color(200, 200, 210));
+    this.hintLbl = this.makeLabel('移动 A·D　跳 W/↑　攻击(连按3下→跳劈)　剑气 K', 0, H / 2 - 210, 22, new Color(200, 200, 210));
 
     // 「前进 →」提示（清关后出现，update 里做缩放呼吸）
     this.arrow = this.makeLabel('前进 →', W / 2 - 130, 70, 42, new Color(255, 240, 150));
@@ -133,6 +141,7 @@ export class BattleScene extends Component {
     this.makeHoldButton('▶', -130, by, new Color(70, 80, 110), h => (this.rightHeld = h));
     this.makeTapButton('攻击', 250, by, 180, 92, new Color(150, 60, 55), () => this.heroSwing());
     this.makeTapButton('剑气', 80, by, 150, 84, new Color(55, 105, 140), () => this.heroSpecial());
+    this.makeTapButton('跳', -130, by + 108, 120, 84, new Color(80, 110, 80), () => this.heroJump());
 
     this.makeTapButton('收兵', -300, H / 2 - 60, 130, 66, new Color(90, 70, 66), () => this.close());
     this.restartBtn = this.makeTapButton('再战', 0, 10, 190, 88, new Color(70, 110, 70), () => this.startGame());
@@ -165,7 +174,8 @@ export class BattleScene extends Component {
       phase: 0, swing: 0, deadT: 0, fallSign: 1,
       weapon: true, horns: false, hitT: 0, atkType: 0, jumpY: 0, jumpVy: 0, slamProg: 0, crouch: 0,
       hp: 100, hpMax: 100, invuln: 0, atkTimer: 99, attacking: false, hitApplied: false, kx: 0,
-      combo: 0, specialCd: 0, landT: 0,
+      combo: 0, specialCd: 0, landT: 0, preJump: 0, scaleBoost: 1,
+      jumping: false, jmpPre: 0, jmpLand: 0,
     };
     this.monsters = []; this.sparks = []; this.bloods = []; this.waves = [];
     this.score = 0; this.spawnT = 0; this.over = false;
@@ -185,6 +195,7 @@ export class BattleScene extends Component {
       case KeyCode.KEY_D: case KeyCode.ARROW_RIGHT: this.rightHeld = true; break;
       case KeyCode.SPACE: case KeyCode.KEY_J: this.heroSwing(); break;
       case KeyCode.KEY_K: case KeyCode.KEY_L: this.heroSpecial(); break;
+      case KeyCode.KEY_W: case KeyCode.ARROW_UP: this.heroJump(); break;
     }
   }
   private onKeyUp(e: EventKeyboard) {
@@ -200,15 +211,23 @@ export class BattleScene extends Component {
 
   private airborne(): boolean { return this.hero.jumpY > 0 || this.hero.jumpVy !== 0; }
 
+  // 普通跳跃：先蹲蓄力 → 起身拉直腾空 → 下降 → 落地缓冲下蹲
+  private heroJump() {
+    if (this.over || this.zoneState === 'scroll') return;
+    const h = this.hero;
+    if (h.jumping || h.attacking || h.preJump > 0 || h.landT > 0 || this.airborne()) return;
+    h.jumping = true; h.jmpPre = this.JUMP_PRE; h.jmpLand = 0;
+  }
+
   private heroSwing() {
-    if (this.over || this.zoneState === 'scroll' || this.airborne()) return;
+    if (this.over || this.zoneState === 'scroll' || this.airborne() || this.hero.jumping) return;
     const h = this.hero;
     if (h.atkTimer < this.SWING_DUR + this.HERO_ATK_COOLDOWN) return;   // 还在挥
     // 连招：窗口内再点 → 下一段，否则从头
     h.combo = h.atkTimer <= this.COMBO_WINDOW ? (h.combo + 1) % 3 : 0;
     h.atkType = h.combo;
     h.attacking = true; h.atkTimer = 0; h.hitApplied = false;
-    if (h.atkType === 2) h.jumpVy = this.JUMP_VY;   // 第 3 段：跃起，落地下劈
+    if (h.atkType === 2) h.preJump = this.PREJUMP_DUR;   // 第 3 段：先蹲蓄力，蹲完再跃起下劈
   }
 
   // 招式参数：range 命中距离 / dmg 伤害 / knock 击退 / both 是否两侧 / blood 血量
@@ -221,7 +240,7 @@ export class BattleScene extends Component {
   }
 
   private heroSpecial() {
-    if (this.over || this.zoneState === 'scroll' || this.airborne()) return;
+    if (this.over || this.zoneState === 'scroll' || this.airborne() || this.hero.jumping) return;
     const h = this.hero;
     if (h.specialCd > 0) return;
     h.specialCd = this.SPECIAL_CD;
@@ -309,8 +328,8 @@ export class BattleScene extends Component {
       scale, dir: fromLeft ? 1 : -1,
       color: new Color(190, 60, 70), state: 'walk',
       phase: Math.random() * 6.28, swing: 0, deadT: 0, fallSign: 1,
-      weapon: false, horns: true, hitT: 0, atkType: 0, jumpY: 0, jumpVy: 0, slamProg: 0, crouch: 0,
-      hp: hpMax, hpMax, atkCd: 0, vx: 0,
+      weapon: false, horns: true, hitT: 0, atkType: 0, jumpY: 0, jumpVy: 0, slamProg: 0, crouch: 0, scaleBoost: 1,
+      hp: hpMax, hpMax, atkCd: 0, vx: 0, attacking: false, struck: false,
     });
   }
 
@@ -342,8 +361,29 @@ export class BattleScene extends Component {
 
     if (h.landT > 0) h.landT -= dt;
 
-    // 跳劈物理（第 3 段）
-    if (h.jumpY > 0 || h.jumpVy !== 0) {
+    // 跳劈起跳前的蓄力下蹲：蹲完瞬间给起跳速度
+    if (h.preJump > 0) {
+      h.preJump -= dt;
+      if (h.preJump <= 0) { h.preJump = 0; h.jumpVy = this.JUMP_VY; }
+    }
+
+    // 普通跳跃：蓄力下蹲 → 腾空(拉直→下降) → 落地缓冲下蹲
+    if (h.jumping) {
+      if (h.jmpPre > 0) {                          // 起跳前下蹲蓄力
+        h.jmpPre -= dt;
+        if (h.jmpPre <= 0) { h.jmpPre = 0; h.jumpVy = this.JUMP_MOVE_VY; h.jumpY = 0.01; }
+      } else if (h.jmpLand > 0) {                  // 落地缓冲
+        h.jmpLand -= dt;
+        if (h.jmpLand <= 0) { h.jmpLand = 0; h.jumping = false; }
+      } else {                                     // 腾空物理
+        h.jumpY += h.jumpVy * dt;
+        h.jumpVy -= this.GRAVITY_MOVE * dt;
+        if (h.jumpY <= 0) { h.jumpY = 0; h.jumpVy = 0; h.jmpLand = this.JUMP_LAND; }
+      }
+    }
+
+    // 跳劈物理（第 3 段）—— 普通跳跃时不走这条，避免重复处理
+    if (!h.jumping && (h.jumpY > 0 || h.jumpVy !== 0)) {
       h.jumpY += h.jumpVy * dt;
       h.jumpVy -= this.GRAVITY_J * dt;
       if (h.jumpY <= 0) {                 // 落地
@@ -388,10 +428,12 @@ export class BattleScene extends Component {
     } else {
       h.state = mv !== 0 ? 'walk' : 'idle';
     }
+    if (h.jumping) h.state = 'idle';   // 跳跃时用站姿（腿不做走路摆动），姿态交给 crouch
 
-    // 跳劈姿态：升起举刀 → 下落劈砍 → 落地保持劈下（用 slamProg 驱动，动作看得清）
+    // 跳劈姿态：起跳前下蹲蓄力 → 升起举刀 → 下落劈砍 → 落地保持劈下（用 slamProg 驱动，动作看得清）
     if (h.atkType === 2 && (h.attacking || h.landT > 0)) {
-      if (h.jumpVy > 20) h.slamProg = 0.15;                                      // 上升：举刀蓄力
+      if (h.preJump > 0) h.slamProg = 0.05;                                      // 蓄力下蹲：刀还未举起
+      else if (h.jumpVy > 20) h.slamProg = 0.15;                                 // 上升：举刀蓄力
       else if (h.jumpY > 1) h.slamProg = 0.15 + 0.7 * Math.min(1, -h.jumpVy / this.JUMP_VY); // 下落：劈下
       else h.slamProg = 0.95;                                                    // 落地：保持劈下
       if (h.landT > 0 && !h.attacking) h.state = 'attack';                       // 落地后短暂保留劈姿
@@ -403,7 +445,8 @@ export class BattleScene extends Component {
     let cr = 0;
     if (h.state === 'attack') {
       if (h.atkType === 2) {
-        if (h.landT > 0) cr = 1.0 * (h.landT / this.LAND_DUR);           // 落地：深蹲 → 平滑起身
+        if (h.preJump > 0) cr = 0.9 * (1 - h.preJump / this.PREJUMP_DUR);  // 起跳前：屈膝下蹲蓄力（越接近起跳蹲得越深）
+        else if (h.landT > 0) cr = 1.0 * (h.landT / this.LAND_DUR);      // 落地：深蹲 → 平滑起身
         else if (h.jumpY > 1 && h.jumpVy < 0) cr = 0.25 * h.slamProg;    // 下落：微屈膝
       } else if (h.atkType === 1) {
         cr = h.swing < 0.5 ? (0.5 - h.swing) / 0.5 * 0.55 : -(h.swing - 0.5) / 0.5 * 0.3; // 上挑：先蹲后踮
@@ -412,6 +455,22 @@ export class BattleScene extends Component {
       }
     }
     h.crouch = Math.max(-0.3, Math.min(1.0, cr));
+
+    // 普通跳跃姿态：蓄力深蹲 → 起身拉直(踮脚) → 下降回中 → 落地缓冲下蹲
+    if (h.jumping) {
+      let jc: number;
+      if (h.jmpPre > 0) jc = 0.85 * (1 - h.jmpPre / this.JUMP_PRE);        // 蓄力：越接近起跳蹲得越深
+      else if (h.jmpLand > 0) jc = 0.9 * (h.jmpLand / this.JUMP_LAND);     // 落地缓冲：深蹲 → 起身
+      else if (h.jumpVy > 0) jc = -0.3 * (h.jumpVy / this.JUMP_MOVE_VY);   // 上升：身体拉直、踮脚
+      else jc = 0;                                                         // 下降：自然站姿
+      h.crouch = Math.max(-0.3, Math.min(1.0, jc));
+    }
+
+    // 跳劈：随跳跃高度整体放大，最高点约 1.5 倍，落地后恢复
+    const maxJumpH = this.JUMP_VY * this.JUMP_VY / (2 * this.GRAVITY_J);
+    h.scaleBoost = (h.atkType === 2 && h.jumpY > 0)
+      ? 1 + 0.5 * Math.min(1, h.jumpY / maxJumpH)
+      : 1;
   }
 
   // 跳劈落地冲击：以主角为中心两侧 AoE + 冲击波火花
@@ -458,26 +517,35 @@ export class BattleScene extends Component {
 
       if (adx <= 56) {
         m.state = 'attack';
-        m.swing = Math.min(1, m.swing + dt * 3.5);
-        if (m.atkCd <= 0) {
-          m.atkCd = 1.0; m.swing = 0;
-          if (h.invuln <= 0 && !this.airborne()) {   // 空中(跳劈)免伤
-            h.hp -= 9 + Math.random() * 5;
-            h.invuln = 0.7;
-            h.hitT = this.HIT_DUR;
-            const away = h.x >= m.x ? 1 : -1;
-            h.kx = away * 360;
-            const by = this.groundY + 90;
-            this.sparks.push({ x: h.x, y: by, life: 0, max: 0.22 });
-            this.spawnBlood(h.x, by, away, 14);
-            if (h.hp <= 0) { this.spawnBlood(h.x, by, away, 26); this.gameOver(); }
+        // 起手：冷却好了才开始一次挥击（先摆动作，不立刻掉血）
+        if (!m.attacking && m.atkCd <= 0) {
+          m.attacking = true; m.struck = false; m.swing = 0; m.atkCd = 1.0;
+        }
+        if (m.attacking) {
+          m.swing = Math.min(1, m.swing + dt * 3.5);
+          // 挥到位（0.55）才判定命中：此刻主角仍在攻击范围内才掉血
+          if (!m.struck && m.swing >= 0.55) {
+            m.struck = true;
+            if (adx <= 62 && h.invuln <= 0 && !this.airborne()) {   // 空中(跳劈)免伤
+              h.hp -= 9 + Math.random() * 5;
+              h.invuln = 0.7;
+              h.hitT = this.HIT_DUR;
+              const away = h.x >= m.x ? 1 : -1;
+              h.kx = away * 360;
+              const by = this.groundY + 90;
+              this.sparks.push({ x: h.x, y: by, life: 0, max: 0.22 });
+              this.spawnBlood(h.x, by, away, 14);
+              if (h.hp <= 0) { this.spawnBlood(h.x, by, away, 26); this.gameOver(); }
+            }
           }
+          if (m.swing >= 1) m.attacking = false;   // 收招
         }
       } else {
         m.state = 'walk';
         m.phase += dt * 8;
         m.x += m.dir * 95 * dt;
         m.swing = 0;
+        m.attacking = false;   // 离开攻击范围 → 取消挥击
       }
     }
   }
@@ -496,14 +564,15 @@ export class BattleScene extends Component {
   }
 
   private spawnBlood(x: number, y: number, dir: number, amount: number) {
-    for (let i = 0; i < amount; i++) {
-      const speed = 140 + Math.random() * 320;
+    const n = Math.round(amount * 1.8);   // 血滴更多
+    for (let i = 0; i < n; i++) {
+      const speed = 220 + Math.random() * 460;
       this.bloods.push({
         x, y,
-        vx: dir * (60 + Math.random() * 240) + (Math.random() - 0.5) * 180,
-        vy: 90 + Math.random() * speed,
-        life: 0, max: 0.5 + Math.random() * 0.5,
-        r: 3 + Math.random() * 6,
+        vx: dir * (90 + Math.random() * 360) + (Math.random() - 0.5) * 280,
+        vy: 140 + Math.random() * speed,
+        life: 0, max: 0.55 + Math.random() * 0.6,
+        r: 5 + Math.random() * 10,          // 血滴更大
         shade: Math.random(),
       });
     }
@@ -694,7 +763,7 @@ export class BattleScene extends Component {
   }
 
   private drawStick(g: Graphics, o: Stick) {
-    const u = 22 * o.scale;
+    const u = 22 * o.scale * o.scaleBoost;
     const fx = this.sX(o.x), fy = this.groundY + o.lane + o.jumpY;   // jumpY 抬升（跳劈）
     const dir = o.dir;
 
