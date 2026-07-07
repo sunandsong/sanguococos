@@ -289,7 +289,7 @@ export class BattleScene extends Component {
     if (this.zoneState === 'scroll') {
       this.camX += (this.targetCam - this.camX) * Math.min(1, dt * 3.2);
       const h = this.hero;
-      h.x = this.camX + 130; h.dir = 1; h.state = 'walk'; h.phase += dt * 10;
+      h.x = this.camX + 130; h.dir = 1; h.state = 'walk'; h.phase += dt * 15;
       if (this.targetCam - this.camX < 4) {
         this.camX = this.targetCam;
         this.zone++;
@@ -345,7 +345,7 @@ export class BattleScene extends Component {
     if (mv !== 0) {
       h.dir = mv;
       h.x += mv * this.heroSpeed * dt;
-      h.phase += dt * 10;
+      h.phase += dt * 15;
     }
 
     // 关卡边界
@@ -790,26 +790,55 @@ export class BattleScene extends Component {
     // 髋部大幅下沉；躯干长度不变（整体下坐），头也跟着明显变矮
     const HIP = (2.1 - 1.85 * crouch) * u + bob;
     const SHO = HIP + (2.2 - 0.15 * cp) * u;              // 蹲深躯干略前压
-    const headCy = SHO + 1.15 * u, headR = 0.62 * u;
+    const headCy = SHO + 0.95 * u, headR = 0.62 * u;
 
-    let f1x: number, f2x: number;
-    if (o.state === 'walk') { const s = 0.6 * u * sw; f1x = s; f2x = -s; }
-    else { const sp = (0.5 + 0.7 * cp) * u; f1x = sp; f2x = -sp; }   // 蹲时双脚张开扎马步
+    let f1x: number, f2x: number, f1y = 0, f2y = 0, lf1 = 0, lf2 = 0;
+    if (o.state === 'walk') {
+      const s = 0.6 * u * sw; f1x = s; f2x = -s;
+      lf1 = Math.max(0, Math.cos(o.phase));                  // 前摆的脚抬起程度 0~1
+      lf2 = Math.max(0, -Math.cos(o.phase));                 // 后蹬的脚
+      const lift = 0.1 * u;                                  // 抬脚高度
+      f1y = lift * lf1; f2y = lift * lf2;
+    } else { const sp = (0.5 + 0.7 * cp) * u; f1x = sp; f2x = -sp; }   // 蹲时双脚张开扎马步
 
-    const col = new Color(o.color.r, o.color.g, o.color.b, alpha);
-    g.strokeColor = col; g.lineWidth = 5.5 * o.scale;
-    const seg = (ax: number, ay: number, bx: number, by: number) => {
+    const isFoe = o.horns;
+    const col = new Color(o.color.r, o.color.g, o.color.b, alpha);           // 主色=袍甲
+    const outline = new Color(35, 28, 32, alpha);                            // 深色勾线
+    const dark = (c: Color, f: number) => new Color(Math.round(c.r * f), Math.round(c.g * f), Math.round(c.b * f), alpha);
+    const skinC = isFoe ? col : new Color(240, 206, 170, alpha);             // 肤色（怪用本色）
+    const pantsC = dark(col, 0.55);                                          // 裤
+    const bootC = new Color(58, 48, 46, alpha);                              // 靴
+    const beltC = new Color(122, 82, 52, alpha);                             // 腰带
+    const buckleC = new Color(214, 178, 86, alpha);                          // 金扣
+    const hairC = new Color(46, 38, 44, alpha);                              // 头发
+    const legSegs: [number, number, number, number][] = [];
+    const armSegs: [number, number, number, number][] = [];    // 前臂（近侧）
+    const armBSegs: [number, number, number, number][] = [];   // 后臂（远侧，藏袍后）
+    const segTo = (arr: [number, number, number, number][], ax: number, ay: number, bx: number, by: number) => {
       const [x0, y0] = T(ax, ay), [x1, y1] = T(bx, by);
-      hLine(g, x0, y0, x1, y1);
+      arr.push([x0, y0, x1, y1]);
     };
+
+    // 地面投影：固定在地面（不随跳跃抬升），跳越高越小越淡 → 有落地感
+    const shGroundY = this.groundY + o.lane;
+    const airFade = Math.max(0, 1 - o.jumpY / (4.2 * u));
+    const shScale = 0.55 + 0.45 * airFade;
+    g.fillColor = new Color(0, 0, 0, Math.round(55 * airFade * (alpha / 255)));
+    g.ellipse(fx, shGroundY - 0.05 * u, 1.55 * u * shScale, 0.34 * u * shScale);
+    g.fill();
+
+    g.lineCap = Graphics.LineCap.ROUND;      // 圆角线帽/接头 → 四肢圆润
+    g.lineJoin = Graphics.LineJoin.ROUND;
 
     // 腿（带膝盖）：蹲得越深，膝盖越向外顶出 → 明显屈膝
     const kY = HIP * 0.5;
-    const k1x = f1x * 0.5 + 0.6 * u * cp;   // 前腿膝盖外顶
-    const k2x = f2x * 0.5 - 0.6 * u * cp;   // 后腿膝盖外顶
-    seg(0, HIP, k1x, kY); seg(k1x, kY, f1x, 0);
-    seg(0, HIP, k2x, kY); seg(k2x, kY, f2x, 0);
-    seg(0, HIP, 0, SHO);
+    const kneeFwd = 0.55 * u, kneeUp = 0.28 * u;             // 抬腿时膝盖前顶 + 抬高 → 屈膝
+    const k1x = f1x * 0.5 + 0.6 * u * cp + kneeFwd * lf1;    // 前腿膝盖外顶/前弯
+    const k1y = kY + kneeUp * lf1;
+    const k2x = f2x * 0.5 - 0.6 * u * cp + kneeFwd * lf2;    // 后腿
+    const k2y = kY + kneeUp * lf2;
+    segTo(legSegs, 0, HIP, k1x, k1y); segTo(legSegs, k1x, k1y, f1x, f1y);
+    segTo(legSegs, 0, HIP, k2x, k2y); segTo(legSegs, k2x, k2y, f2x, f2y);
 
     let backHand: [number, number], frontHand: [number, number], wTip: [number, number] | null = null;
     let bladeLen = 1.6 * u, bladeGrow = 1, bladeAngle = 0, aura = 0;   // 刀长 / 刀粗 / 刀角(度) / 刀气开关
@@ -842,9 +871,73 @@ export class BattleScene extends Component {
       backHand = [-0.55 * u - a, SHO - 1.5 * u];
       if (o.weapon) wTip = [frontHand[0] + 1.6 * u, frontHand[1] + 1.0 * u];
     }
-    seg(0, SHO, backHand[0], backHand[1]);
-    seg(0, SHO, frontHand[0], frontHand[1]);
-    g.stroke();
+    const armY = SHO - 0.45 * u;   // 手臂根：从袍身肩部伸出（不在脖子根）
+    segTo(armBSegs, 0, armY, backHand[0], backHand[1]);
+    segTo(armSegs, 0, armY, frontHand[0], frontHand[1]);
+
+    const bw = 6.5 * o.scale;
+    const strokeArr = (arr: [number, number, number, number][], w: number, c: Color) => {
+      g.strokeColor = c; g.lineWidth = w;
+      for (const s of arr) hLine(g, s[0], s[1], s[2], s[3]);
+      g.stroke();
+    };
+    // 本地椭圆（沿方向 d 为长轴）：先深色描边圈，再指定色填充
+    const ovalLocal = (cxL: number, cyL: number, rxL: number, ryL: number, dxL: number, dyL: number, fillC: Color) => {
+      const px = -dyL, py = dxL, N = 12;
+      const build = (rx: number, ry: number) => {
+        for (let i = 0; i <= N; i++) {
+          const a = i / N * Math.PI * 2, ex = Math.cos(a) * rx, ey = Math.sin(a) * ry;
+          const [X, Y] = T(cxL + dxL * ex + px * ey, cyL + dyL * ex + py * ey);
+          if (i === 0) g.moveTo(X, Y); else g.lineTo(X, Y);
+        }
+      };
+      g.fillColor = outline; build(rxL + 1.6 * o.scale, ryL + 1.6 * o.scale); g.fill();
+      g.fillColor = fillC; build(rxL, ryL); g.fill();
+    };
+    // 本地多边形：先勾边再填色
+    const fillPolyLocal = (pts: [number, number][], fillC: Color) => {
+      const scr = pts.map(p => T(p[0], p[1]));
+      const trace = () => { for (let i = 0; i <= scr.length; i++) { const p = scr[i % scr.length]; if (i === 0) g.moveTo(p[0], p[1]); else g.lineTo(p[0], p[1]); } };
+      trace(); g.strokeColor = outline; g.lineWidth = 4 * o.scale; g.stroke();
+      trace(); g.fillColor = fillC; g.fill();
+    };
+
+    // 手（掌 + 拇指，指定填色）
+    const hand = (hL: [number, number], fromL: [number, number], size: number, fillC: Color) => {
+      let dx = hL[0] - fromL[0], dy = hL[1] - fromL[1];
+      const L = Math.hypot(dx, dy) || 1; dx /= L; dy /= L;
+      ovalLocal(hL[0], hL[1], size * 1.3, size * 0.85, dx, dy, fillC);     // 掌（顺臂拉长）
+      const px = -dy, py = dx;                                            // 拇指：掌侧一小块
+      const [tx, ty] = T(hL[0] + px * size * 0.9 - dx * size * 0.25, hL[1] + py * size * 0.9 - dy * size * 0.25);
+      g.fillColor = outline; g.circle(tx, ty, size * 0.5 + 1.4 * o.scale); g.fill();
+      g.fillColor = fillC; g.circle(tx, ty, size * 0.5); g.fill();
+    };
+
+    // 1) 腿（深色裤）
+    strokeArr(legSegs, bw + 4.5 * o.scale, outline);
+    strokeArr(legSegs, bw, pantsC);
+    // 2) 靴
+    const foot = (fxL: number, fyL: number) => ovalLocal(fxL + 0.12 * u, fyL + 0.02 * u, 0.36 * u, 0.16 * u, 1, 0, bootC);
+    foot(f1x, f1y); foot(f2x, f2y);
+    // 3) 后臂 + 后手（藏在袍身后，略暗显远）
+    strokeArr(armBSegs, bw + 4.5 * o.scale, outline);
+    strokeArr(armBSegs, bw, dark(col, 0.78));
+    hand(backHand, [0, armY], 0.28 * u, dark(skinC, 0.85));
+    // 4) 战袍：平肩直筒微 A 字（无领口、无收腰 → 不会变三角）
+    const shW = 0.35 * u, hemW = 0.48 * u;
+    fillPolyLocal([[-shW, SHO + 0.12 * u], [shW, SHO + 0.12 * u], [hemW, HIP - 0.3 * u], [-hemW, HIP - 0.3 * u]], col);
+    // 5) 腰带 + 金扣
+    const beltY = HIP + 0.5 * u;
+    const [blx, bly] = T(-0.46 * u, beltY), [brx, bry] = T(0.46 * u, beltY + 0.05 * u);
+    g.strokeColor = outline; g.lineWidth = 0.34 * u + 3 * o.scale; hLine(g, blx, bly, brx, bry); g.stroke();
+    g.strokeColor = beltC; g.lineWidth = 0.34 * u; hLine(g, blx, bly, brx, bry); g.stroke();
+    const [bkx, bky] = T(0, beltY + 0.02 * u);
+    g.fillColor = outline; g.circle(bkx, bky, 0.17 * u); g.fill();
+    g.fillColor = buckleC; g.circle(bkx, bky, 0.12 * u); g.fill();
+    // 6) 前臂（袍袖，主色，盖在袍身前）+ 前手
+    strokeArr(armSegs, bw + 4.5 * o.scale, outline);
+    strokeArr(armSegs, bw, col);
+    hand(frontHand, [0, armY], 0.30 * u, skinC);
 
     // 刀气：刀尖扫过的青白拖尾弧，沿长度从刀尖(头)到尾端逐渐消失
     if (o.weapon && o.state === 'attack' && aura > 0.02) {
@@ -880,9 +973,60 @@ export class BattleScene extends Component {
     }
 
     const headRk = headR * (1 + 0.95 * k);
-    g.strokeColor = col; g.lineWidth = 5 * o.scale * (1 + 0.4 * k);
     const [hcx, hcy] = T(0, headCy);
-    hArc(g, hcx, hcy, headRk, 0, Math.PI * 2, 14); g.stroke();
+    // 脖子（肤色，连接袍领与头）
+    {
+      const [n0x, n0y] = T(0, SHO + 0.06 * u), [n1x, n1y] = T(0.02 * u, headCy - 0.42 * u);
+      g.strokeColor = outline; g.lineWidth = 0.46 * u; hLine(g, n0x, n0y, n1x, n1y); g.stroke();
+      g.strokeColor = skinC; g.lineWidth = 0.30 * u; hLine(g, n0x, n0y, n1x, n1y); g.stroke();
+    }
+    // 发髻（头后上方，非怪）
+    if (!isFoe) {
+      const [bux, buy] = T(-0.52 * u, headCy + 0.55 * u);
+      g.fillColor = outline; g.circle(bux, buy, 0.30 * u); g.fill();
+      g.fillColor = hairC; g.circle(bux, buy, 0.24 * u); g.fill();
+    }
+    // 头（肤色脸 / 怪本色）
+    hArc(g, hcx, hcy, headRk, 0, Math.PI * 2, 14); g.fillColor = skinC; g.fill();
+    hArc(g, hcx, hcy, headRk, 0, Math.PI * 2, 14);
+    g.strokeColor = outline; g.lineWidth = 3.5 * o.scale * (1 + 0.4 * k); g.stroke();
+    // 顶发：沿头顶到后脑的一圈头发（非怪）
+    if (!isFoe) {
+      g.strokeColor = hairC; g.lineWidth = 0.30 * u;
+      const N2 = 10;
+      for (let i = 0; i <= N2; i++) {
+        const ph = (55 + (200 - 55) * i / N2) * Math.PI / 180;
+        const [X, Y] = T(Math.cos(ph) * headRk * 0.98, headCy + Math.sin(ph) * headRk * 0.98);
+        if (i === 0) g.moveTo(X, Y); else g.lineTo(X, Y);
+      }
+      g.stroke();
+    }
+    // 眼睛（黑珠 + 高光）
+    {
+      const [ex2, ey2] = T(0.30 * u, headCy + 0.06 * u);
+      g.fillColor = outline; g.circle(ex2, ey2, 0.115 * u); g.fill();
+      const [gx2, gy2] = T(0.335 * u, headCy + 0.10 * u);
+      g.fillColor = new Color(255, 255, 255, alpha); g.circle(gx2, gy2, 0.045 * u); g.fill();
+    }
+    // 眉毛：主角平和 / 怪下斜怒眉
+    {
+      const b0 = isFoe ? T(0.10 * u, headCy + 0.36 * u) : T(0.14 * u, headCy + 0.30 * u);
+      const b1 = isFoe ? T(0.46 * u, headCy + 0.20 * u) : T(0.46 * u, headCy + 0.33 * u);
+      g.strokeColor = outline; g.lineWidth = 2.8 * o.scale;
+      hLine(g, b0[0], b0[1], b1[0], b1[1]); g.stroke();
+    }
+    // 红额带 + 脑后飘尾（非怪）
+    if (!isFoe) {
+      const bandC = new Color(190, 60, 55, alpha);
+      const [h0x, h0y] = T(-0.60 * u, headCy + 0.26 * u), [h1x, h1y] = T(0.60 * u, headCy + 0.30 * u);
+      g.strokeColor = bandC; g.lineWidth = 0.18 * u; hLine(g, h0x, h0y, h1x, h1y); g.stroke();
+      g.lineWidth = 0.09 * u;
+      const [t0x, t0y] = T(-0.58 * u, headCy + 0.28 * u);
+      const [t1x, t1y] = T(-0.95 * u, headCy + 0.10 * u);
+      const [t2x, t2y] = T(-0.88 * u, headCy - 0.08 * u);
+      hLine(g, t0x, t0y, t1x, t1y); g.stroke();
+      hLine(g, t0x, t0y, t2x, t2y); g.stroke();
+    }
 
     // 刀光弧（仅上挑用轻弧；下劈/跳劈改用刀气拖尾）
     if (o.weapon && o.state === 'attack' && o.atkType === 1) {
@@ -895,11 +1039,13 @@ export class BattleScene extends Component {
     }
 
     if (o.horns) {
-      g.strokeColor = col; g.lineWidth = 4 * o.scale;
       const [lx1, ly1] = T(-0.5 * u, headCy + headRk * 0.7);
       const [lx2, ly2] = T(-0.9 * u, headCy + headRk * 1.7);
       const [rx1, ry1] = T(0.5 * u, headCy + headRk * 0.7);
       const [rx2, ry2] = T(0.9 * u, headCy + headRk * 1.7);
+      g.strokeColor = outline; g.lineWidth = 4 * o.scale + 3 * o.scale;
+      hLine(g, lx1, ly1, lx2, ly2); hLine(g, rx1, ry1, rx2, ry2); g.stroke();
+      g.strokeColor = col; g.lineWidth = 4 * o.scale;
       hLine(g, lx1, ly1, lx2, ly2); hLine(g, rx1, ry1, rx2, ry2); g.stroke();
     }
   }
