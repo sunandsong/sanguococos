@@ -96,6 +96,7 @@ export class BattleScene extends Component {
 
   private score = 0;
   private spawnT = 0;
+  private animT = 0;   // 全局动画时钟（飘带/呼吸等环境动效）
   private over = false;
   private arrowT = 0;
 
@@ -256,6 +257,7 @@ export class BattleScene extends Component {
   update(dt: number) {
     if (!this.node.active) return;
     dt = Math.min(dt, 0.05);
+    this.animT += dt;
 
     if (!this.over) {
       this.stepZone(dt);
@@ -378,7 +380,10 @@ export class BattleScene extends Component {
       } else {                                     // 腾空物理
         h.jumpY += h.jumpVy * dt;
         h.jumpVy -= this.GRAVITY_MOVE * dt;
-        if (h.jumpY <= 0) { h.jumpY = 0; h.jumpVy = 0; h.jmpLand = this.JUMP_LAND; }
+        if (h.jumpY <= 0) {
+          h.jumpY = 0; h.jumpVy = 0; h.jmpLand = this.JUMP_LAND;
+          this.sparks.push({ x: h.x, y: this.groundY + 8, life: 0, max: 0.16 });   // 落地小尘星
+        }
       }
     }
 
@@ -773,16 +778,29 @@ export class BattleScene extends Component {
       alpha = Math.max(0, Math.round(255 * (1 - o.deadT / 1.3)));
     }
     const k = o.hitT > 0 ? o.hitT / this.HIT_DUR : 0;
-    const leanAmt = k * 1.5 * u;
+    const walking = o.state === 'walk';
+    // 挤压拉伸：起跳纵向拉长、快速下落微拉伸、落地横向压扁（以脚底为基准）
+    const oh = o as unknown as { landT?: number; jmpLand?: number };
+    let sqx = 1, sqy = 1;
+    if (o.jumpVy > 120) { sqy = 1.10; sqx = 0.93; }
+    else if (o.jumpY > 1 && o.jumpVy < -160) { sqy = 1.05; sqx = 0.96; }
+    const landK = Math.max(oh.landT ? oh.landT / this.LAND_DUR : 0, oh.jmpLand ? oh.jmpLand / this.JUMP_LAND : 0);
+    if (landK > 0) { sqy = 1 - 0.12 * landK; sqx = 1 + 0.14 * landK; }
+    // 前倾：走路微前倾 + 挥砍顺势前压（负=向面朝方向倾）
+    const atkLean = o.state === 'attack' && o.atkType !== 1 ? Math.sin(Math.min(1, o.swing) * Math.PI) * 0.30 * u : 0;
+    const leanAmt = k * 1.5 * u - (walking ? 0.22 * u : 0) - atkLean;
     const topRef = 4.3 * u;
     const cosA = Math.cos(A), sinA = Math.sin(A);
     const T = (lx: number, ly: number): [number, number] => {
-      const X = (lx - leanAmt * (ly / topRef)) * dir;
-      return [fx + (X * cosA - ly * sinA), fy + (X * sinA + ly * cosA)];
+      const X = (lx - leanAmt * (ly / topRef)) * dir * sqx;
+      const Y = ly * sqy;
+      return [fx + (X * cosA - Y * sinA), fy + (X * sinA + Y * cosA)];
     };
 
     const sw = Math.sin(o.phase);
-    const bob = o.state === 'walk' ? Math.abs(sw) * 0.15 * u : 0;
+    // 走路上下颠 / 待机轻呼吸
+    const bob = walking ? Math.abs(sw) * 0.15 * u
+      : o.state === 'idle' ? Math.sin(this.animT * 2.2 + o.phase) * 0.035 * u : 0;
 
     // 蹲/伸姿态（逻辑层已算好 o.crouch）：正=蹲下屈膝，负=踮脚起身
     const crouch = o.crouch;
@@ -925,7 +943,8 @@ export class BattleScene extends Component {
     hand(backHand, [0, armY], 0.28 * u, dark(skinC, 0.85));
     // 4) 战袍：平肩直筒微 A 字（无领口、无收腰 → 不会变三角）
     const shW = 0.35 * u, hemW = 0.48 * u;
-    fillPolyLocal([[-shW, SHO + 0.12 * u], [shW, SHO + 0.12 * u], [hemW, HIP - 0.3 * u], [-hemW, HIP - 0.3 * u]], col);
+    const hemSw = walking ? -Math.sin(o.phase) * 0.07 * u : 0;   // 下摆随步伐向后轻摆
+    fillPolyLocal([[-shW, SHO + 0.12 * u], [shW, SHO + 0.12 * u], [hemW + hemSw, HIP - 0.3 * u], [-hemW + hemSw, HIP - 0.3 * u]], col);
     // 5) 腰带 + 金扣
     const beltY = HIP + 0.5 * u;
     const [blx, bly] = T(-0.46 * u, beltY), [brx, bry] = T(0.46 * u, beltY + 0.05 * u);
@@ -934,6 +953,16 @@ export class BattleScene extends Component {
     const [bkx, bky] = T(0, beltY + 0.02 * u);
     g.fillColor = outline; g.circle(bkx, bky, 0.17 * u); g.fill();
     g.fillColor = buckleC; g.circle(bkx, bky, 0.12 * u); g.fill();
+    // 腰后飘带：两段红绸，走路甩得更开
+    if (!isFoe) {
+      const rf = Math.sin(this.animT * 4.5 + 0.7) * (walking ? 0.14 : 0.05);
+      const r0 = T(-0.42 * u, beltY);
+      const r1 = T((-0.62 - rf) * u, beltY - 0.38 * u);
+      const r2 = T((-0.74 - rf * 2.2) * u, beltY - 0.72 * u);
+      g.strokeColor = new Color(190, 60, 55, alpha); g.lineWidth = 0.10 * u;
+      hLine(g, r0[0], r0[1], r1[0], r1[1]); g.stroke();
+      hLine(g, r1[0], r1[1], r2[0], r2[1]); g.stroke();
+    }
     // 6) 前臂（袍袖，主色，盖在袍身前）+ 前手
     strokeArr(armSegs, bw + 4.5 * o.scale, outline);
     strokeArr(armSegs, bw, col);
@@ -1021,9 +1050,10 @@ export class BattleScene extends Component {
       const [h0x, h0y] = T(-0.60 * u, headCy + 0.26 * u), [h1x, h1y] = T(0.60 * u, headCy + 0.30 * u);
       g.strokeColor = bandC; g.lineWidth = 0.18 * u; hLine(g, h0x, h0y, h1x, h1y); g.stroke();
       g.lineWidth = 0.09 * u;
+      const flap = Math.sin(this.animT * 6 + o.phase) * (walking ? 0.11 : 0.05);   // 飘尾甩动
       const [t0x, t0y] = T(-0.58 * u, headCy + 0.28 * u);
-      const [t1x, t1y] = T(-0.95 * u, headCy + 0.10 * u);
-      const [t2x, t2y] = T(-0.88 * u, headCy - 0.08 * u);
+      const [t1x, t1y] = T((-0.95 - flap * 0.35) * u, headCy + (0.10 + flap) * u);
+      const [t2x, t2y] = T((-0.88 - flap * 0.5) * u, headCy + (-0.08 + flap * 1.5) * u);
       hLine(g, t0x, t0y, t1x, t1y); g.stroke();
       hLine(g, t0x, t0y, t2x, t2y); g.stroke();
     }
