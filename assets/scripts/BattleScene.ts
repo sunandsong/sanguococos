@@ -730,8 +730,10 @@ export class BattleScene extends Component {
     const d = this.KINDS[kind];
     const fromLeft = Math.random() < (this.zonePlan().bothSides ? 0.5 : 0.35);   // 夹击关左右对半，平时多数从右来
     const scale = (0.9 + Math.random() * 0.25) * d.scaleMul * 1.2;
-    // 除精英外都一刀秒（血量低于最小攻击）；精英耐打随关卡涨
-    const hpMax = kind === 'elite' ? (220 + this.zone * 30) : 34;
+    // 步兵/弓手一刀秒；盾兵约 3 刀（耐打有"破盾"感）；精英最肉，随关卡涨
+    const hpMax = kind === 'elite' ? (220 + this.zone * 30)
+      : kind === 'shield' ? (95 + this.zone * 10)
+      : 34;
     this.monsters.push({
       x: this.camX + (fromLeft ? -W / 2 - 30 : W / 2 + 30),
       lane: (Math.random() - 0.5) * 12,   // 几乎同一条线（只留极小错位防重叠）
