@@ -30,7 +30,20 @@ interface Monster extends Stick {
   atkCd: number; vx: number;
   attacking: boolean;   // 是否正在挥击（起手→命中→收招）
   struck: boolean;      // 本次挥击是否已结算伤害
+  kind: string;         // foot/shield/archer/elite
+  atk: number;          // 对主角伤害
+  speed: number;        // 移动速度
+  ranged: boolean;      // 远程（弓手）
+  coin: number;         // 死亡掉金币数
+  slamState?: 'none' | 'windup' | 'strike';   // Boss 预警重击阶段
+  slamT?: number;       // 当前阶段剩余时间
+  slamCd?: number;      // 距下次重击
+  slamX?: number;       // 重击落点（蓄力时锁定）
 }
+
+interface Arrow { x: number; y: number; vx: number; vy: number; life: number; }   // 敌方箭
+interface Drop { x: number; y: number; vy: number; life: number; flying: boolean; sx: number; sy: number; }  // 金币掉落
+interface DmgNum { n: Node; life: number; max: number; x: number; y: number; }    // 伤害数字
 
 interface Spark { x: number; y: number; life: number; max: number; }
 interface Blood { x: number; y: number; vx: number; vy: number; life: number; max: number; r: number; shade: number; }
@@ -47,11 +60,12 @@ export class BattleScene extends Component {
 
   @property groundFy = 0.6;
   @property heroSpeed = 320;
-  @property attackRange = 100;
+  @property attackRange = 135;
   @property attackDmg = 40;
   @property maxMonsters = 6;
 
   private readonly ZONE_SPAN = 720;   // 每关卷动一屏
+  private readonly SCROLL_SPEED = 600;   // 卷屏匀速（px/s，约 1.2s 走完一屏）
   private readonly SWING_DUR = 0.15;
   private readonly HERO_ATK_COOLDOWN = 0.08;
   private readonly HIT_DUR = 0.3;
@@ -65,25 +79,77 @@ export class BattleScene extends Component {
   private readonly JUMP_VY = 980;         // 跳劈起跳速度
   private readonly GRAVITY_J = 2800;      // 跳劈重力
   private readonly LAND_DUR = 0.7;        // 落地深蹲→起身时长（越大起身越慢）
+  // Boss 预警重击
+  private readonly BOSS_SLAM_WINDUP = 0.95;  // 蓄力→砸下的预警时长（红圈亮起）
+  private readonly BOSS_SLAM_CD = 3.4;       // 两次重击间隔
+  private readonly BOSS_SLAM_R = 150;        // 命中半径（红圈半径）
+  private readonly BOSS_SLAM_DMG = 34;       // 重击伤害
 
+  // 背景组：每 5 关一个场景，Boss 单独一个场景（缺图会自动沿用上一组，不报错）。
+  // near 没有专属图就复用 bg-near-grass。最后一组固定给 Boss 关。
+  // 第 1-5 关=青原，第 6-9 关=密林，第 10 关(Boss)=焦土。
+  private readonly BIOMES = [
+    { name: '密林', far: 'bg-far-forest', mid: 'bg-mid-forest', near: 'bg-near-forest' },   // 第 1-5 关
+    { name: '青原', far: 'bg-far-mtn',    mid: 'bg-mid-hills',  near: 'bg-near-grass' },     // 第 6-9 关
+    { name: '焦土', far: 'bg-far-ruins',  mid: 'bg-mid-ruins',  near: 'bg-near-ruins' },     // 第 10 关 Boss 专属
+  ];
+
+  // 场景只两种（一套素材通用）；主要靠时段变化出氛围
   private readonly THEMES: Theme[] = [
     { name: '草原', sky: [120, 178, 150], hill: [72, 128, 95], ground: [96, 140, 80], prop: 'bush' },
     { name: '密林', sky: [70, 108, 90], hill: [40, 78, 58], ground: [54, 92, 60], prop: 'tree' },
-    { name: '雪原', sky: [178, 198, 220], hill: [150, 168, 194], ground: [212, 222, 236], prop: 'pine' },
-    { name: '城郊', sky: [112, 112, 132], hill: [80, 80, 100], ground: [122, 116, 110], prop: 'wall' },
-    { name: '敌营', sky: [92, 52, 56], hill: [70, 36, 40], ground: [82, 56, 46], prop: 'tent' },
+  ];
+
+  // 时段：驱动天空色 + 全屏色调滤镜 + 夜晚压暗。真背景图叠上它就有清晨/黄昏/夜的感觉
+  private readonly TIMES = [
+    { name: '清晨', sky: [255, 224, 188], grade: [210, 150, 95, 30], dark: 0.0 },
+    { name: '正午', sky: [150, 196, 226], grade: [185, 195, 175, 16], dark: 0.0 },
+    { name: '黄昏', sky: [255, 150, 92], grade: [214, 108, 58, 46], dark: 0.05 },
+    { name: '夜晚', sky: [42, 56, 96], grade: [40, 58, 112, 58], dark: 0.4 },
   ];
 
   // 主角赵云精灵
-  private readonly HERO_ROW = 1;          // 用精灵表第几行（侧面朝右那行）
-  private readonly SPRITE_SCALE = 1.5;    // 64px 帧放大倍数
+  private readonly HERO_ROW = 1;          // 骑马赵云：侧面攻击行
+  private readonly SPRITE_SCALE = 1.8;    // 64px 帧放大倍数
   private heroNode!: Node;
-  private heroSp!: Sprite;
+  private headNode!: Node;
+  private heroSp!: Sprite;          // 上半身（骑马赵云，带攻击）
   private heroOp!: UIOpacity;
+  private legsNode!: Node;
+  private legsSp!: Sprite;          // 下半身腿（步战赵云）
+  private upperFrames: SpriteFrame[] = [];
+  private legsFrames: SpriteFrame[] = [];
+  private footNode!: Node;          // 步战赵云完整身体（走路/待机用，不拼接）
+  private footSp!: Sprite;
+  private footFullFrames: SpriteFrame[] = [];
+  // 敌人精灵（轻步兵）：像 Boss 一样用精灵节点，替代纯代码像素兵
+  private infantryFrames: SpriteFrame[] = [];
+  private monPool: { node: Node; sp: Sprite; op: UIOpacity }[] = [];
+  private readonly INF_SCALE = 1.5;      // 轻步兵精灵放大
+  private readonly DISMOUNT = false;   // 下马实验：只用骑士上半身 + 程序火柴腿（false=骑马版）
+  private readonly LEG_LEN = 40;
+  private torsoFrames: SpriteFrame[] = [];
+  // Boss 精灵（许褚）
+  private readonly BOSS_ROW = 1;
+  private readonly BOSS_SCALE = 3.4;
+  private bossFrames: SpriteFrame[] = [];
+  private bossNode!: Node;
+  private bossHeadNode!: Node;
+  private bossSp!: Sprite;
+  private bossOp!: UIOpacity;
   private zyFrames: SpriteFrame[] = [];    // 赵云侧面 4 帧
 
   private bgG!: Graphics;
   private stageG!: Graphics;
+  private fgG!: Graphics;   // 前景层（主角之上、暗角之下）
+  private layers: { tiles: Node[]; w: number; par: number; baseY: number; dispH: number }[] = [];   // 视差背景层（远→近）
+  private bgCache: Record<string, SpriteFrame> = {};   // 背景图缓存（换关不重复加载）
+  private curBiome = -1;   // 当前已应用的背景组，-1=未设
+  // 卷屏走路换景：老场景左滑出、新场景右滑入
+  private transActive = false;
+  private transP = 0;        // 换景进度 0→1
+  private transFrom = 0;
+  private transTo = 0;
   private scoreLbl!: Label;
   private zoneLbl!: Label;
   private hintLbl!: Label;
@@ -99,6 +165,53 @@ export class BattleScene extends Component {
   private sparks: Spark[] = [];
   private bloods: Blood[] = [];
   private waves: Wave[] = [];
+  private arrows: Arrow[] = [];
+  private drops: Drop[] = [];
+  private flashes: { x: number; y: number; life: number; max: number }[] = [];   // 冲击白光
+  private dmgNums: DmgNum[] = [];
+  private dmgPoolFree: Node[] = [];
+  private dmgLayer!: Node;         // 伤害数字容器
+  private coins = 0;
+  private comboCount = 0;
+  private comboT = 0;
+  private comboX = 0;   // 连击提示位置（最近命中点，世界坐标）
+  private comboY = 0;
+  private coinLbl!: Label;
+  private comboLbl!: Label;
+
+  // 局内成长
+  private heroLevel = 1;
+  private xp = 0;
+  private xpNext = 30;
+  private pendingLevels = 0;
+  private choosing = false;
+  private killHeal = 0;
+  private specialCdCur = 1.2;
+  private baseAtk = 40;
+  private baseSpeed = 320;
+  private levelLbl!: Label;
+  private upgradePanel!: Node;
+  private cardTitle: Label[] = [];
+  private cardDesc: Label[] = [];
+  private cardApply: (() => void)[] = [];
+  private bossSpawned = false;
+
+  private readonly UPGRADES: { name: string; desc: string; apply: () => void }[] = [
+    { name: '力大无穷', desc: '攻击 +25%', apply: () => { this.attackDmg *= 1.25; } },
+    { name: '铁骨', desc: '最大生命+30 并回满', apply: () => { this.hero.hpMax += 30; this.hero.hp = this.hero.hpMax; } },
+    { name: '疾风步', desc: '移速 +15%', apply: () => { this.heroSpeed *= 1.15; } },
+    { name: '剑气奔涌', desc: '剑气冷却 -25%', apply: () => { this.specialCdCur *= 0.75; } },
+    { name: '嗜血', desc: '击杀回血 +8', apply: () => { this.killHeal += 8; } },
+    { name: '疗伤', desc: '立即回满血', apply: () => { this.hero.hp = this.hero.hpMax; } },
+  ];
+
+  // 兵种：hp倍率/体型/速度/伤害/颜色/远程/金币
+  private readonly KINDS: Record<string, { hpMul: number; scaleMul: number; speed: number; dmg: number; color: number[]; ranged: boolean; coin: number; w: number }> = {
+    foot: { hpMul: 1.0, scaleMul: 1.0, speed: 95, dmg: 9, color: [178, 54, 48], ranged: false, coin: 1, w: 5 },   // 步兵 红
+    shield: { hpMul: 1.9, scaleMul: 1.25, speed: 52, dmg: 13, color: [86, 108, 150], ranged: false, coin: 2, w: 2 }, // 盾兵 蓝厚慢
+    archer: { hpMul: 0.65, scaleMul: 0.95, speed: 72, dmg: 7, color: [92, 150, 92], ranged: true, coin: 2, w: 2 }, // 弓手 绿远程
+    elite: { hpMul: 2.5, scaleMul: 1.4, speed: 108, dmg: 17, color: [150, 66, 156], ranged: false, coin: 4, w: 1 }, // 精英 紫大
+  };
 
   // 氛围浮尘粒子（柳絮/萤火/飘雪，随场景变）
   private motes: { x: number; y: number; vx: number; vy: number; ph: number; r: number }[] = [];
@@ -111,6 +224,9 @@ export class BattleScene extends Component {
   private animT = 0;   // 全局动画时钟（飘带/呼吸等环境动效）
   private over = false;
   private arrowT = 0;
+  private hitStop = 0;      // 顿帧：>0 时全场定格
+  private shakeT = 0;       // 屏幕震动剩余时长
+  private shakeMag = 0;     // 震动幅度
 
   // 镜头 / 关卡
   private camX = 0;
@@ -123,6 +239,7 @@ export class BattleScene extends Component {
     BattleScene.instance = this;
     const W = DESIGN_W, H = DESIGN_H;
     this.groundY = (0.5 - this.groundFy) * H;
+    this.baseAtk = this.attackDmg; this.baseSpeed = this.heroSpeed; this.specialCdCur = this.SPECIAL_CD;
 
     const rootUI = this.getComponent(UITransform) || this.addComponent(UITransform)!;
     rootUI.setContentSize(W, H);
@@ -132,28 +249,116 @@ export class BattleScene extends Component {
     input.on(Input.EventType.KEY_DOWN, this.onKeyDown, this);
     input.on(Input.EventType.KEY_UP, this.onKeyUp, this);
 
-    this.bgG = this.child('bg').addComponent(Graphics);      // 背景每帧重画（视差 + 换场景）
+    this.bgG = this.child('bg').addComponent(Graphics);      // 天空/地面每帧重画
+
+    // 视差背景层（真图，无缝滚动）：远→近，在天空之上、角色之下
+    // 远山画高些（峰顶自然高过中景）、底边压回地平线藏住 → 无空隙
+    this.makeScrollLayer('bg-far-mtn', 380, 0.25, 0);     // 远山（高）
+    this.makeScrollLayer('bg-mid-hills', 300, 0.5, 0);    // 中景丘陵 + 山河牌坊
+    this.makeScrollLayer('bg-near-grass', 180, 0.7, -30); // 近景草坡（角色身后）
+
     this.stageG = this.child('stage').addComponent(Graphics);
 
-    // 主角赵云精灵节点（在 stage 之上、UI 之下）
-    this.heroNode = this.child('hero');
-    const hui = this.heroNode.getComponent(UITransform)!;
-    hui.setContentSize(64, 64); hui.setAnchorPoint(0.5, 0);
-    this.heroSp = this.heroNode.addComponent(Sprite);
-    this.heroSp.sizeMode = Sprite.SizeMode.CUSTOM;
-    this.heroOp = this.heroNode.addComponent(UIOpacity);
-    this.heroNode.active = false;
-    resources.load('zhaoyun-horse/spriteFrame', SpriteFrame, (err, base) => {
-      if (err || !base) { console.warn('赵云贴图加载失败：', err); return; }
-      const tex = base.texture as Texture2D;
-      tex.setFilters(Texture2D.Filter.NEAREST, Texture2D.Filter.NEAREST);   // 像素点采样
+    // 敌人精灵池（轻步兵）：预建若干精灵节点，逐帧分配给活着的小怪
+    const enemyLayer = this.child('enemies');
+    for (let i = 0; i < 10; i++) {
+      const n = new Node('enemy' + i); n.layer = this.node.layer; n.parent = enemyLayer;
+      const u = n.addComponent(UITransform); u.setContentSize(40, 46); u.setAnchorPoint(0.5, 0);
+      const sp = n.addComponent(Sprite); sp.sizeMode = Sprite.SizeMode.CUSTOM;
+      const op = n.addComponent(UIOpacity);
+      n.active = false;
+      this.monPool.push({ node: n, sp, op });
+    }
+    resources.load('enemy-infantry/spriteFrame', SpriteFrame, (e, base) => {
+      if (e || !base) { console.warn('轻步兵贴图加载失败：', e); return; }
+      const tex = base.texture as Texture2D; tex.setFilters(Texture2D.Filter.NEAREST, Texture2D.Filter.NEAREST);
+      const ROW = 1;   // 侧面行走行
       for (let c = 0; c < 4; c++) {
         const sf = new SpriteFrame(); sf.texture = tex;
-        sf.rect = new Rect(c * 64, this.HERO_ROW * 64, 64, 64);
-        this.zyFrames.push(sf);
+        sf.rect = new Rect(c * 48 + 4, ROW * 64 + 10, 40, 46);   // x4~44,y10~56 全身
+        this.infantryFrames.push(sf);
       }
-      this.heroSp.spriteFrame = this.zyFrames[3];
     });
+
+    // Boss 精灵（许褚，大刀上劈）：在角色层，默认隐藏
+    this.bossNode = this.child('boss');
+    this.bossNode.getComponent(UITransform)!.setContentSize(64, 64);
+    this.bossNode.getComponent(UITransform)!.setAnchorPoint(0.5, 0.156);   // 锚点在脚（帧底上方10px）→ 对齐地平线
+    this.bossSp = this.bossNode.addComponent(Sprite);
+    this.bossSp.sizeMode = Sprite.SizeMode.CUSTOM;
+    this.bossOp = this.bossNode.addComponent(UIOpacity);
+    this.bossNode.active = false;
+    resources.load('enemy-xuchu/spriteFrame', SpriteFrame, (e, base) => {
+      if (e || !base) { console.warn('许褚贴图加载失败：', e); return; }
+      const tex = base.texture as Texture2D;
+      tex.setFilters(Texture2D.Filter.NEAREST, Texture2D.Filter.NEAREST);
+      for (let c = 0; c < 4; c++) {
+        const sf = new SpriteFrame(); sf.texture = tex;
+        sf.rect = new Rect(c * 64, this.BOSS_ROW * 64, 64, 64);
+        this.bossFrames.push(sf);
+      }
+      // 切头做子节点 → 挨揍时单独放大
+      const hSf = new SpriteFrame(); hSf.texture = tex;
+      hSf.rect = new Rect(3 * 64 + 18, this.BOSS_ROW * 64 + 10, 27, 20);   // 待机帧内头部
+      this.bossHeadNode = new Node('bosshead');
+      this.bossHeadNode.layer = this.node.layer; this.bossHeadNode.parent = this.bossNode;
+      const bhu = this.bossHeadNode.addComponent(UITransform); bhu.setContentSize(27, 20); bhu.setAnchorPoint(0.5, 0.5);
+      const bhsp = this.bossHeadNode.addComponent(Sprite); bhsp.sizeMode = Sprite.SizeMode.CUSTOM; bhsp.spriteFrame = hSf;
+      this.bossHeadNode.setPosition(-1, 34, 0);
+    });
+
+    // 主角 = 骑马赵云上半身(带刺枪攻击) + 步战赵云腿（拼接的下马赵云）
+    this.heroNode = this.child('hero');
+    this.heroNode.getComponent(UITransform)!.setAnchorPoint(0.5, 0);
+    this.heroOp = this.heroNode.addComponent(UIOpacity);
+    this.heroNode.active = false;
+    // 下半身（步战腿）
+    this.legsNode = new Node('herolegs'); this.legsNode.layer = this.node.layer; this.legsNode.parent = this.heroNode;
+    const lu = this.legsNode.addComponent(UITransform); lu.setContentSize(32, 28); lu.setAnchorPoint(0.5, 0);
+    this.legsSp = this.legsNode.addComponent(Sprite); this.legsSp.sizeMode = Sprite.SizeMode.CUSTOM;
+    this.legsNode.setPosition(0, 0, 0);
+    // 上半身（骑马赵云，带攻击）—— 盖在腿上、腰部对接
+    const upperNode = new Node('heroupper'); upperNode.layer = this.node.layer; upperNode.parent = this.heroNode;
+    const uu = upperNode.addComponent(UITransform); uu.setContentSize(52, 22); uu.setAnchorPoint(0.5, 0);
+    this.heroSp = upperNode.addComponent(Sprite); this.heroSp.sizeMode = Sprite.SizeMode.CUSTOM;
+    upperNode.setPosition(-6, 26, 0);   // x-6:躯干对到腿上; y26:腰(裁剪底=y22)压到腿顶(28)、略重叠对接
+    // 步战赵云完整身体（走路/待机用；不拼接）
+    this.footNode = new Node('herofoot'); this.footNode.layer = this.node.layer; this.footNode.parent = this.heroNode;
+    const fu = this.footNode.addComponent(UITransform); fu.setContentSize(40, 44); fu.setAnchorPoint(0.5, 0);
+    this.footSp = this.footNode.addComponent(Sprite); this.footSp.sizeMode = Sprite.SizeMode.CUSTOM;
+    this.footNode.setPosition(1, 0, 0);
+    // 骑马赵云上半身帧（第1行，去马；x22~54,y0~34）
+    resources.load('zhaoyun-horse/spriteFrame', SpriteFrame, (err, base) => {
+      if (err || !base) { console.warn('骑马赵云加载失败：', err); return; }
+      const tex = base.texture as Texture2D; tex.setFilters(Texture2D.Filter.NEAREST, Texture2D.Filter.NEAREST);
+      for (let c = 0; c < 4; c++) {
+        const sf = new SpriteFrame(); sf.texture = tex;
+        sf.rect = new Rect(c * 64 + 2, this.HERO_ROW * 64, 52, 22);   // 宽52含整杆枪; 高22只留头+身+枪,砍掉下面的马
+        this.upperFrames.push(sf);
+      }
+      this.heroSp.spriteFrame = this.upperFrames[3];
+    });
+    // 步战赵云腿（第1行下半身；x8~40,y30~58）
+    resources.load('zhaoyun-foot/spriteFrame', SpriteFrame, (err, base) => {
+      if (err || !base) { console.warn('步战赵云加载失败：', err); return; }
+      const tex = base.texture as Texture2D; tex.setFilters(Texture2D.Filter.NEAREST, Texture2D.Filter.NEAREST);
+      for (let c = 0; c < 2; c++) {
+        const sf = new SpriteFrame(); sf.texture = tex;
+        sf.rect = new Rect(c * 48 + 11, this.HERO_ROW * 64 + 30, 32, 28);   // 居中于腿(x27)
+        this.legsFrames.push(sf);
+      }
+      this.legsSp.spriteFrame = this.legsFrames[0];
+      // 完整身体 4 帧（x4~44,y13~57；走路循环）
+      for (let c = 0; c < 4; c++) {
+        const sf = new SpriteFrame(); sf.texture = tex;
+        sf.rect = new Rect(c * 48 + 4, this.HERO_ROW * 64 + 13, 40, 44);
+        this.footFullFrames.push(sf);
+      }
+      this.footSp.spriteFrame = this.footFullFrames[0];
+    });
+
+    // 前景层（主角之上、暗角之下）：每帧重画
+    this.fgG = this.child('foreground').addComponent(Graphics);
 
     // 电影暗角（压暗四周，聚焦中央；盖在角色之上、UI 之下，只画一次）
     const vg = this.child('vignette').addComponent(Graphics);
@@ -169,9 +374,15 @@ export class BattleScene extends Component {
 
     this.initMotes();
 
+    // 伤害数字容器（在角色之上）
+    this.dmgLayer = this.child('dmglayer');
+
     this.makeLabel('⚔ 闯 关 打 怪 ⚔', 0, H / 2 - 80, 38, new Color(255, 225, 150));
     this.zoneLbl = this.makeLabel('', 0, H / 2 - 130, 30, new Color(255, 235, 190));
     this.scoreLbl = this.makeLabel('', 0, H / 2 - 172, 28, new Color(255, 240, 200));
+    this.coinLbl = this.makeLabel('', W / 2 - 90, H / 2 - 130, 30, new Color(250, 210, 90));
+    this.comboLbl = this.makeLabel('', 0, H / 2 - 245, 34, new Color(255, 180, 90));
+    this.comboLbl.node.active = false;
     this.hintLbl = this.makeLabel('移动 A·D　跳 W/↑　攻击(连按3下→跳劈)　剑气 K', 0, H / 2 - 210, 22, new Color(200, 200, 210));
 
     // 「前进 →」提示（清关后出现，update 里做缩放呼吸）
@@ -214,6 +425,8 @@ export class BattleScene extends Component {
 
   private startGame() {
     this.camX = 0; this.zone = 0; this.zoneState = 'fight'; this.targetCam = 0;
+    this.curBiome = -1; this.transActive = false; this.applyBiome(0);   // 复位背景组到第一组
+    this.preloadAllBiomes();   // 预载各组，走路换景才有得滑
     this.waveRemaining = this.waveCount(0);
     this.hero = {
       x: -60, lane: 0, scale: 1.25, dir: 1,
@@ -225,6 +438,16 @@ export class BattleScene extends Component {
       jumping: false, jmpPre: 0, jmpLand: 0,
     };
     this.monsters = []; this.sparks = []; this.bloods = []; this.waves = [];
+    this.arrows = []; this.drops = []; this.flashes = [];
+    this.hitStop = 0; this.shakeT = 0; this.shakeMag = 0; this.node.setPosition(0, 0, 0);
+    for (const d of this.dmgNums) { d.n.active = false; this.dmgPoolFree.push(d.n); }
+    this.dmgNums = [];
+    this.coins = 0; this.comboCount = 0; this.comboT = 0;
+    // 成长复位（攻击/移速回到基础值）
+    this.heroLevel = 1; this.xp = 0; this.xpNext = 30; this.pendingLevels = 0;
+    this.choosing = false; this.killHeal = 0; this.bossSpawned = false;
+    this.attackDmg = this.baseAtk; this.heroSpeed = this.baseSpeed; this.specialCdCur = this.SPECIAL_CD;
+    if (this.upgradePanel) this.upgradePanel.active = false;
     this.score = 0; this.spawnT = 0; this.over = false;
     this.leftHeld = this.rightHeld = false;
     this.banner.active = false; this.restartBtn.active = false; this.arrow.active = false;
@@ -232,6 +455,7 @@ export class BattleScene extends Component {
 
   private waveCount(zone: number): number { return Math.min(9, 4 + zone); }
   private theme(): Theme { return this.THEMES[this.zone % this.THEMES.length]; }
+  private timeOfDay() { return this.TIMES[this.zone % this.TIMES.length]; }
   private sX(wx: number): number { return wx - this.camX; }   // 世界→屏幕
 
   // ---------- 键盘 ----------
@@ -260,14 +484,14 @@ export class BattleScene extends Component {
 
   // 普通跳跃：先蹲蓄力 → 起身拉直腾空 → 下降 → 落地缓冲下蹲
   private heroJump() {
-    if (this.over || this.zoneState === 'scroll') return;
+    if (this.over || this.zoneState === 'scroll' || this.choosing) return;
     const h = this.hero;
     if (h.jumping || h.attacking || h.preJump > 0 || h.landT > 0 || this.airborne()) return;
     h.jumping = true; h.jmpPre = this.JUMP_PRE; h.jmpLand = 0;
   }
 
   private heroSwing() {
-    if (this.over || this.zoneState === 'scroll' || this.airborne() || this.hero.jumping) return;
+    if (this.over || this.zoneState === 'scroll' || this.airborne() || this.hero.jumping || this.choosing) return;
     const h = this.hero;
     if (h.atkTimer < this.SWING_DUR + this.HERO_ATK_COOLDOWN) return;   // 还在挥
     // 连招：窗口内再点 → 下一段，否则从头
@@ -287,12 +511,20 @@ export class BattleScene extends Component {
   }
 
   private heroSpecial() {
-    if (this.over || this.zoneState === 'scroll' || this.airborne() || this.hero.jumping) return;
+    if (this.over || this.zoneState === 'scroll' || this.airborne() || this.hero.jumping || this.choosing) return;
     const h = this.hero;
     if (h.specialCd > 0) return;
-    h.specialCd = this.SPECIAL_CD;
+    h.specialCd = this.specialCdCur;
+    // 自动朝最近的活敌发射（没敌人时按当前面朝）
+    let tdir = h.dir, best = 1e9;
+    for (const m of this.monsters) {
+      if (m.state === 'dead') continue;
+      const d = Math.abs(m.x - h.x);
+      if (d < best) { best = d; tdir = m.x >= h.x ? 1 : -1; }
+    }
+    h.dir = tdir;
     this.waves.push({
-      x: h.x + h.dir * 40, y: this.groundY + 90, dir: h.dir,
+      x: h.x + tdir * 40, y: this.groundY + 90, dir: tdir,
       life: 0, max: 1.25, hit: new Set<Monster>(),
     });
     // 顺带摆个挥砍姿势
@@ -306,25 +538,47 @@ export class BattleScene extends Component {
     this.animT += dt;
     this.stepMotes(dt);
 
+    // 屏幕震动（整块偏移，短促衰减）
+    if (this.shakeT > 0) {
+      this.shakeT -= dt;
+      const s = this.shakeMag * Math.max(0, this.shakeT / 0.18);
+      this.node.setPosition((Math.random() - 0.5) * s * 2, (Math.random() - 0.5) * s * 2, 0);
+      if (this.shakeT <= 0) { this.shakeMag = 0; this.node.setPosition(0, 0, 0); }
+    }
+
+    // 顿帧：命中瞬间全场定格几帧（打击感灵魂）
+    if (this.hitStop > 0) { this.hitStop = Math.max(0, this.hitStop - dt); this.draw(); return; }
+
     if (!this.over) {
       this.stepZone(dt);
       if (this.zoneState !== 'scroll') {
         this.stepHero(dt);
         this.stepMonsters(dt);
+        this.stepArrows(dt);
+        this.stepDrops(dt);
       }
     } else {
       this.hero.deadT += dt;
       for (const m of this.monsters) if (m.state === 'dead') m.deadT += dt;
     }
     if (!this.over && this.zoneState !== 'scroll') this.stepWaves(dt);
+    if (this.comboT > 0) { this.comboT -= dt; if (this.comboT <= 0) this.comboCount = 0; }
     this.cullMonsters();
     this.stepSparks(dt);
     this.stepBloods(dt);
+    this.stepFlashes(dt);
+    this.stepDmgNums(dt);
     this.draw();
 
     const t = this.theme();
-    this.zoneLbl.string = `第 ${this.zone + 1} 关 · ${t.name}`;
+    this.zoneLbl.string = `第 ${this.zone + 1} 关 · ${t.name} · ${this.timeOfDay().name}`;
     this.scoreLbl.string = `得分 ${this.score}　❤ ${Math.max(0, Math.ceil(this.hero.hp))}`;
+    this.coinLbl.string = `金 ${this.coins}`;
+    this.comboLbl.node.active = this.comboCount >= 2;
+    if (this.comboCount >= 2) {
+      this.comboLbl.string = `连击 x${this.comboCount}`;
+      this.comboLbl.node.setPosition(this.sX(this.comboX), this.comboY + 100, 0);   // 显示在被打的敌人上方
+    }
     this.arrow.active = !this.over && this.zoneState === 'cleared';
     if (this.arrow.active) {
       this.arrowT += dt;
@@ -336,19 +590,30 @@ export class BattleScene extends Component {
   // 关卡节奏：刷怪 / 清关判定 / 卷屏换场
   private stepZone(dt: number) {
     if (this.zoneState === 'scroll') {
-      this.camX += (this.targetCam - this.camX) * Math.min(1, dt * 3.2);
+      this.camX = Math.min(this.targetCam, this.camX + this.SCROLL_SPEED * dt);   // 匀速卷屏
       const h = this.hero;
       h.x = this.camX + 130; h.dir = 1; h.state = 'walk'; h.phase += dt * 15;
+      this.transP = Math.min(1, Math.max(0, 1 - (this.targetCam - this.camX) / this.ZONE_SPAN));   // 走路换景进度
       if (this.targetCam - this.camX < 4) {
         this.camX = this.targetCam;
         this.zone++;
         this.zoneState = 'fight';
         this.waveRemaining = this.waveCount(this.zone);
         this.spawnT = 0;
+        this.bossSpawned = false;
+        this.applyBiome(this.zone);   // 落定新关背景组
+        this.transActive = false;
+        this.preloadAllBiomes();      // 确保后续关卡背景已就绪
       }
       return;
     }
     if (this.zoneState === 'fight') {
+      if (this.isBossZone()) {
+        // Boss 关 = 终极 Boss：打死即通关胜利，游戏结束
+        if (!this.bossSpawned) { this.spawnBoss(); this.bossSpawned = true; }
+        else if (this.aliveCount() === 0) this.gameWin();
+        return;
+      }
       this.spawnT += dt;
       const alive = this.aliveCount();
       const interval = Math.max(0.5, 1.1 - this.zone * 0.05);
@@ -362,23 +627,53 @@ export class BattleScene extends Component {
     // cleared：推进判定在 stepHero 里
   }
 
+  private readonly BOSS_ZONE = 9;   // 终极 Boss 在第 10 关（前 9 关小怪，之后见 Boss）
+  private isBossZone(): boolean { return this.zone >= this.BOSS_ZONE; }
+
+  private spawnBoss(): void {
+    const W = DESIGN_W;
+    const hp = 320 + this.zone * 70;
+    this.monsters.push({
+      x: this.camX + W / 2 - 70, lane: 0, scale: 2.9, dir: -1,
+      color: new Color(150, 40, 62), state: 'walk',
+      phase: 0, swing: 0, deadT: 0, fallSign: 1,
+      weapon: false, horns: true, hitT: 0, atkType: 0, jumpY: 0, jumpVy: 0, slamProg: 0, crouch: 0, scaleBoost: 1,
+      hp, hpMax: hp, atkCd: 1.2, vx: 0, attacking: false, struck: false,
+      kind: 'boss', atk: 18 + this.zone * 2, speed: 58, ranged: false, coin: 20,
+      slamState: 'none', slamT: 0, slamCd: this.BOSS_SLAM_CD * 0.6, slamX: 0,
+    });
+  }
+
   private aliveCount(): number {
     let n = 0; for (const m of this.monsters) if (m.state !== 'dead') n++; return n;
   }
 
+  private pickKind(): string {
+    const pool: string[] = [];
+    const add = (k: string, n: number) => { for (let i = 0; i < n; i++) pool.push(k); };
+    add('foot', this.KINDS.foot.w * 2);
+    if (this.zone >= 1) add('shield', this.KINDS.shield.w);   // 弓手去掉
+    if (this.zone >= 3) add('elite', this.KINDS.elite.w);
+    return pool[Math.floor(Math.random() * pool.length)];
+  }
+
   private spawnMonster() {
     const W = DESIGN_W;
+    const kind = this.pickKind();
+    const d = this.KINDS[kind];
     const fromLeft = Math.random() < 0.35;   // 多数从前方(右)来
-    const scale = 0.85 + Math.random() * 0.4;
-    const hpMax = 60 + Math.random() * 40 + this.zone * 12;
+    const scale = (0.9 + Math.random() * 0.25) * d.scaleMul * 1.2;
+    // 除精英外都一刀秒（血量低于最小攻击）；精英耐打随关卡涨
+    const hpMax = kind === 'elite' ? (220 + this.zone * 30) : 34;
     this.monsters.push({
       x: this.camX + (fromLeft ? -W / 2 - 30 : W / 2 + 30),
-      lane: (Math.random() - 0.5) * 70,
+      lane: (Math.random() - 0.5) * 12,   // 几乎同一条线（只留极小错位防重叠）
       scale, dir: fromLeft ? 1 : -1,
-      color: new Color(190, 60, 70), state: 'walk',
+      color: new Color(d.color[0], d.color[1], d.color[2]), state: 'walk',
       phase: Math.random() * 6.28, swing: 0, deadT: 0, fallSign: 1,
       weapon: false, horns: true, hitT: 0, atkType: 0, jumpY: 0, jumpVy: 0, slamProg: 0, crouch: 0, scaleBoost: 1,
-      hp: hpMax, hpMax, atkCd: 0, vx: 0, attacking: false, struck: false,
+      hp: hpMax, hpMax, atkCd: Math.random() * 0.6, vx: 0, attacking: false, struck: false,
+      kind, atk: d.dmg + this.zone, speed: d.speed, ranged: d.ranged, coin: d.coin,
     });
   }
 
@@ -406,6 +701,7 @@ export class BattleScene extends Component {
     if (this.zoneState === 'cleared' && h.x > this.camX + 130) {
       this.zoneState = 'scroll';
       this.targetCam = (this.zone + 1) * this.ZONE_SPAN;
+      this.transActive = false;   // 不做过渡，换关瞬间直接换背景组
     }
 
     if (h.landT > 0) h.landT -= dt;
@@ -461,17 +757,9 @@ export class BattleScene extends Component {
           if (m.state === 'dead') continue;
           const dx = m.x - h.x;
           const inFront = mp.both || dx * h.dir > -30;
-          if (Math.abs(dx) <= mp.range && inFront) {
+          if (Math.abs(dx) <= mp.range + 34 * m.scale && inFront) {   // 含敌人体型/武器 → 碰到就算
             const kdir = mp.both ? (dx >= 0 ? 1 : -1) : h.dir;
-            m.hp -= mp.dmg;
-            m.vx = kdir * mp.knock;
-            if (mp.launch) m.jumpVy = mp.launch;   // 挑飞
-            m.hitT = this.HIT_DUR;
-            const bx = (h.x + m.x) / 2, by = this.groundY + 80 * m.scale;
-            this.sparks.push({ x: bx, y: by, life: 0, max: 0.2 });
-            const killed = m.hp <= 0;
-            this.spawnBlood(bx, by, kdir, killed ? mp.blood + 12 : mp.blood);
-            if (killed) { m.state = 'dead'; m.deadT = 0; m.fallSign = kdir; this.score++; }
+            this.hitMonster(m, mp.dmg, kdir, mp.knock, mp.launch, mp.blood, (h.x + m.x) / 2, this.groundY + 80 * m.scale);
           }
         }
       }
@@ -530,21 +818,226 @@ export class BattleScene extends Component {
     const h = this.hero;
     const mp = this.moveParams(2);
     for (let k = 0; k < 9; k++) this.sparks.push({ x: h.x + (k - 4) * 22, y: this.groundY + 6, life: 0, max: 0.28 });
+    this.addShake(18); this.addHitStop(0.06);   // 跳劈落地：大震 + 顿帧
     for (const m of this.monsters) {
       if (m.state === 'dead') continue;
       const dx = m.x - h.x;
-      if (Math.abs(dx) <= mp.range) {
+      if (Math.abs(dx) <= mp.range + 34 * m.scale) {
         const kdir = dx >= 0 ? 1 : -1;
-        m.hp -= mp.dmg;
-        m.vx = kdir * mp.knock;
-        if (mp.launch) m.jumpVy = mp.launch;
-        m.hitT = this.HIT_DUR;
-        const by = this.groundY + 80 * m.scale;
-        this.sparks.push({ x: m.x, y: by, life: 0, max: 0.2 });
-        const killed = m.hp <= 0;
-        this.spawnBlood(m.x, by, kdir, killed ? mp.blood + 14 : mp.blood);
-        if (killed) { m.state = 'dead'; m.deadT = 0; m.fallSign = kdir; this.score++; }
+        this.hitMonster(m, mp.dmg, kdir, mp.knock, mp.launch, mp.blood, m.x, this.groundY + 80 * m.scale);
       }
+    }
+  }
+
+  private addShake(mag: number) { this.shakeT = 0.18; this.shakeMag = Math.max(this.shakeMag, mag); }
+  private addHitStop(t: number) { this.hitStop = Math.max(this.hitStop, t); }
+  private spawnHitFlash(x: number, y: number) { this.flashes.push({ x, y, life: 0, max: 0.16 }); }
+
+  private stepFlashes(dt: number) {
+    for (let i = this.flashes.length - 1; i >= 0; i--) {
+      this.flashes[i].life += dt;
+      if (this.flashes[i].life >= this.flashes[i].max) this.flashes.splice(i, 1);
+    }
+  }
+
+  private drawFlashes(g: Graphics) {
+    for (const f of this.flashes) {
+      const p = f.life / f.max, a = 1 - p;
+      const sx = this.sX(f.x), sy = f.y;
+      // 白色迸裂星
+      g.strokeColor = new Color(255, 255, 255, Math.round(255 * a));
+      g.lineWidth = 5 * (1 - p * 0.5);
+      const r = 20 + p * 46;
+      for (let k = 0; k < 6; k++) {
+        const ang = k * Math.PI / 3;
+        g.moveTo(sx + Math.cos(ang) * r * 0.35, sy + Math.sin(ang) * r * 0.35);
+        g.lineTo(sx + Math.cos(ang) * r, sy + Math.sin(ang) * r);
+      }
+      g.stroke();
+      // 中心亮核
+      g.fillColor = new Color(255, 255, 255, Math.round(230 * a));
+      g.circle(sx, sy, 9 * (1 - p)); g.fill();
+    }
+  }
+
+  // 统一命中怪：扣血 + 击退/挑飞 + 火花/血 + 伤害数字 + 连击 + 死亡掉落
+  private hitMonster(m: Monster, dmg: number, kdir: number, knock: number, launch: number, bloodN: number, bx: number, by: number) {
+    if (m.state === 'dead') return;
+    // 许褚体型大：命中特效(血/白光/数字)按精灵实际身体中部，别按 80*scale 飞到天上
+    if (m.kind === 'boss') by = this.groundY + m.lane + 96;
+    m.hp -= dmg;
+    m.vx = kdir * knock;
+    if (launch) m.jumpVy = launch;
+    m.hitT = this.HIT_DUR;
+    this.sparks.push({ x: bx, y: by, life: 0, max: 0.2 });
+    this.spawnHitFlash(bx, by);        // 冲击白光
+    this.addDmgNum(bx, by + 40, Math.round(dmg), false);
+    this.addCombo();
+    this.comboX = bx; this.comboY = by;   // 连击提示跟到命中点
+    const killed = m.hp <= 0;
+    this.addHitStop(killed ? 0.085 : 0.045);   // 顿帧：击杀更久
+    this.addShake(killed ? 13 : 6);            // 震屏：击杀更猛
+    this.spawnBlood(bx, by, kdir, killed ? bloodN + 12 : bloodN);
+    if (killed) {
+      m.state = 'dead'; m.deadT = 0; m.fallSign = kdir;
+      this.score += 1 + Math.floor(this.comboCount / 5);
+      this.spawnDrop(m);
+    }
+  }
+
+  private gainXP(amt: number) {
+    this.xp += amt;
+    while (this.xp >= this.xpNext) {
+      this.xp -= this.xpNext;
+      this.heroLevel++;
+      this.xpNext = Math.round(this.xpNext * 1.35);
+      this.pendingLevels++;
+    }
+    if (this.pendingLevels > 0 && !this.choosing) this.openUpgrade();
+  }
+
+  // 打开三选一升级面板（暂停战斗）
+  private openUpgrade() {
+    this.choosing = true;
+    const idx = [...Array(this.UPGRADES.length).keys()];
+    for (let i = idx.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [idx[i], idx[j]] = [idx[j], idx[i]]; }
+    for (let c = 0; c < 3; c++) {
+      const up = this.UPGRADES[idx[c]];
+      this.cardTitle[c].string = up.name;
+      this.cardDesc[c].string = up.desc;
+      this.cardApply[c] = up.apply;
+    }
+    this.upgradePanel.active = true;
+    this.upgradePanel.setSiblingIndex(9999);
+  }
+
+  private chooseCard(c: number) {
+    if (!this.choosing) return;
+    this.cardApply[c]();
+    this.pendingLevels--;
+    if (this.pendingLevels > 0) this.openUpgrade();   // 连升多级继续选
+    else { this.choosing = false; this.upgradePanel.active = false; }
+  }
+
+  // 主角受伤（近战/箭矢共用）
+  private hurtHero(dmg: number, fromX: number) {
+    const h = this.hero;
+    if (h.invuln > 0 || this.airborne() || this.over) return;   // 无敌帧 + 空中免伤
+    h.hp -= dmg;
+    h.invuln = 0.7;
+    h.hitT = this.HIT_DUR;
+    const away = h.x >= fromX ? 1 : -1;
+    h.kx = away * 360;
+    const by = this.groundY + 90;
+    this.sparks.push({ x: h.x, y: by, life: 0, max: 0.22 });
+    this.spawnHitFlash(h.x, by);
+    this.spawnBlood(h.x, by, away, 14);
+    this.addDmgNum(h.x, by + 50, Math.round(dmg), true);   // 红字
+    this.addHitStop(0.06); this.addShake(10);              // 挨打也顿帧+震屏
+    this.comboCount = 0;                                    // 挨打断连击
+    if (h.hp <= 0) { this.spawnBlood(h.x, by, away, 26); this.gameOver(); }
+  }
+
+  private shootArrow(m: Monster) {
+    const h = this.hero;
+    const sy = this.groundY + m.lane + 70 * m.scale;
+    const dxv = h.x - m.x, dyv = (this.groundY + 80) - sy, L = Math.hypot(dxv, dyv) || 1;
+    const sp = 430;
+    this.arrows.push({ x: m.x, y: sy, vx: dxv / L * sp, vy: dyv / L * sp, life: 0 });
+  }
+
+  private stepArrows(dt: number) {
+    const h = this.hero;
+    for (let i = this.arrows.length - 1; i >= 0; i--) {
+      const a = this.arrows[i];
+      a.life += dt; a.x += a.vx * dt; a.y += a.vy * dt;
+      const hy = this.groundY + 80 + h.jumpY;
+      if (Math.abs(a.x - h.x) < 30 && Math.abs(a.y - hy) < 60) {
+        this.hurtHero(6 + Math.floor(this.zone * 0.5), a.x);
+        this.arrows.splice(i, 1); continue;
+      }
+      if (a.life > 3.5 || a.y < this.groundY - 60) this.arrows.splice(i, 1);
+    }
+  }
+
+  private addCombo() { this.comboCount++; this.comboT = 2.0; }
+
+  private spawnDrop(m: Monster) {
+    const n = m.coin + (m.kind === 'boss' ? 0 : 0);
+    for (let i = 0; i < n; i++)
+      this.drops.push({ x: m.x + (Math.random() - 0.5) * 40, y: this.groundY + 45, vy: 140 + Math.random() * 110, life: 0, flying: false, sx: 0, sy: 0 });
+  }
+
+  private stepDrops(dt: number) {
+    const h = this.hero;
+    const px = DESIGN_W / 2 - 90, py = DESIGN_H / 2 - 130;   // 口袋（金币计数处）
+    for (let i = this.drops.length - 1; i >= 0; i--) {
+      const d = this.drops[i];
+      d.life += dt;
+      if (d.flying) {
+        // 飞入口袋：向目标加速插值
+        const k = Math.min(1, dt * 11);
+        d.sx += (px - d.sx) * k; d.sy += (py - d.sy) * k;
+        if (Math.hypot(px - d.sx, py - d.sy) < 26) { this.coins++; this.drops.splice(i, 1); continue; }
+      } else {
+        d.vy -= 640 * dt; d.y += d.vy * dt;
+        if (d.y < this.groundY) { d.y = this.groundY; d.vy = 0; }
+        if (Math.abs(d.x - h.x) < 100 && Math.abs(d.y - (this.groundY + 20)) < 130) {   // 靠近 → 起飞
+          d.flying = true; d.sx = this.sX(d.x); d.sy = d.y + 14;
+        }
+        if (d.life > 10) this.drops.splice(i, 1);
+      }
+    }
+  }
+
+  private addDmgNum(x: number, y: number, val: number, hurt: boolean) {
+    let node = this.dmgPoolFree.pop();
+    if (!node) {
+      node = new Node('dmg'); node.layer = this.node.layer; node.parent = this.dmgLayer;
+      node.addComponent(UITransform);
+      const lb = node.addComponent(Label); lb.lineHeight = 34;
+      const ol = node.addComponent(LabelOutline); ol.color = new Color(20, 12, 10, 255); ol.width = 4;
+    }
+    node.active = true;
+    const lbl = node.getComponent(Label)!;
+    lbl.string = '' + val;
+    lbl.fontSize = hurt ? 34 : 30;
+    lbl.color = hurt ? new Color(255, 90, 80, 255) : new Color(255, 240, 170, 255);
+    this.dmgNums.push({ n: node, life: 0, max: 0.8, x, y });
+  }
+
+  private stepDmgNums(dt: number) {
+    for (let i = this.dmgNums.length - 1; i >= 0; i--) {
+      const d = this.dmgNums[i];
+      d.life += dt; d.y += 66 * dt;
+      d.n.setPosition(this.sX(d.x), d.y, 0);
+      const lbl = d.n.getComponent(Label)!, col = lbl.color;
+      lbl.color = new Color(col.r, col.g, col.b, Math.round(255 * Math.max(0, 1 - d.life / d.max)));
+      if (d.life >= d.max) { d.n.active = false; this.dmgPoolFree.push(d.n); this.dmgNums.splice(i, 1); }
+    }
+  }
+
+  private drawArrows(g: Graphics) {
+    g.strokeColor = new Color(70, 58, 46, 255); g.lineWidth = 3;
+    for (const a of this.arrows) {
+      const sx = this.sX(a.x), L = Math.hypot(a.vx, a.vy) || 1;
+      g.moveTo(sx - a.vx / L * 16, a.y - a.vy / L * 16); g.lineTo(sx, a.y);
+    }
+    g.stroke();
+    g.fillColor = new Color(190, 60, 50, 255);
+    for (const a of this.arrows) { g.circle(this.sX(a.x), a.y, 3); g.fill(); }
+  }
+
+  private drawDrops(g: Graphics) {
+    for (const d of this.drops) {
+      let sx: number, sy: number, r = 13;
+      if (d.flying) { sx = d.sx; sy = d.sy; r = 11; }
+      else { sx = this.sX(d.x); sy = d.y + Math.sin(d.life * 7) * 3 + 15; }
+      g.fillColor = new Color(90, 62, 16, 255); g.circle(sx, sy, r + 2); g.fill();        // 暗边
+      g.fillColor = new Color(255, 200, 55, 255); g.circle(sx, sy, r); g.fill();          // 金
+      g.strokeColor = new Color(160, 108, 20, 255); g.lineWidth = 2;                       // ¥ 竖纹
+      g.moveTo(sx, sy - r * 0.5); g.lineTo(sx, sy + r * 0.5); g.stroke();
+      g.fillColor = new Color(255, 240, 160, 255); g.circle(sx - r * 0.32, sy - r * 0.32, r * 0.34); g.fill(); // 高光
     }
   }
 
@@ -563,42 +1056,150 @@ export class BattleScene extends Component {
       }
       if (m.jumpY > 3) { m.state = 'walk'; continue; }   // 空中随惯性飘，不攻击
 
+      if (m.kind === 'boss') { this.stepBoss(m, dt); continue; }
+
       const dx = h.x - m.x, adx = Math.abs(dx);
       m.dir = dx >= 0 ? 1 : -1;
       m.atkCd -= dt;
 
-      if (adx <= 56) {
-        m.state = 'attack';
-        // 起手：冷却好了才开始一次挥击（先摆动作，不立刻掉血）
-        if (!m.attacking && m.atkCd <= 0) {
-          m.attacking = true; m.struck = false; m.swing = 0; m.atkCd = 1.0;
+      if (m.ranged) {
+        // 弓手：保持中距、射箭；太近后退，太远靠近
+        const near = 200, far = 350;
+        if (adx < near) { m.state = 'walk'; m.phase += dt * 8; m.x -= m.dir * m.speed * dt; }
+        else if (adx > far) { m.state = 'walk'; m.phase += dt * 8; m.x += m.dir * m.speed * dt; }
+        else {
+          m.state = 'attack'; m.swing = Math.min(1, m.swing + dt * 2.5);
+          if (m.atkCd <= 0) { m.atkCd = 1.7; m.swing = 0; this.shootArrow(m); }
         }
+      } else if (adx <= (m.kind === 'boss' ? 120 : 56)) {
+        m.state = 'attack';
+        if (!m.attacking && m.atkCd <= 0) { m.attacking = true; m.struck = false; m.swing = 0; m.atkCd = m.kind === 'boss' ? 1.4 : 1.0; }
         if (m.attacking) {
           m.swing = Math.min(1, m.swing + dt * 3.5);
-          // 挥到位（0.55）才判定命中：此刻主角仍在攻击范围内才掉血
           if (!m.struck && m.swing >= 0.55) {
             m.struck = true;
-            if (adx <= 62 && h.invuln <= 0 && !this.airborne()) {   // 空中(跳劈)免伤
-              h.hp -= 9 + Math.random() * 5;
-              h.invuln = 0.7;
-              h.hitT = this.HIT_DUR;
-              const away = h.x >= m.x ? 1 : -1;
-              h.kx = away * 360;
-              const by = this.groundY + 90;
-              this.sparks.push({ x: h.x, y: by, life: 0, max: 0.22 });
-              this.spawnBlood(h.x, by, away, 14);
-              if (h.hp <= 0) { this.spawnBlood(h.x, by, away, 26); this.gameOver(); }
-            }
+            if (adx <= (m.kind === 'boss' ? 130 : 62)) this.hurtHero(m.atk, m.x);
           }
-          if (m.swing >= 1) m.attacking = false;   // 收招
+          if (m.swing >= 1) m.attacking = false;
         }
       } else {
         m.state = 'walk';
         m.phase += dt * 8;
-        m.x += m.dir * 95 * dt;
+        m.x += m.dir * m.speed * dt;
         m.swing = 0;
-        m.attacking = false;   // 离开攻击范围 → 取消挥击
+        m.attacking = false;
       }
+    }
+  }
+
+  // Boss AI：普通劈砍 + 周期性「预警重击」（蓄力→地面红圈→砸下，翻滚可躲）
+  private stepBoss(m: Monster, dt: number) {
+    const h = this.hero;
+    const dx = h.x - m.x, adx = Math.abs(dx);
+    m.dir = dx >= 0 ? 1 : -1;
+    const st = m.slamState || 'none';
+
+    // 蓄力中：站定举刀，红圈亮起；时间到 → 砸下结算
+    if (st === 'windup') {
+      m.state = 'attack'; m.attacking = false; m.swing = 0;
+      m.slamT = (m.slamT || 0) - dt;
+      if ((m.slamT || 0) <= 0) {
+        m.slamState = 'strike'; m.slamT = 0.45;
+        const tx = m.slamX || m.x;
+        this.addShake(20); this.addHitStop(0.05);
+        this.spawnHitFlash(this.sX(tx), this.groundY + 26);
+        this.spawnHitFlash(this.sX(tx) - 40, this.groundY + 20);
+        this.spawnHitFlash(this.sX(tx) + 40, this.groundY + 20);
+        for (let k = 0; k < 16; k++) this.sparks.push({ x: tx + (k - 8) * 20, y: this.groundY + 6, life: 0, max: 0.4 });
+        // 命中判定：主角在红圈(落点 tx)内且没翻滚/无敌/腾空 → 重伤 + 击飞
+        if (Math.abs(h.x - tx) < this.BOSS_SLAM_R && h.invuln <= 0 && !this.airborne() && h.state !== 'dead') {
+          this.hurtHero(this.BOSS_SLAM_DMG, tx);
+          h.kx = (h.x >= tx ? 1 : -1) * 560;
+        }
+      }
+      return;
+    }
+    // 砸下后短暂收招
+    if (st === 'strike') {
+      m.state = 'attack';
+      m.slamT = (m.slamT || 0) - dt;
+      if ((m.slamT || 0) <= 0) { m.slamState = 'none'; m.slamCd = this.BOSS_SLAM_CD; }
+      return;
+    }
+
+    // 常态：充能重击 + 近身劈砍 / 追人
+    m.slamCd = (m.slamCd || 0) - dt;
+    m.atkCd -= dt;
+    if ((m.slamCd || 0) <= 0 && adx < 360) {   // 起手预警（锁定落点 = 当前主角位置）
+      m.slamState = 'windup'; m.slamT = this.BOSS_SLAM_WINDUP; m.slamX = h.x;
+      m.attacking = false; m.swing = 0; m.state = 'attack';
+      return;
+    }
+    if (adx <= 120) {
+      m.state = 'attack';
+      if (!m.attacking && m.atkCd <= 0) { m.attacking = true; m.struck = false; m.swing = 0; m.atkCd = 1.4; }
+      if (m.attacking) {
+        m.swing = Math.min(1, m.swing + dt * 3.5);
+        if (!m.struck && m.swing >= 0.55) { m.struck = true; if (adx <= 130) this.hurtHero(m.atk, m.x); }
+        if (m.swing >= 1) m.attacking = false;
+      }
+    } else {
+      m.state = 'walk'; m.phase += dt * 8; m.x += m.dir * m.speed * dt; m.swing = 0; m.attacking = false;
+    }
+  }
+
+  // Boss 重击预警：地面危险区（分层暗红底 + 立体亮边 + 向心瞄准环 + 警示刻度），砸下时冲击环 + 裂纹
+  private drawBossWarning(g: Graphics) {
+    const b = this.monsters.find(m => m.kind === 'boss' && m.state !== 'dead');
+    if (!b) return;
+    const st = b.slamState || 'none';
+    const R = this.BOSS_SLAM_R, ky = 0.34;                    // 压扁成地面椭圆
+    const cx = this.sX(b.slamX || b.x), cy = this.groundY + b.lane + 2;
+    const ell = (r: number) => g.ellipse(cx, cy, r, r * ky);   // 地面椭圆快捷
+
+    if (st === 'windup') {
+      const p = 1 - (b.slamT || 0) / this.BOSS_SLAM_WINDUP;   // 0→1 充能
+      const pulse = 0.5 + 0.5 * Math.sin(p * 26);             // 呼吸闪
+      // ① 分层暗红危险底（外淡→内浓，做出"渐变/凹陷"质感）
+      g.fillColor = new Color(60, 8, 6, 60); ell(R); g.fill();
+      g.fillColor = new Color(120, 18, 12, 70); ell(R * 0.82); g.fill();
+      g.fillColor = new Color(180, 34, 22, 80); ell(R * 0.6); g.fill();
+      // ② 内芯蓄能辉光（随充能变亮变大）
+      g.fillColor = new Color(255, 110, 60, Math.round((70 + 120 * p) * (0.7 + 0.3 * pulse)));
+      ell(R * (0.18 + 0.42 * p)); g.fill();
+      // ③ 立体亮边：先粗暗底边，再细亮边压上 → 有厚度
+      g.strokeColor = new Color(70, 10, 8, 200); g.lineWidth = 7; ell(R); g.stroke();
+      g.strokeColor = new Color(255, 90, 66, Math.round(180 + 60 * pulse)); g.lineWidth = 3; ell(R * 0.985); g.stroke();
+      // ④ 向心瞄准环：从外向中心收拢（读秒感），越收越亮
+      const rc = R * (1 - 0.86 * p);
+      g.strokeColor = new Color(255, 226, 150, Math.round(120 + 130 * p)); g.lineWidth = 3; ell(rc); g.stroke();
+      // ⑤ 边缘警示刻度（随充能缓慢旋转）
+      const N = 18, rot = p * 1.4;
+      g.strokeColor = new Color(255, 150, 90, 210); g.lineWidth = 3;
+      for (let i = 0; i < N; i++) {
+        const a = rot + i / N * Math.PI * 2;
+        const r0 = R * 1.0, r1 = R * 1.09;
+        g.moveTo(cx + Math.cos(a) * r0, cy + Math.sin(a) * r0 * ky);
+        g.lineTo(cx + Math.cos(a) * r1, cy + Math.sin(a) * r1 * ky);
+      }
+      g.stroke();
+    } else if (st === 'strike') {
+      const p = 1 - (b.slamT || 0) / 0.45;   // 0→1 冲击扩散
+      const a = 1 - p;
+      // 焦痕（砸点残留暗红）
+      g.fillColor = new Color(40, 6, 4, Math.round(150 * a)); ell(R * 0.7); g.fill();
+      // 冲击环（双环，向外扩散渐隐）
+      g.strokeColor = new Color(255, 240, 205, Math.round(235 * a)); g.lineWidth = 8; ell(R * (0.45 + p * 0.95)); g.stroke();
+      g.strokeColor = new Color(255, 150, 90, Math.round(200 * a)); g.lineWidth = 4; ell(R * (0.2 + p * 1.25)); g.stroke();
+      // 放射裂纹
+      g.strokeColor = new Color(30, 8, 6, Math.round(220 * a)); g.lineWidth = 4;
+      const cr = R * (0.4 + p * 0.9);
+      for (let i = 0; i < 8; i++) {
+        const ang = i / 8 * Math.PI * 2 + 0.2;
+        g.moveTo(cx + Math.cos(ang) * R * 0.12, cy + Math.sin(ang) * R * 0.12 * ky);
+        g.lineTo(cx + Math.cos(ang) * cr, cy + Math.sin(ang) * cr * ky);
+      }
+      g.stroke();
     }
   }
 
@@ -616,15 +1217,16 @@ export class BattleScene extends Component {
   }
 
   private spawnBlood(x: number, y: number, dir: number, amount: number) {
-    const n = Math.round(amount * 1.8);   // 血滴更多
+    const n = Math.round(amount * 4);     // 小而密
     for (let i = 0; i < n; i++) {
-      const speed = 220 + Math.random() * 460;
+      const ang = Math.random() * Math.PI * 2;      // 从身体向四周放射飞溅
+      const sp = 130 + Math.random() * 430;         // 喷得慢一点
       this.bloods.push({
         x, y,
-        vx: dir * (90 + Math.random() * 360) + (Math.random() - 0.5) * 280,
-        vy: 140 + Math.random() * speed,
-        life: 0, max: 0.55 + Math.random() * 0.6,
-        r: 5 + Math.random() * 10,          // 血滴更大
+        vx: Math.cos(ang) * sp + dir * 90,          // 放射 + 略偏击退方向
+        vy: Math.sin(ang) * sp + 120,               // 放射 + 略上（随后落下）
+        life: 0, max: 0.7 + Math.random() * 0.8,
+        r: 3 + Math.random() * 6,                    // 血点小
         shade: Math.random(),
       });
     }
@@ -634,7 +1236,7 @@ export class BattleScene extends Component {
     for (let i = this.bloods.length - 1; i >= 0; i--) {
       const b = this.bloods[i];
       b.life += dt;
-      b.vy -= 1100 * dt;
+      b.vy -= 780 * dt;                 // 重力小一点 → 更慢更飘
       b.x += b.vx * dt; b.y += b.vy * dt;
       if (b.life >= b.max || b.y < this.groundY - 30) this.bloods.splice(i, 1);
     }
@@ -648,24 +1250,31 @@ export class BattleScene extends Component {
       w.x += w.dir * speed * dt;
       for (const m of this.monsters) {
         if (m.state === 'dead' || w.hit.has(m)) continue;
-        if (Math.abs(m.x - w.x) <= 46) {
+        if (Math.abs(m.x - w.x) <= 55 + 24 * m.scale) {   // 碰到即命中（含体型）
           w.hit.add(m);
-          m.hp -= this.attackDmg * 1.2;
-          m.vx = w.dir * 280;
-          m.hitT = this.HIT_DUR;
-          const by = this.groundY + 80 * m.scale;
-          this.sparks.push({ x: m.x, y: by, life: 0, max: 0.2 });
-          const killed = m.hp <= 0;
-          this.spawnBlood(m.x, by, w.dir, killed ? 22 : 12);
-          if (killed) { m.state = 'dead'; m.deadT = 0; m.fallSign = w.dir; this.score++; }
+          this.hitMonster(m, this.attackDmg * 1.2, w.dir, 280, 0, 12, m.x, this.groundY + 80 * m.scale);
         }
       }
       if (w.life >= w.max) this.waves.splice(i, 1);
     }
   }
 
+  // 击败终极 Boss → 通关胜利
+  private gameWin() {
+    if (this.over) return;
+    this.over = true;
+    this.zoneState = 'cleared';
+    this.bannerLbl.color = new Color(255, 224, 130);
+    this.bannerLbl.string = `通关！  击败 Boss · 得分 ${this.score}`;
+    this.banner.active = true;
+    this.restartBtn.active = true;
+    this.banner.setScale(0.3, 0.3, 1);
+    tween(this.banner).to(0.35, { scale: new Vec3(1, 1, 1) }, { easing: 'backOut' }).start();
+  }
+
   private gameOver() {
     this.over = true;
+    this.bannerLbl.color = new Color(255, 120, 110);
     this.hero.state = 'dead'; this.hero.deadT = 0; this.hero.fallSign = 1;
     this.bannerLbl.string = `阵亡！  第 ${this.zone + 1} 关 · 得分 ${this.score}`;
     this.banner.active = true;
@@ -677,18 +1286,24 @@ export class BattleScene extends Component {
   // ---------- 绘制 ----------
   private draw() {
     this.drawBg();
+    this.updateScrollLayers();
     const g = this.stageG;
     g.clear();
+    this.drawSceneTint(g);   // 色调/夜晚压暗：在角色之下，只暗背景
 
-    // 阴影垫底（角色脚下）
+    // 阴影垫底（仅像素兵；赵云/许褚精灵自带影子）
     const h = this.hero;
-    if (h.state !== 'dead') this.drawShadow(g, h.x, 0, 40, h.jumpY);
-    for (const m of this.monsters) if (m.state !== 'dead') this.drawShadow(g, m.x, m.lane, 26 * m.scale, m.jumpY);
+    for (const m of this.monsters) if (m.state !== 'dead' && m.kind !== 'boss') this.drawShadow(g, m.x, m.lane, 26 * m.scale, m.jumpY);
 
+    this.drawBossWarning(g);   // Boss 重击预警红圈（画在地面、角色之下）
+    this.drawDrops(g);   // 掉落物（垫在角色后）
     const drawn = [...this.monsters].sort((a, b) => (a.state === 'dead' ? -1 : 1) - (b.state === 'dead' ? -1 : 1) || b.lane - a.lane);
-    for (const m of drawn) this.drawPixelSoldier(g, m);
+    this.updateEnemySprites(drawn);   // 小怪 = 轻步兵精灵（Boss 单独用精灵）
+    this.updateBossSprite();
     const blink = h.state !== 'dead' && h.invuln > 0 && Math.floor(h.invuln * 20) % 2 === 0;
+    if (this.DISMOUNT && !blink && h.state !== 'dead') this.drawHeroLegs(g);   // 火柴腿（在上半身之后画=垫腰下）
     this.updateHeroSprite(blink);
+    this.drawArrows(g);  // 敌箭（在角色前）
 
     for (const s of this.sparks) {
       const a = 1 - s.life / s.max;
@@ -723,40 +1338,46 @@ export class BattleScene extends Component {
       hArc(g, cx, cy, 24, c - 1.05, c + 1.05, 12); g.stroke();
     }
 
+    this.drawFlashes(g);   // 冲击白光（角色之上）
     this.drawMotes(g);   // 氛围浮尘（在角色之上飘）
     this.drawHeroHp(g);
-    for (const m of this.monsters) if (m.state !== 'dead' && m.hp < m.hpMax) this.drawMonsterHp(g, m);
+    this.drawBossHp(g);
+    for (const m of this.monsters) if (m.state !== 'dead' && m.hp < m.hpMax && m.kind !== 'boss') this.drawMonsterHp(g, m);
+
+    this.drawFg();       // 前景遮挡 + 统一色调（独立图层）
   }
 
-  // 主角赵云精灵：定位/翻转/选帧（玩法状态 → 精灵帧）
+  // 主角 = 骑马上半身(带攻击) + 步战腿：定位/翻转/选帧
   private updateHeroSprite(blink: boolean) {
     const h = this.hero;
-    if (this.zyFrames.length < 4) { this.heroNode.active = false; return; }
+    if (this.upperFrames.length < 4) { this.heroNode.active = false; return; }
     this.heroNode.active = !blink || h.state === 'dead';
 
     const sx = this.sX(h.x);
-    let y = this.groundY + h.jumpY - Math.max(0, h.crouch) * 24;   // 蹲/跳的高度
-    let ang = 0;
-    if (h.state === 'walk') {          // 无走路帧 → 用骑行颠簸模拟
-      const gp = this.animT * 13;
-      y += Math.abs(Math.sin(gp)) * 9; // 上下颠
-      ang = Math.sin(gp) * 3.5;        // 前后轻摇
-    }
-    this.heroNode.setPosition(sx, y, 0);
+    const y = this.groundY + h.jumpY - Math.max(0, h.crouch) * 24;
+    const hk = h.state !== 'dead' && h.hitT > 0 ? Math.min(1, h.hitT / this.HIT_DUR) : 0;
+    const ang = -h.dir * 42 * hk;      // 挨揍后仰
 
     const S = this.SPRITE_SCALE * (h.scaleBoost || 1);
-    // 精灵默认朝左：朝右(dir>=0)时水平翻转
-    this.heroNode.setScale(h.dir >= 0 ? -S : S, S, 1);
+    this.heroNode.setPosition(sx, y, 0);
+    this.heroNode.setScale(h.dir >= 0 ? -S : S, S, 1);   // 默认朝左，朝右翻转
 
-    // 选帧：攻击→按进度播 0..3（第2帧带枪气），其余→待机/骑行帧
-    let idx = 3;
-    if (h.state === 'attack') {
+    // 攻击 → 拼接(骑马上半身+步战腿)；走路/待机 → 步战赵云完整身体
+    const attacking = h.state === 'attack';
+    this.heroSp.node.active = attacking;
+    this.legsSp.node.active = attacking;
+    this.footNode.active = !attacking && this.footFullFrames.length >= 4;
+    if (attacking) {
       const p = h.atkType === 2 ? h.slamProg : h.swing;
-      idx = Math.max(0, Math.min(3, Math.floor(p * 4)));
+      const idx = Math.max(0, Math.min(3, Math.floor(p * 4)));
+      this.heroSp.spriteFrame = this.upperFrames[idx];
+      if (this.legsFrames.length >= 2) this.legsSp.spriteFrame = this.legsFrames[0];
+    } else if (this.footFullFrames.length >= 4) {
+      // 走路循环 4 帧，待机固定帧0
+      const fi = h.state === 'walk' ? Math.floor(this.animT * 8) % 4 : 0;
+      this.footSp.spriteFrame = this.footFullFrames[fi];
     }
-    this.heroSp.spriteFrame = this.zyFrames[idx];
 
-    // 死亡：倾倒 + 淡出
     if (h.state === 'dead') {
       this.heroNode.angle = (h.dir >= 0 ? -1 : 1) * Math.min(80, h.deadT * 170);
       this.heroOp.opacity = Math.max(0, Math.round(255 * (1 - h.deadT / 1.4)));
@@ -764,6 +1385,95 @@ export class BattleScene extends Component {
       this.heroNode.angle = ang;
       this.heroOp.opacity = 255;
     }
+  }
+
+  // 下马火柴腿（程序画，会走）
+  private drawHeroLegs(g: Graphics) {
+    const h = this.hero;
+    const S = this.SPRITE_SCALE / 1.8;
+    const hx = this.sX(h.x);
+    const hipY = this.groundY + h.jumpY + this.LEG_LEN - Math.max(0, h.crouch) * 20;
+    const footY = this.groundY + h.jumpY;
+    const kneeY = (hipY + footY) / 2;
+    const sw = h.state === 'walk' ? Math.sin(h.phase) : 0;
+    const f1x = hx + (10 + sw * 13) * S;
+    const f2x = hx + (-10 - sw * 13) * S;
+    const lift1 = Math.max(0, Math.cos(h.phase)) * 6 * S;   // 抬脚
+    const lift2 = Math.max(0, -Math.cos(h.phase)) * 6 * S;
+    const legBlue = new Color(46, 68, 122, 255), trimY = new Color(230, 206, 66, 255), bootC = new Color(28, 40, 70, 255);
+    const k1x = (hx + f1x) / 2 + 3 * S, k2x = (hx + f2x) / 2 - 3 * S;
+    g.lineCap = Graphics.LineCap.ROUND; g.lineJoin = Graphics.LineJoin.ROUND;
+    // 腿（粗，蓝底）
+    g.strokeColor = legBlue; g.lineWidth = 17 * S;
+    g.moveTo(hx, hipY); g.lineTo(k1x, kneeY); g.lineTo(f1x, footY + lift1); g.stroke();
+    g.moveTo(hx, hipY); g.lineTo(k2x, kneeY); g.lineTo(f2x, footY + lift2); g.stroke();
+    // 黄色描边条（配蓝甲黄纹）
+    g.strokeColor = trimY; g.lineWidth = 3.5 * S;
+    g.moveTo(hx, hipY); g.lineTo(k1x, kneeY); g.lineTo(f1x, footY + lift1); g.stroke();
+    g.moveTo(hx, hipY); g.lineTo(k2x, kneeY); g.lineTo(f2x, footY + lift2); g.stroke();
+    // 靴（深蓝，粗）
+    g.strokeColor = bootC; g.lineWidth = 18 * S;
+    g.moveTo(f1x - 6 * S, footY + lift1); g.lineTo(f1x + 8 * S, footY + lift1); g.stroke();
+    g.moveTo(f2x - 6 * S, footY + lift2); g.lineTo(f2x + 8 * S, footY + lift2); g.stroke();
+  }
+
+  // Boss 精灵（许褚）：定位/翻转/选帧/挨揍反应
+  // 小怪 = 轻步兵精灵：从池中取节点，按怪的位置/朝向/状态摆放
+  private updateEnemySprites(drawn: Monster[]) {
+    const ready = this.infantryFrames.length >= 4;
+    let pi = 0;
+    if (ready) {
+      for (const m of drawn) {
+        if (m.kind === 'boss' || pi >= this.monPool.length) continue;
+        const e = this.monPool[pi++];
+        e.node.active = true;
+        const hk = m.hitT > 0 ? Math.min(1, m.hitT / this.HIT_DUR) : 0;
+        const lunge = m.state === 'attack' ? Math.sin(Math.min(1, m.swing) * Math.PI) * 14 : 0;   // 攻击前冲
+        e.node.setPosition(this.sX(m.x) + m.dir * lunge, this.groundY + m.lane + m.jumpY, 0);
+        // 选帧：走路循环 / 攻击定帧 / 待机
+        let f = 0;
+        if (m.state === 'walk') f = Math.floor(m.phase * 0.6) % 4;
+        else if (m.state === 'attack') f = 2;
+        e.sp.spriteFrame = this.infantryFrames[((f % 4) + 4) % 4];
+        const S = this.INF_SCALE * m.scale * (1 + 0.05 * hk);
+        e.node.setScale(m.dir >= 0 ? -S : S, S, 1);   // 精灵默认朝左 → 朝右翻转
+        // 挨揍后仰 / 死亡倒地 / 攻击前倾
+        let ang = m.dir * 30 * hk, op = 255;
+        if (m.state === 'attack') ang = -m.dir * 12 * Math.sin(Math.min(1, m.swing) * Math.PI);
+        if (m.state === 'dead') { ang = (m.dir >= 0 ? 1 : -1) * Math.min(85, m.deadT * 160); op = Math.max(0, Math.round(255 * (1 - m.deadT / 1.3))); }
+        e.node.angle = ang;
+        e.op.opacity = op;
+      }
+    }
+    for (; pi < this.monPool.length; pi++) this.monPool[pi].node.active = false;
+  }
+
+  private updateBossSprite() {
+    if (this.bossFrames.length < 4) { this.bossNode.active = false; return; }
+    const b = this.monsters.find(m => m.kind === 'boss');
+    if (!b) { this.bossNode.active = false; return; }
+    this.bossNode.active = true;
+    // 蓄力重击：先鼓力上抬(锚定)，砸下瞬间下沉 → 强化打击感
+    let lift = 0, popX = 0;
+    if (b.slamState === 'windup') { const p = 1 - (b.slamT || 0) / this.BOSS_SLAM_WINDUP; lift = 26 * p; popX = 1 + 0.12 * p; }
+    else if (b.slamState === 'strike') { const p = 1 - (b.slamT || 0) / 0.45; lift = -8 * (1 - p); popX = 1; }
+    this.bossNode.setPosition(this.sX(b.x), this.groundY + b.lane + b.jumpY + lift, 0);
+
+    const hk = b.hitT > 0 ? Math.min(1, b.hitT / this.HIT_DUR) : 0;
+    let f = 3;   // 待机/收招
+    if (b.slamState === 'windup') f = 0;          // 举刀蓄力
+    else if (b.slamState === 'strike') f = 3;     // 劈下
+    else if (b.state === 'attack') f = Math.max(0, Math.min(3, Math.floor(b.swing * 4)));   // 举刀→劈下
+    this.bossSp.spriteFrame = this.bossFrames[f];
+
+    const S = this.BOSS_SCALE * (1 + 0.06 * hk) * (popX || 1);   // 精灵默认朝左：朝右翻转
+    this.bossNode.setScale(b.dir >= 0 ? -S : S, S, 1);
+
+    let ang = b.dir * 26 * hk, op = 255;           // 挨揍后仰
+    if (b.state === 'dead') { ang = (b.dir >= 0 ? 1 : -1) * Math.min(80, b.deadT * 150); op = Math.max(0, Math.round(255 * (1 - b.deadT / 1.3))); }
+    this.bossNode.angle = ang;
+    this.bossOp.opacity = op;
+    if (this.bossHeadNode) this.bossHeadNode.active = false;   // 去掉 Boss 头变大（只用精灵自带的头）
   }
 
   // 像素方块敌兵（程序画，红甲，配合像素风）
@@ -776,15 +1486,26 @@ export class BattleScene extends Component {
     const hit = m.hitT > 0;
 
     const skin = new Color(233, 190, 150, alpha);
-    const armor = hit ? new Color(255, 255, 255, alpha) : new Color(178, 54, 48, alpha);
-    const armorD = new Color(118, 32, 30, alpha);
+    const armor = hit ? new Color(255, 255, 255, alpha) : new Color(m.color.r, m.color.g, m.color.b, alpha);
+    const armorD = new Color(Math.round(m.color.r * 0.62), Math.round(m.color.g * 0.62), Math.round(m.color.b * 0.62), alpha);
     const dark = new Color(42, 34, 40, alpha);
     const steel = new Color(184, 188, 200, alpha);
     const plume = new Color(226, 62, 52, alpha);
 
-    // 中心对齐方块：cx=水平偏移, by=底边离地高, w/h=尺寸
+    // 挨揍：绕脚旋转整个身体（连腿一起后仰）
+    const hk = m.hitT > 0 ? Math.min(1, m.hitT / this.HIT_DUR) : 0;
+    const A = dir * 0.6 * hk;   // 后仰角(弧度)
+    const ca = Math.cos(A), sa = Math.sin(A);
+    // 中心对齐方块：cx=水平偏移, by=底边离地高, w/h=尺寸；整块绕脚(sx,gy)旋转
     const R = (cx: number, by: number, w: number, h: number, c: Color) => {
-      g.fillColor = c; g.rect(sx + cx - w / 2, gy + by, w, h); g.fill();
+      g.fillColor = c;
+      const pts = [[cx - w / 2, by], [cx + w / 2, by], [cx + w / 2, by + h], [cx - w / 2, by + h]];
+      for (let i = 0; i < 4; i++) {
+        const lx = pts[i][0], ly = pts[i][1];
+        const X = sx + (lx * ca - ly * sa), Y = gy + (lx * sa + ly * ca);
+        if (i === 0) g.moveTo(X, Y); else g.lineTo(X, Y);
+      }
+      g.close(); g.fill();
     };
     // 死亡整体压扁下沉
     const dcompress = m.state === 'dead' ? Math.min(1, m.deadT * 2) : 0;
@@ -798,18 +1519,40 @@ export class BattleScene extends Component {
     R(0, 2.1 * u * sy, 3.0 * u, 2.9 * u * sy, armor);
     R(0, 2.1 * u * sy, 3.0 * u, 0.5 * u * sy, armorD);          // 腰带
     R(0, 4.7 * u * sy, 3.4 * u, 0.8 * u * sy, armorD);          // 护肩
-    // 头 + 盔
-    R(0, 5.3 * u * sy, 2.0 * u, 1.9 * u * sy, skin);
-    R(0.42 * u * dir, 6.0 * u * sy, 0.42 * u, 0.42 * u, dark);  // 眼
-    R(0, 6.7 * u * sy, 2.4 * u, 0.9 * u, armorD);               // 盔
-    R(0, 7.4 * u * sy, 0.6 * u, 0.9 * u, plume);                // 盔缨
-    // 长枪（朝向 dir）：攻击时前刺
-    const thrust = m.attacking ? m.swing * 2.4 * u : 0;
-    const spLen = 3.4 * u + thrust;
-    const spY = gy + 4.1 * u * sy;
-    const spX = dir > 0 ? sx + 1.0 * u : sx - 1.0 * u - spLen;
-    g.fillColor = steel; g.rect(spX, spY, spLen, 0.36 * u); g.fill();
-    g.fillColor = plume; g.rect(dir > 0 ? spX + spLen - 0.5 * u : spX, spY - 0.15 * u, 0.5 * u, 0.66 * u); g.fill();  // 红缨枪头
+    // 头 + 盔（挨揍时整颗头放大，盔/缨随头上移）
+    const hg = 1 + 0.9 * hk, hb = 5.3 * u * sy;
+    const hUp = (by: number) => hb + (by - hb) * hg;
+    R(0, hb, 2.0 * u * hg, 1.9 * u * sy * hg, skin);
+    R(0.42 * u * dir * hg, hUp(6.0 * u * sy), 0.42 * u * hg, 0.42 * u * hg, dark);  // 眼
+    R(0, hUp(6.7 * u * sy), 2.4 * u * hg, 0.9 * u * hg, armorD);                    // 盔
+    R(0, hUp(7.4 * u * sy), 0.6 * u * hg, 0.9 * u * hg, plume);                     // 盔缨
+    // 细节点缀：胸甲高光 + 盔前檐 + 怒眉（不那么平）
+    const armorL = new Color(Math.min(255, m.color.r + 48), Math.min(255, m.color.g + 48), Math.min(255, m.color.b + 48), alpha);
+    R(0, 4.3 * u * sy, 2.6 * u, 0.5 * u * sy, armorL);                              // 胸甲高光条
+    R(-0.6 * u, 2.3 * u * sy, 0.55 * u, 2.4 * u * sy, armorD);                      // 侧身暗部
+    R(0, hUp(6.42 * u * sy), 2.55 * u * hg, 0.32 * u * hg, dark);                   // 盔前檐
+    R(0.42 * u * dir * hg, hUp(6.5 * u * sy), 0.6 * u * hg, 0.2 * u * hg, dark);    // 怒眉
+    // 砍刀：举刀 → 从上往下劈（手臂+刀绕肩旋转）；本地点经 P 变换含后仰
+    const P = (lx: number, ly: number): [number, number] => [sx + (lx * ca - ly * sa), gy + (lx * sa + ly * ca)];
+    const s01 = m.attacking ? m.swing : 0;
+    const baDeg = m.attacking ? 140 - 195 * s01 : 58;   // 举高(上) → 劈下(前下)
+    const ba = baDeg * Math.PI / 180;
+    const pvx = dir * 0.2 * u, pvy = 4.75 * u * sy;      // 肩部支点
+    const ux = dir * Math.cos(ba), uy = Math.sin(ba);
+    const armLen = 1.5 * u, bladeLen = 2.7 * u;
+    const hx = pvx + armLen * ux, hy = pvy + armLen * uy;              // 手
+    const tx = pvx + (armLen + bladeLen) * ux, ty = pvy + (armLen + bladeLen) * uy;  // 刀尖
+    g.lineCap = Graphics.LineCap.ROUND;
+    // 手臂
+    const [ax0, ay0] = P(pvx, pvy), [ax1, ay1] = P(hx, hy);
+    g.strokeColor = armor; g.lineWidth = 0.85 * u; g.moveTo(ax0, ay0); g.lineTo(ax1, ay1); g.stroke();
+    // 刀身（宽砍刀）
+    const [bx0, by0] = P(hx, hy), [bx1, by1] = P(tx, ty);
+    g.strokeColor = new Color(70, 74, 84, alpha); g.lineWidth = 0.9 * u; g.moveTo(bx0, by0); g.lineTo(bx1, by1); g.stroke();  // 刀背描边
+    g.strokeColor = steel; g.lineWidth = 0.6 * u; g.moveTo(bx0, by0); g.lineTo(bx1, by1); g.stroke();                        // 刀刃
+    // 握刀的手 + 护手
+    g.fillColor = new Color(60, 46, 34, alpha); g.circle(ax1, ay1, 0.5 * u); g.fill();   // 护手
+    g.fillColor = skin; g.circle(ax1, ay1, 0.36 * u); g.fill();                          // 手
   }
 
   // 脚下阴影（把角色"踩"在地上，跳起时缩小变淡）
@@ -845,13 +1588,11 @@ export class BattleScene extends Component {
   }
 
   private drawMotes(g: Graphics) {
-    const name = this.theme().name;
+    const t = this.timeOfDay().name;
     let col: number[];
-    if (name === '密林') col = [200, 240, 150];        // 萤火
-    else if (name === '雪原') col = [240, 246, 255];   // 飘雪
-    else if (name === '城郊') col = [205, 195, 175];   // 浮尘
-    else if (name === '敌营') col = [255, 150, 80];    // 火星
-    else col = [238, 246, 232];                        // 柳絮
+    if (t === '夜晚') col = [225, 240, 200];        // 萤火/星
+    else if (t === '黄昏') col = [255, 205, 140];   // 暮光尘
+    else col = [240, 246, 232];                     // 柳絮/浮尘
     for (const m of this.motes) {
       const a = 0.35 + 0.35 * Math.sin(m.ph);
       g.fillColor = new Color(col[0], col[1], col[2], Math.round(200 * a));
@@ -866,45 +1607,241 @@ export class BattleScene extends Component {
       Math.max(0, Math.min(255, Math.round(c[2] * f))), 255);
   }
 
+  private blend(a: number[], b: number[], t: number): number[] {
+    return [0, 1, 2].map(i => Math.round(a[i] + (b[i] - a[i]) * t));
+  }
+
+  // 一层像素台阶山
+  private mtnLayer(col: number[], par: number, amp: number, baseH: number, ph: number, PX: number) {
+    const g = this.bgG, W = DESIGN_W, gy = this.groundY;
+    g.fillColor = new Color(col[0], col[1], col[2], 255);
+    for (let sx = -W / 2; sx < W / 2; sx += PX) {
+      const wx = sx + this.camX * par + ph;
+      const hRaw = gy + baseH + Math.sin(wx * 0.008) * amp + Math.sin(wx * 0.019) * amp * 0.4;
+      const hy = Math.round(hRaw / PX) * PX;
+      g.rect(sx, gy, PX + 1, hy - gy); g.fill();
+    }
+  }
+
+  // 飘云（慢速视差，块状）
+  private drawClouds(t: Theme, PX: number) {
+    const g = this.bgG, W = DESIGN_W, gy = this.groundY;
+    const col = this.sh(this.timeOfDay().sky, 1.16);
+    const snap = (v: number) => Math.round(v / PX) * PX;
+    const span = W + 280;
+    for (let i = 0; i < 5; i++) {
+      const speed = 5 + i * 2;
+      let bx = (-this.animT * speed - this.camX * 0.12 + i * 267) % span;
+      bx = ((bx % span) + span) % span - W / 2 - 140;
+      const by = gy + 190 + (i % 3) * 78;
+      const s = 0.85 + (i % 3) * 0.28;
+      g.fillColor = col;
+      g.rect(snap(bx), snap(by), snap(96 * s), snap(26 * s)); g.fill();
+      g.rect(snap(bx + 22 * s), snap(by + 18 * s), snap(60 * s), snap(20 * s)); g.fill();
+      g.rect(snap(bx - 16 * s), snap(by + 10 * s), snap(42 * s), snap(18 * s)); g.fill();
+    }
+  }
+
+  // 前景层：只保留赵云挥砍刀气（罩在角色之上）
+  private drawFg() {
+    const g = this.fgG;
+    g.clear();
+
+    // 赵云挥砍大刀气（罩在精灵前方，让"刀"更大更猛）
+    const h = this.hero;
+    if (h.attacking && h.state !== 'dead') {
+      const s = h.atkType === 2 ? h.slamProg : h.swing;
+      const a = 1 - Math.abs(s - 0.4) / 0.6;   // 中段最亮
+      if (a > 0.05) {
+        const cx = this.sX(h.x) + h.dir * 22, cy = this.groundY + 74 + h.jumpY;
+        const R = 74, c0 = h.dir > 0 ? 0 : Math.PI;
+        g.strokeColor = new Color(150, 232, 255, Math.round(200 * a)); g.lineWidth = 13;
+        hArc(g, cx, cy, R, c0 - 1.3, c0 + 1.3, 16); g.stroke();
+        g.strokeColor = new Color(245, 255, 255, Math.round(235 * a)); g.lineWidth = 5;
+        hArc(g, cx, cy, R * 0.86, c0 - 1.05, c0 + 1.05, 14); g.stroke();
+      }
+    }
+
+  }
+
+  // 待机/走路时手里的枪（骑马图去马后"垂枪"被切掉，这里补回；画在 stageG=角色之后，藏在身后）
+  private drawHeroSpear(g: Graphics) {
+    const h = this.hero;
+    if (h.attacking || h.state === 'dead') return;
+    const fwd = h.dir >= 0 ? -1 : 1;          // 面朝方向（枪尖朝前）
+    const bob = h.state === 'walk' ? Math.sin(this.animT * 14) * 2 : 0;
+    const baseY = this.groundY + h.jumpY - Math.max(0, h.crouch) * 24;
+    const hx = this.sX(h.x) + fwd * 6;        // 握把
+    const hy = baseY + 52 + bob;
+    const tipX = hx + fwd * 48, tipY = hy + 30;   // 枪尖朝前下(持枪待战)
+    const buttX = hx - fwd * 26, buttY = hy - 16; // 枪尾朝后上
+    // 枪杆（深棕 + 亮棕芯）
+    g.strokeColor = new Color(92, 70, 48, 255); g.lineWidth = 5;
+    g.moveTo(buttX, buttY); g.lineTo(tipX, tipY); g.stroke();
+    g.strokeColor = new Color(170, 138, 100, 255); g.lineWidth = 2;
+    g.moveTo(buttX, buttY); g.lineTo(tipX, tipY); g.stroke();
+    // 枪尖（银）
+    g.strokeColor = new Color(222, 228, 238, 255); g.lineWidth = 5;
+    g.moveTo(tipX - fwd * 9, tipY - 6); g.lineTo(tipX, tipY); g.stroke();
+    // 红缨（握把处）
+    g.fillColor = new Color(198, 42, 42, 255);
+    g.circle(hx + fwd * 3, hy + 2, 4); g.fill();
+  }
+
+  // 场景色调 + 夜晚压暗：画在角色之下（只暗背景，角色保持明亮）
+  private drawSceneTint(g: Graphics) {
+    const W = DESIGN_W, H = DESIGN_H;
+    const gr = this.gradeColor(this.theme());
+    g.fillColor = gr; g.rect(-W / 2, -H / 2, W, H); g.fill();
+    const dk = this.timeOfDay().dark;
+    if (dk > 0) { g.fillColor = new Color(6, 12, 32, Math.round(dk * 255)); g.rect(-W / 2, -H / 2, W, H); g.fill(); }
+  }
+
+  // 全屏色调滤镜：由时段驱动（真背景叠上它 → 清晨/黄昏/夜的氛围）
+  private gradeColor(t: Theme): Color {
+    const gr = this.timeOfDay().grade;
+    return new Color(gr[0], gr[1], gr[2], gr[3]);
+  }
+
   private drawBg() {
     const g = this.bgG, W = DESIGN_W, H = DESIGN_H, gy = this.groundY;
     const t = this.theme();
     const PX = 12;
     g.clear();
 
-    // 天空 3 段（上暗下亮）
-    g.fillColor = this.sh(t.sky, 0.82); g.rect(-W / 2, gy + 340, W, H); g.fill();
-    g.fillColor = this.sh(t.sky, 0.92); g.rect(-W / 2, gy + 170, W, 170); g.fill();
-    g.fillColor = new Color(t.sky[0], t.sky[1], t.sky[2], 255); g.rect(-W / 2, gy, W, 170); g.fill();
+    // 天空：平滑竖直渐变（地平线亮 → 天顶暗），无硬分割线
+    const sky = this.timeOfDay().sky;
+    const skyBot = sky.map(v => Math.min(255, v * 1.06));
+    const skyTop = sky.map(v => v * 0.66);
+    const skyRegion = H / 2 - gy, sb = 26, sbh = skyRegion / sb;
+    for (let i = 0; i < sb; i++) {
+      const c = this.blend(skyBot, skyTop, i / (sb - 1));
+      g.fillColor = new Color(c[0], c[1], c[2], 255);
+      g.rect(-W / 2, gy + i * sbh, W, sbh + 1); g.fill();
+    }
 
-    // 远/近山：量化成像素台阶
-    const layer = (par: number, amp: number, baseH: number, fac: number, ph: number) => {
-      g.fillColor = this.sh(t.hill, fac);
-      for (let sx = -W / 2; sx < W / 2; sx += PX) {
-        const wx = sx + this.camX * par + ph;
-        const hRaw = gy + baseH + Math.sin(wx * 0.008) * amp + Math.sin(wx * 0.019) * amp * 0.4;
-        const hy = Math.round(hRaw / PX) * PX;
-        g.rect(sx, gy, PX + 1, hy - gy); g.fill();
+    // 飘云
+    this.drawClouds(t, PX);
+
+    // 远山改用真图层（updateFarLayer）；这里只保留天空
+
+    // 地面：与近景草同色的竖直渐变（近地平线≈草色 → 越往下越暗），下方过渡自然不发灰
+    const top = [40, 51, 57];   // 贴近近景草上部色
+    const bot = [16, 22, 26];   // 屏底更暗
+    const bands = 20, region = gy + H / 2;   // 从地平线到屏底
+    for (let i = 0; i < bands; i++) {
+      const f0 = i / bands;
+      const c = this.blend(top, bot, f0);
+      g.fillColor = new Color(c[0], c[1], c[2], 255);
+      const y1 = gy - f0 * region;
+      g.rect(-W / 2, y1 - region / bands - 1, W, region / bands + 2); g.fill();
+    }
+  }
+
+  // 创建一层无缝滚动视差背景（2 块瓦片，镜像图已保证左右无缝）
+  private makeScrollLayer(res: string, dispH: number, par: number, baseY: number) {
+    const L = { tiles: [] as Node[], w: 0, par, baseY, dispH };
+    for (let i = 0; i < 2; i++) {
+      const n = new Node('bglayer-' + res + i);
+      n.layer = this.node.layer; n.parent = this.node;
+      n.addComponent(UITransform).setAnchorPoint(0, 0);
+      n.addComponent(Sprite).sizeMode = Sprite.SizeMode.CUSTOM;
+      L.tiles.push(n);
+    }
+    this.layers.push(L);
+    this.setLayerImage(this.layers.length - 1, res);
+  }
+
+  // 换某一视差层的贴图（带缓存；缺图静默跳过，保留当前图）
+  private setLayerImage(idx: number, res: string) {
+    const L = this.layers[idx];
+    if (!L) return;
+    const apply = (sf: SpriteFrame) => {
+      (sf.texture as Texture2D).setFilters(Texture2D.Filter.NEAREST, Texture2D.Filter.NEAREST);
+      L.w = sf.rect.width * (L.dispH / sf.rect.height);
+      for (const n of L.tiles) {
+        n.getComponent(Sprite)!.spriteFrame = sf;
+        n.getComponent(UITransform)!.setContentSize(L.w, L.dispH);
       }
     };
-    layer(0.35, 55, 150, 0.78, 400);   // 远山（矮、暗）
-    layer(0.55, 95, 230, 1.0, 0);      // 近山
+    if (this.bgCache[res]) { apply(this.bgCache[res]); return; }
+    resources.load(res + '/spriteFrame', SpriteFrame, (e, sf) => {
+      if (e || !sf) return;   // 缺图静默：保持上一张背景
+      this.bgCache[res] = sf;
+      apply(sf);
+    });
+  }
 
-    // 地面
-    g.fillColor = new Color(t.ground[0], t.ground[1], t.ground[2], 255);
-    g.rect(-W / 2, -H / 2, W, gy + H / 2); g.fill();
-    // 地表棋盘抖动边（随镜头滚动）
-    g.fillColor = this.sh(t.ground, 0.72);
-    const step = Math.floor(((this.camX % (PX * 2)) + PX * 2) % (PX * 2) / PX);
-    for (let i = 0; i * PX < W + PX; i++) {
-      if ((i + step) % 2 === 0) { g.rect(-W / 2 + i * PX, gy - PX, PX, PX); g.fill(); }
+  // 关卡 → 背景组：Boss 关用最后一组(专属)，其余每 5 关一组
+  private biomeIndexFor(zone: number): number {
+    const bossBi = this.BIOMES.length - 1;
+    // 第 1 关=密林，第 2 关起=青原，第 10 关=焦土(Boss)
+    return zone >= this.BOSS_ZONE ? bossBi : Math.min(bossBi - 1, zone);
+  }
+  // 某层(0远/1中/2近)在某组的资源名
+  private layerRes(li: number, bi: number): string {
+    const b = this.BIOMES[bi];
+    return li === 0 ? b.far : li === 1 ? b.mid : b.near;
+  }
+  // 预加载所有背景组到缓存（换景要用；缺图静默跳过）
+  private preloadAllBiomes() {
+    for (let bi = 0; bi < this.BIOMES.length; bi++) {
+      for (let li = 0; li < 3; li++) {
+        const res = this.layerRes(li, bi);
+        if (this.bgCache[res]) continue;
+        resources.load(res + '/spriteFrame', SpriteFrame, (e, sf) => { if (!e && sf) this.bgCache[res] = sf; });
+      }
     }
-    // 地面横向暗纹（几层，营造纵深）
-    for (let r = 1; r <= 4; r++) {
-      g.fillColor = this.sh(t.ground, 1 - r * 0.05);
-      g.rect(-W / 2, gy - PX * 2 - r * PX * 3, W, PX); g.fill();
+  }
+
+  // 直接把背景组套到 3 层（用于开局/换景结束）
+  private applyBiome(zone: number) {
+    const bi = this.biomeIndexFor(zone);
+    if (bi === this.curBiome) return;
+    this.curBiome = bi;
+    this.setLayerImage(0, this.layerRes(0, bi));
+    this.setLayerImage(1, this.layerRes(1, bi));
+    this.setLayerImage(2, this.layerRes(2, bi));
+  }
+
+  // 所有视差层：各自速度无缝横向滚动；卷屏换景时走"老左滑出/新右滑入"
+  private updateScrollLayers() {
+    const W = DESIGN_W;
+    if (this.transActive) { this.renderTransition(); return; }
+    for (const L of this.layers) {
+      if (!L.w) continue;
+      const off = (((this.camX * L.par) % L.w) + L.w) % L.w;
+      for (let i = 0; i < L.tiles.length; i++) {
+        L.tiles[i].setPosition(-W / 2 - off + i * L.w, this.groundY + L.baseY, 0);
+      }
     }
-    this.drawProps(t, PX);
+  }
+
+  // 走路换景：老场景随走路视差缓慢左移(近快远慢)，新场景从右滑入(远景先入、近景后入)
+  private renderTransition() {
+    const W = DESIGN_W, p = this.transP;
+    const delay = [0.0, 0.10, 0.22];   // 远/中/近 入场延迟：走向新区域时远处先出现
+    const set = (t: Node, sf: SpriteFrame, x: number, y: number, dispH: number) => {
+      t.getComponent(Sprite)!.spriteFrame = sf;
+      t.getComponent(UITransform)!.setContentSize(sf.rect.width * (dispH / sf.rect.height), dispH);
+      t.setPosition(x, y, 0);
+    };
+    for (let li = 0; li < this.layers.length; li++) {
+      const L = this.layers[li];
+      const fromSf = this.bgCache[this.layerRes(li, this.transFrom)];
+      const toSf = this.bgCache[this.layerRes(li, this.transTo)];
+      if (!fromSf || !toSf) continue;
+      const y = this.groundY + L.baseY;
+      // 老场景：随走路视差左移（近层移得多、远层移得少）
+      set(L.tiles[0], fromSf, -W / 2 - p * this.ZONE_SPAN * L.par, y, L.dispH);
+      // 新场景：从右滑入盖上来；终点=普通滚动落点(无缝交接，避免结束时再跳一下)
+      const wNew = toSf.rect.width * (L.dispH / toSf.rect.height);
+      const offEnd = (((this.targetCam * L.par) % wNew) + wNew) % wNew;
+      const endX = -W / 2 - offEnd;                                  // 关底普通滚动时该层的落点
+      const d = delay[Math.min(li, delay.length - 1)];
+      const pn = Math.min(1, Math.max(0, (p - d) / (1 - d)));        // 远景先入、近景后入
+      set(L.tiles[1], toSf, endX + (1 - pn) * W, y, L.dispH);        // 从右一屏外滑到落点
+    }
   }
 
   private drawProps(t: Theme, PX: number) {
@@ -943,6 +1880,23 @@ export class BattleScene extends Component {
           break;
       }
     }
+  }
+
+  private drawXpBar(g: Graphics) {
+    const y = DESIGN_H / 2 - 290, w = 360, x = -w / 2, hh = 9;
+    g.fillColor = new Color(0, 0, 0, 150); g.roundRect(x, y, w, hh, 4); g.fill();
+    const p = Math.max(0, Math.min(1, this.xp / this.xpNext));
+    g.fillColor = new Color(120, 200, 255, 255); g.roundRect(x + 1, y + 1, (w - 2) * p, hh - 2, 3); g.fill();
+  }
+
+  private drawBossHp(g: Graphics) {
+    const boss = this.monsters.find(m => m.kind === 'boss' && m.state !== 'dead');
+    if (!boss) return;
+    const y = DESIGN_H / 2 - 322, w = 520, x = -w / 2, hh = 20;
+    g.fillColor = new Color(0, 0, 0, 170); g.roundRect(x, y, w, hh, 6); g.fill();
+    const p = Math.max(0, boss.hp / boss.hpMax);
+    g.fillColor = new Color(212, 52, 62, 255); g.roundRect(x + 2, y + 2, (w - 4) * p, hh - 4, 5); g.fill();
+    g.strokeColor = new Color(255, 220, 150, 220); g.lineWidth = 2; g.roundRect(x, y, w, hh, 6); g.stroke();
   }
 
   private drawHeroHp(g: Graphics) {
@@ -1278,6 +2232,15 @@ export class BattleScene extends Component {
     n.layer = this.node.layer;
     n.parent = this.node;
     n.addComponent(UITransform);
+    return n;
+  }
+
+  private child2(parent: Node, x: number, y: number): Node {
+    const n = new Node('n');
+    n.layer = this.node.layer;
+    n.parent = parent;
+    n.addComponent(UITransform);
+    n.setPosition(x, y, 0);
     return n;
   }
 
