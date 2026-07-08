@@ -39,6 +39,9 @@ interface Monster extends Stick {
   slamT?: number;       // 当前阶段剩余时间
   slamCd?: number;      // 距下次重击
   slamX?: number;       // 重击落点（蓄力时锁定）
+  raged?: boolean;      // Boss 二阶段（血≤50% 狂暴）
+  dashT?: number;       // Boss 横冲剩余时间
+  dashCd?: number;      // Boss 距下次横冲
 }
 
 interface Arrow { x: number; y: number; vx: number; vy: number; life: number; }   // 敌方箭
@@ -123,7 +126,9 @@ export class BattleScene extends Component {
   private footSp!: Sprite;
   private footFullFrames: SpriteFrame[] = [];
   // 敌人精灵（轻步兵）：像 Boss 一样用精灵节点，替代纯代码像素兵
-  private infantryFrames: SpriteFrame[] = [];
+  private infantryFrames: SpriteFrame[] = [];   // foot 兜底帧（兼做加载就绪判定）
+  private kindFrames: Record<string, SpriteFrame[]> = {};       // 各兵种帧：foot/shield/elite/archer
+  private kindDisp: Record<string, [number, number]> = {};      // 各兵种显示尺寸
   private monPool: { node: Node; sp: Sprite; op: UIOpacity }[] = [];
   private readonly INF_SCALE = 1.5;      // 轻步兵精灵放大
   private readonly DISMOUNT = false;   // 下马实验：只用骑士上半身 + 程序火柴腿（false=骑马版）
@@ -217,6 +222,25 @@ export class BattleScene extends Component {
     elite: { hpMul: 2.5, scaleMul: 1.4, speed: 108, dmg: 17, color: [150, 66, 156], ranged: false, coin: 4, w: 1 }, // 精英 紫大
   };
 
+  // 10 关节奏表（下标=zone）：count 总怪数 / pool 兵种权重池 / openers 开场必刷 /
+  // interval 刷怪间隔秒(缺省用公式) / bothSides 双侧夹击 / night 强制夜战 / lootMul 掉落倍率
+  private readonly ZONE_PLAN: {
+    count: number; pool: [string, number][]; openers?: string[];
+    interval?: number; bothSides?: boolean; night?: boolean; lootMul?: number;
+  }[] = [
+    { count: 4, pool: [['foot', 1]] },                                                                  // 第1关 教学：纯步兵
+    { count: 5, pool: [['foot', 3], ['shield', 2]] },                                                   // 第2关 盾兵首见
+    { count: 7, pool: [['foot', 4], ['shield', 2]] },                                                   // 第3关 量变多
+    { count: 7, pool: [['foot', 3], ['shield', 1], ['archer', 2]] },                                    // 第4关 弓手首见
+    { count: 3, pool: [['foot', 1]], interval: 1.6, lootMul: 2 },                                       // 第5关 喘息：怪少掉落翻倍
+    { count: 8, pool: [['foot', 3], ['shield', 2], ['archer', 2]], night: true },                       // 第6关 夜战
+    { count: 9, pool: [['foot', 4], ['shield', 2], ['archer', 2]], bothSides: true, interval: 0.75 },   // 第7关 双侧夹击
+    { count: 8, pool: [['foot', 3], ['shield', 2], ['archer', 1]], openers: ['elite', 'elite'] },       // 第8关 双精英开场
+    { count: 11, pool: [['foot', 4], ['shield', 2], ['archer', 2], ['elite', 1]], openers: ['elite', 'elite'], interval: 0.7 }, // 第9关 大波冲刺
+    { count: 0, pool: [['foot', 1]] },                                                                  // 第10关 Boss（spawnBoss 接管）
+  ];
+  private zonePlan() { return this.ZONE_PLAN[Math.min(this.zone, this.ZONE_PLAN.length - 1)]; }
+
   // 氛围浮尘粒子（柳絮/萤火/飘雪，随场景变）
   private motes: { x: number; y: number; vx: number; vy: number; ph: number; r: number }[] = [];
 
@@ -299,16 +323,28 @@ export class BattleScene extends Component {
       n.active = false;
       this.monPool.push({ node: n, sp, op });
     }
-    resources.load('enemy-infantry/spriteFrame', SpriteFrame, (e, base) => {
-      if (e || !base) { console.warn('轻步兵贴图加载失败：', e); return; }
-      const tex = base.texture as Texture2D; tex.setFilters(Texture2D.Filter.NEAREST, Texture2D.Filter.NEAREST);
-      const ROW = 1;   // 侧面行走行
-      for (let c = 0; c < 4; c++) {
-        const sf = new SpriteFrame(); sf.texture = tex;
-        sf.rect = new Rect(c * 48 + 4, ROW * 64 + 10, 40, 46);   // x4~44,y10~56 全身
-        this.infantryFrames.push(sf);
-      }
-    });
+    // 各兵种精灵表（同一素材规范：4×4 图集，行 1=侧面行走）
+    // foot/archer=48×64 小图格；shield/elite=64×64 大图格
+    const loadKind = (kind: string, res: string, cellW: number, pad: [number, number, number, number], disp: [number, number]) => {
+      resources.load(res + '/spriteFrame', SpriteFrame, (e, base) => {
+        if (e || !base) { console.warn(kind + ' 贴图加载失败：', e); return; }
+        const tex = base.texture as Texture2D; tex.setFilters(Texture2D.Filter.NEAREST, Texture2D.Filter.NEAREST);
+        const ROW = 1;   // 侧面行走行
+        const arr: SpriteFrame[] = [];
+        for (let c = 0; c < 4; c++) {
+          const sf = new SpriteFrame(); sf.texture = tex;
+          sf.rect = new Rect(c * cellW + pad[0], ROW * 64 + pad[1], pad[2], pad[3]);
+          arr.push(sf);
+        }
+        this.kindFrames[kind] = arr;
+        this.kindDisp[kind] = disp;
+        if (kind === 'foot') this.infantryFrames = arr;   // 兜底 + 就绪判定
+      });
+    };
+    loadKind('foot', 'enemy-infantry', 48, [4, 10, 40, 46], [40, 46]);   // 轻步兵 红
+    loadKind('shield', 'enemy-guard', 64, [8, 6, 48, 54], [44, 50]);    // 盾兵 = 近卫兵 蓝甲带盾
+    loadKind('elite', 'enemy-heavy', 64, [8, 6, 48, 54], [44, 50]);     // 精英 = 重步兵 红橙重甲
+    loadKind('archer', 'enemy-archer', 48, [4, 10, 40, 46], [40, 46]);  // 弓手 弓兵
 
     // Boss 精灵（许褚，大刀上劈）：在角色层，默认隐藏
     this.bossNode = this.child('boss');
@@ -483,9 +519,9 @@ export class BattleScene extends Component {
     this.banner.active = false; this.restartBtn.active = false; this.arrow.active = false;
   }
 
-  private waveCount(zone: number): number { return Math.min(9, 4 + zone); }
+  private waveCount(zone: number): number { return this.ZONE_PLAN[Math.min(zone, this.ZONE_PLAN.length - 1)].count; }
   private theme(): Theme { return this.THEMES[this.zone % this.THEMES.length]; }
-  private timeOfDay() { return this.TIMES[this.zone % this.TIMES.length]; }
+  private timeOfDay() { return this.zonePlan().night ? this.TIMES[3] : this.TIMES[this.zone % this.TIMES.length]; }   // 夜战关强制夜晚
   private sX(wx: number): number { return wx - this.camX; }   // 世界→屏幕
 
   // ---------- 键盘 ----------
@@ -646,7 +682,7 @@ export class BattleScene extends Component {
       }
       this.spawnT += dt;
       const alive = this.aliveCount();
-      const interval = Math.max(0.5, 1.1 - this.zone * 0.05);
+      const interval = this.zonePlan().interval ?? Math.max(0.5, 1.1 - this.zone * 0.05);
       if (this.waveRemaining > 0 && this.spawnT >= interval && alive < this.maxMonsters) {
         this.spawnT = 0;
         this.spawnMonster();
@@ -679,11 +715,12 @@ export class BattleScene extends Component {
   }
 
   private pickKind(): string {
+    const plan = this.zonePlan();
+    // 开场必刷（如第8/9关的双精英）：按本关已刷个数取 openers
+    const spawned = this.waveCount(this.zone) - this.waveRemaining;
+    if (plan.openers && spawned < plan.openers.length) return plan.openers[spawned];
     const pool: string[] = [];
-    const add = (k: string, n: number) => { for (let i = 0; i < n; i++) pool.push(k); };
-    add('foot', this.KINDS.foot.w * 2);
-    if (this.zone >= 1) add('shield', this.KINDS.shield.w);   // 弓手去掉
-    if (this.zone >= 3) add('elite', this.KINDS.elite.w);
+    for (const [k, w] of plan.pool) for (let i = 0; i < w; i++) pool.push(k);
     return pool[Math.floor(Math.random() * pool.length)];
   }
 
@@ -691,7 +728,7 @@ export class BattleScene extends Component {
     const W = DESIGN_W;
     const kind = this.pickKind();
     const d = this.KINDS[kind];
-    const fromLeft = Math.random() < 0.35;   // 多数从前方(右)来
+    const fromLeft = Math.random() < (this.zonePlan().bothSides ? 0.5 : 0.35);   // 夹击关左右对半，平时多数从右来
     const scale = (0.9 + Math.random() * 0.25) * d.scaleMul * 1.2;
     // 除精英外都一刀秒（血量低于最小攻击）；精英耐打随关卡涨
     const hpMax = kind === 'elite' ? (220 + this.zone * 30) : 34;
@@ -1008,7 +1045,7 @@ export class BattleScene extends Component {
   private addCombo() { this.comboCount++; this.comboT = 2.0; }
 
   private spawnDrop(m: Monster) {
-    const n = m.coin + (m.kind === 'boss' ? 0 : 0);
+    const n = Math.round(m.coin * (this.zonePlan().lootMul ?? 1));   // 喘息关掉落翻倍
     for (let i = 0; i < n; i++)
       this.drops.push({ x: m.x + (Math.random() - 0.5) * 40, y: this.groundY + 45, vy: 140 + Math.random() * 110, life: 0, flying: false, sx: 0, sy: 0 });
   }
@@ -1114,7 +1151,7 @@ export class BattleScene extends Component {
         else if (adx > far) { m.state = 'walk'; m.phase += dt * 8; m.x += m.dir * m.speed * dt; }
         else {
           m.state = 'attack'; m.swing = Math.min(1, m.swing + dt * 2.5);
-          if (m.atkCd <= 0) { m.atkCd = 1.7; m.swing = 0; this.shootArrow(m); }
+          if (m.atkCd <= 0) { m.atkCd = 2.8; m.swing = 0; this.shootArrow(m); }   // 射箭间隔（越大越慢）
         }
       } else if (adx <= (m.kind === 'boss' ? 120 : 56)) {
         m.state = 'attack';
@@ -1141,7 +1178,32 @@ export class BattleScene extends Component {
   private stepBoss(m: Monster, dt: number) {
     const h = this.hero;
     const dx = h.x - m.x, adx = Math.abs(dx);
+
+    // 横冲进行中：锁定方向猛冲，撞到即伤（跳跃可躲）——放在 dir 更新前，冲刺不拐弯
+    if ((m.dashT || 0) > 0) {
+      m.dashT! -= dt;
+      m.state = 'walk'; m.phase += dt * 22;
+      m.x += m.dir * 620 * dt;
+      if (Math.abs(h.x - m.x) < 70 && h.invuln <= 0 && !this.airborne() && h.state !== 'dead') {
+        this.hurtHero(Math.round(m.atk * 1.1), m.x);
+        h.kx = m.dir * 620;
+      }
+      if (m.dashT! <= 0) m.atkCd = 0.6;   // 冲完短硬直
+      return;
+    }
+
     m.dir = dx >= 0 ? 1 : -1;
+
+    // 二阶段：血≤50% 狂暴（一次性）——提速加攻、重击更频、召唤增援
+    if (!m.raged && m.hp <= m.hpMax * 0.5) {
+      m.raged = true;
+      m.speed *= 1.45; m.atk = Math.round(m.atk * 1.2);
+      m.slamCd = Math.min(m.slamCd || 0, 0.8);   // 立刻酝酿一次重击
+      m.dashCd = 1.6;
+      this.addShake(14); this.addHitStop(0.08);
+      this.spawnHitFlash(this.sX(m.x), this.groundY + 80);
+      for (let i = 0; i < 2; i++) this.spawnMonster();   // 增援两个小兵
+    }
     const st = m.slamState || 'none';
 
     // 蓄力中：站定举刀，红圈亮起；时间到 → 砸下结算
@@ -1168,13 +1230,22 @@ export class BattleScene extends Component {
     if (st === 'strike') {
       m.state = 'attack';
       m.slamT = (m.slamT || 0) - dt;
-      if ((m.slamT || 0) <= 0) { m.slamState = 'none'; m.slamCd = this.BOSS_SLAM_CD; }
+      if ((m.slamT || 0) <= 0) { m.slamState = 'none'; m.slamCd = this.BOSS_SLAM_CD * (m.raged ? 0.5 : 1); }   // 狂暴重击更频
       return;
     }
 
     // 常态：充能重击 + 近身劈砍 / 追人
     m.slamCd = (m.slamCd || 0) - dt;
     m.atkCd -= dt;
+    // 二阶段横冲：拉开距离时发动（先于重击判定）
+    if (m.raged) {
+      m.dashCd = (m.dashCd ?? 2) - dt;
+      if ((m.dashCd || 0) <= 0 && adx > 220) {
+        m.dashT = 0.55; m.dashCd = 3.2;
+        this.addShake(6);
+        return;
+      }
+    }
     if ((m.slamCd || 0) <= 0 && adx < 360) {   // 起手预警（锁定落点 = 当前主角位置）
       m.slamState = 'windup'; m.slamT = this.BOSS_SLAM_WINDUP; m.slamX = h.x;
       m.attacking = false; m.swing = 0; m.state = 'attack';
@@ -1477,11 +1548,14 @@ export class BattleScene extends Component {
         const hk = m.hitT > 0 ? Math.min(1, m.hitT / this.HIT_DUR) : 0;
         const lunge = m.state === 'attack' ? Math.sin(Math.min(1, m.swing) * Math.PI) * 14 : 0;   // 攻击前冲
         e.node.setPosition(this.sX(m.x) + m.dir * lunge, this.groundY + m.lane + m.jumpY, 0);
-        // 选帧：走路循环 / 攻击定帧 / 待机
+        // 选帧：走路循环 / 攻击定帧 / 待机（按兵种取各自帧库，缺帧回退轻步兵）
         let f = 0;
         if (m.state === 'walk') f = Math.floor(m.phase * 0.6) % 4;
         else if (m.state === 'attack') f = 2;
-        e.sp.spriteFrame = this.infantryFrames[((f % 4) + 4) % 4];
+        const frames = this.kindFrames[m.kind] || this.infantryFrames;
+        e.sp.spriteFrame = frames[((f % 4) + 4) % 4];
+        const disp = this.kindDisp[m.kind] || [40, 46];
+        e.node.getComponent(UITransform)!.setContentSize(disp[0], disp[1]);
         const S = this.INF_SCALE * m.scale * (1 + 0.05 * hk);
         e.node.setScale(m.dir >= 0 ? -S : S, S, 1);   // 精灵默认朝左 → 朝右翻转
         // 挨揍后仰 / 死亡倒地 / 攻击前倾
@@ -1512,6 +1586,7 @@ export class BattleScene extends Component {
     else if (b.slamState === 'strike') f = 3;     // 劈下
     else if (b.state === 'attack') f = Math.max(0, Math.min(3, Math.floor(b.swing * 4)));   // 举刀→劈下
     this.bossSp.spriteFrame = this.bossFrames[f];
+    this.bossSp.color = b.raged ? new Color(255, 118, 105, 255) : Color.WHITE;   // 二阶段狂暴泛红
 
     const S = this.BOSS_SCALE * (1 + 0.06 * hk) * (popX || 1);   // 精灵默认朝左：朝右翻转
     this.bossNode.setScale(b.dir >= 0 ? -S : S, S, 1);
