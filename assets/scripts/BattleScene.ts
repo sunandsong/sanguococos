@@ -142,6 +142,10 @@ export class BattleScene extends Component {
   private bgG!: Graphics;
   private stageG!: Graphics;
   private fgG!: Graphics;   // 前景层（主角之上、暗角之下）
+  private bossPropRoot!: Node;   // Boss 关近景道具容器（角色之下）
+  private bossProps: { node: Node; wx: number; dy: number; res: string }[] = [];
+  private bossGlowG!: Graphics;  // 道具垫底层：接地影 + 火盆暖光晕（在道具贴图之下）
+  private readonly PROPS_ARENA_ZONE = 9;   // 道具所在关：Boss 关（第 10 关）
   private layers: { tiles: Node[]; w: number; par: number; baseY: number; dispH: number }[] = [];   // 视差背景层（远→近）
   private bgCache: Record<string, SpriteFrame> = {};   // 背景图缓存（换关不重复加载）
   private curBiome = -1;   // 当前已应用的背景组，-1=未设
@@ -256,6 +260,32 @@ export class BattleScene extends Component {
     this.makeScrollLayer('bg-far-mtn', 380, 0.25, 0);     // 远山（高）
     this.makeScrollLayer('bg-mid-hills', 300, 0.5, 0);    // 中景丘陵 + 山河牌坊
     this.makeScrollLayer('bg-near-grass', 180, 0.7, -30); // 近景草坡（角色身后）
+
+    // Boss 关近景道具（AI 贴图：曹军大旗/青铜火盆/断枪/破盾/拒马；垫在角色之下）
+    this.bossPropRoot = this.child('bossprops');
+    {
+      const arenaX = this.PROPS_ARENA_ZONE * this.ZONE_SPAN;
+      // 垫底层（先建=画在道具贴图后面）：接地影 + 火盆光晕
+      const glowN = new Node('propglow'); glowN.layer = this.node.layer; glowN.parent = this.bossPropRoot;
+      glowN.addComponent(UITransform);
+      this.bossGlowG = glowN.addComponent(Graphics);
+      const mk = (res: string, wx: number, w: number, h: number, flip = false, dy = 0) => {
+        const n = new Node(res); n.layer = this.node.layer; n.parent = this.bossPropRoot;
+        n.addComponent(UITransform).setAnchorPoint(0.5, 0);   // 锚在脚底，落地即贴地
+        const sp = n.addComponent(Sprite); sp.sizeMode = Sprite.SizeMode.CUSTOM;
+        n.getComponent(UITransform)!.setContentSize(w, h);
+        if (flip) n.setScale(-1, 1, 1);
+        resources.load(res + '/spriteFrame', SpriteFrame, (e, sf) => { if (!e && sf) sp.spriteFrame = sf; });
+        this.bossProps.push({ node: n, wx, dy, res });
+      };
+      // 旗/枪/盾/拒马放大一倍增强存在感；火盆保持
+      mk('boss-flag', arenaX + 245, 116, 226, true);    // 曹旗（右侧，镜像）
+      mk('boss-brazier', arenaX + 158, 53, 38);         // 火盆（右侧）
+      mk('boss-spear', arenaX - 60, 50, 82);            // 断枪插地
+      mk('boss-shield', arenaX + 70, 58, 38);           // 破盾倒地
+      mk('boss-barricade', arenaX + 320, 188, 84);      // 拒马
+      this.bossPropRoot.active = false;
+    }
 
     this.stageG = this.child('stage').addComponent(Graphics);
 
@@ -697,11 +727,26 @@ export class BattleScene extends Component {
     const rightWall = this.zoneState === 'fight' ? this.camX + W / 2 - 90 : this.camX + W / 2 + 40;
     h.x = Math.max(leftWall, Math.min(rightWall, h.x));
 
-    // 清关后走到右侧 → 触发卷屏
-    if (this.zoneState === 'cleared' && h.x > this.camX + 130) {
-      this.zoneState = 'scroll';
-      this.targetCam = (this.zone + 1) * this.ZONE_SPAN;
-      this.transActive = false;   // 不做过渡，换关瞬间直接换背景组
+    // 清关后：镜头双向跟随主角（可前进也可后退），走到关底右侧进入下一关
+    if (this.zoneState === 'cleared') {
+      const bound = (this.zone + 1) * this.ZONE_SPAN;   // 右界=下一关关口
+      const margin = 140;                                // 跟随窗口：超出就推镜头
+      if (h.x > this.camX + margin) this.camX = h.x - margin;
+      else if (h.x < this.camX - margin) this.camX = h.x + margin;
+      this.camX = Math.max(0, Math.min(bound, this.camX));   // 左不出世界起点，右不越关口
+      // 回走/前进时按镜头所在区域切背景组（applyBiome 同组时零开销）
+      this.applyBiome(Math.max(0, Math.min(this.zone, Math.round(this.camX / this.ZONE_SPAN))));
+      // 镜头顶到关口后继续向右走 → 直接开下一关
+      if (this.camX >= bound - 0.5 && h.x > this.camX + 130) {
+        this.camX = bound;
+        this.zone++;
+        this.zoneState = 'fight';
+        this.waveRemaining = this.waveCount(this.zone);
+        this.spawnT = 0;
+        this.bossSpawned = false;
+        this.applyBiome(this.zone);
+        this.preloadAllBiomes();
+      }
     }
 
     if (h.landT > 0) h.landT -= dt;
@@ -1287,9 +1332,11 @@ export class BattleScene extends Component {
   private draw() {
     this.drawBg();
     this.updateScrollLayers();
+    this.updateBossProps();
     const g = this.stageG;
     g.clear();
     this.drawSceneTint(g);   // 色调/夜晚压暗：在角色之下，只暗背景
+    this.drawBossProps(g);   // Boss 关专属近景道具（大旗/火盆/残骸，角色之下）
 
     // 阴影垫底（仅像素兵；赵云/许褚精灵自带影子）
     const h = this.hero;
@@ -1662,6 +1709,18 @@ export class BattleScene extends Component {
       }
     }
 
+    // Boss 关：漫天火星缓缓上飘（前景，加压迫感；确定性动画无状态）
+    if (this.zone >= this.BOSS_ZONE) {
+      const W = DESIGN_W, H = DESIGN_H, t = this.animT;
+      for (let i = 0; i < 14; i++) {
+        const ph = (t * (0.06 + (i % 5) * 0.02) + i * 0.31) % 1;   // 0→1 循环上升
+        const x = (((i * 173.3 + Math.sin(t * 0.7 + i) * 60) % W) + W) % W - W / 2;
+        const y = -H / 2 + ph * H;
+        const a = Math.sin(ph * Math.PI);                          // 两端淡入淡出
+        g.fillColor = new Color(255, 150 + (i % 3) * 30, 70, Math.round(120 * a));
+        g.circle(x, y, 2 + (i % 3)); g.fill();
+      }
+    }
   }
 
   // 待机/走路时手里的枪（骑马图去马后"垂枪"被切掉，这里补回；画在 stageG=角色之后，藏在身后）
@@ -1695,6 +1754,58 @@ export class BattleScene extends Component {
     g.fillColor = gr; g.rect(-W / 2, -H / 2, W, H); g.fill();
     const dk = this.timeOfDay().dark;
     if (dk > 0) { g.fillColor = new Color(6, 12, 32, Math.round(dk * 255)); g.rect(-W / 2, -H / 2, W, H); g.fill(); }
+  }
+
+  // Boss 关道具贴图：按世界坐标定位（临近 Boss 关时随镜头自然滑入）
+  private updateBossProps() {
+    const show = this.zone >= this.PROPS_ARENA_ZONE - 1;
+    if (this.bossPropRoot.active !== show) this.bossPropRoot.active = show;
+    if (!show) return;
+    const g = this.bossGlowG, gy = this.groundY, t = this.animT, W = DESIGN_W;
+    g.clear();
+    for (const p of this.bossProps) {
+      const x = this.sX(p.wx);
+      p.node.setPosition(x, gy + p.dy, 0);
+      if (x < -W / 2 - 80 || x > W / 2 + 80) continue;
+      // 接地影：把道具从密叶里"压"出来，和背景拉开
+      const w = p.node.getComponent(UITransform)!.width;
+      g.fillColor = new Color(0, 0, 0, 95);
+      g.ellipse(x, gy + 3, w * 0.55, 5); g.fill();
+      // 火盆暖光晕（随火苗闪动，照亮周围一小片）
+      if (p.res === 'boss-brazier') {
+        const fl = 0.85 + 0.15 * Math.sin(t * 8 + p.wx);
+        for (let i = 3; i >= 1; i--) {
+          g.fillColor = new Color(255, 165, 75, Math.round(15 * (4 - i) * fl));
+          g.circle(x, gy + 26, (18 + i * 17) * fl); g.fill();
+        }
+      }
+    }
+  }
+
+  // Boss 关：火盆火苗/火星（盆身是贴图，火焰用代码叠加在盆口上）
+  private drawBossProps(g: Graphics) {
+    if (this.zone < this.PROPS_ARENA_ZONE - 1) return;
+    const W = DESIGN_W;
+    const arenaX = this.PROPS_ARENA_ZONE * this.ZONE_SPAN;
+    const gy = this.groundY, t = this.animT;
+    const flame = (wx: number, rimY: number, s: number) => {
+      const x = this.sX(wx);
+      if (x < -W / 2 - 60 || x > W / 2 + 60) return;
+      const by = gy + rimY;   // 盆口高度
+      const fl = Math.sin(t * 9 + wx) * 0.5 + 0.5, f2 = Math.sin(t * 13 + wx * 2) * 0.5 + 0.5;
+      g.fillColor = new Color(232, 116, 40, 205);
+      g.circle(x, by + (10 + fl * 7) * s, (13 + f2 * 3) * s); g.fill();
+      g.fillColor = new Color(252, 204, 96, 225);
+      g.circle(x, by + (8 + f2 * 6) * s, (7 + fl * 2.5) * s); g.fill();
+      for (let i = 0; i < 3; i++) {                     // 火星（确定性伪随机，无状态）
+        const ph = (t * (0.55 + i * 0.17) + i * 0.37 + wx * 0.001) % 1;
+        const ex = x + Math.sin(t * 3 + i * 2.1 + wx) * 9 * s;
+        const ey = by + 14 * s + ph * 95 * s;
+        g.fillColor = new Color(255, 170, 80, Math.round(200 * (1 - ph)));
+        g.circle(ex, ey, 2.2 * s * (1 - ph * 0.5)); g.fill();
+      }
+    };
+    flame(arenaX + 158, 29, 0.5);    // 火盆盆口（右侧，盆高 38px）
   }
 
   // 全屏色调滤镜：由时段驱动（真背景叠上它 → 清晨/黄昏/夜的氛围）
@@ -1772,11 +1883,9 @@ export class BattleScene extends Component {
     });
   }
 
-  // 关卡 → 背景组：Boss 关用最后一组(专属)，其余每 5 关一组
+  // 关卡 → 背景组：全部关卡（含 Boss）统一用第一组（密林）
   private biomeIndexFor(zone: number): number {
-    const bossBi = this.BIOMES.length - 1;
-    // 第 1 关=密林，第 2 关起=青原，第 10 关=焦土(Boss)
-    return zone >= this.BOSS_ZONE ? bossBi : Math.min(bossBi - 1, zone);
+    return 0;
   }
   // 某层(0远/1中/2近)在某组的资源名
   private layerRes(li: number, bi: number): string {
