@@ -2,6 +2,7 @@ import {
   _decorator, Component, Node, Graphics, Label, LabelOutline,
   UITransform, UIOpacity, Color, tween, Vec3,
   input, Input, EventKeyboard, KeyCode,
+  Sprite, SpriteFrame, Texture2D, Rect, resources,
 } from 'cc';
 import { DESIGN_W, DESIGN_H } from './Constants';
 import { hLine, hArc } from './HandDraw';
@@ -73,6 +74,14 @@ export class BattleScene extends Component {
     { name: '敌营', sky: [92, 52, 56], hill: [70, 36, 40], ground: [82, 56, 46], prop: 'tent' },
   ];
 
+  // 主角赵云精灵
+  private readonly HERO_ROW = 1;          // 用精灵表第几行（侧面朝右那行）
+  private readonly SPRITE_SCALE = 1.5;    // 64px 帧放大倍数
+  private heroNode!: Node;
+  private heroSp!: Sprite;
+  private heroOp!: UIOpacity;
+  private zyFrames: SpriteFrame[] = [];    // 赵云侧面 4 帧
+
   private bgG!: Graphics;
   private stageG!: Graphics;
   private scoreLbl!: Label;
@@ -90,6 +99,9 @@ export class BattleScene extends Component {
   private sparks: Spark[] = [];
   private bloods: Blood[] = [];
   private waves: Wave[] = [];
+
+  // 氛围浮尘粒子（柳絮/萤火/飘雪，随场景变）
+  private motes: { x: number; y: number; vx: number; vy: number; ph: number; r: number }[] = [];
 
   private leftHeld = false;
   private rightHeld = false;
@@ -122,6 +134,40 @@ export class BattleScene extends Component {
 
     this.bgG = this.child('bg').addComponent(Graphics);      // 背景每帧重画（视差 + 换场景）
     this.stageG = this.child('stage').addComponent(Graphics);
+
+    // 主角赵云精灵节点（在 stage 之上、UI 之下）
+    this.heroNode = this.child('hero');
+    const hui = this.heroNode.getComponent(UITransform)!;
+    hui.setContentSize(64, 64); hui.setAnchorPoint(0.5, 0);
+    this.heroSp = this.heroNode.addComponent(Sprite);
+    this.heroSp.sizeMode = Sprite.SizeMode.CUSTOM;
+    this.heroOp = this.heroNode.addComponent(UIOpacity);
+    this.heroNode.active = false;
+    resources.load('zhaoyun-horse/spriteFrame', SpriteFrame, (err, base) => {
+      if (err || !base) { console.warn('赵云贴图加载失败：', err); return; }
+      const tex = base.texture as Texture2D;
+      tex.setFilters(Texture2D.Filter.NEAREST, Texture2D.Filter.NEAREST);   // 像素点采样
+      for (let c = 0; c < 4; c++) {
+        const sf = new SpriteFrame(); sf.texture = tex;
+        sf.rect = new Rect(c * 64, this.HERO_ROW * 64, 64, 64);
+        this.zyFrames.push(sf);
+      }
+      this.heroSp.spriteFrame = this.zyFrames[3];
+    });
+
+    // 电影暗角（压暗四周，聚焦中央；盖在角色之上、UI 之下，只画一次）
+    const vg = this.child('vignette').addComponent(Graphics);
+    const bands = 7, bw = 30;
+    for (let i = 0; i < bands; i++) {
+      const a = Math.round(11 * (bands - i));   // 越靠边越暗
+      vg.fillColor = new Color(0, 0, 0, a);
+      vg.rect(-W / 2, H / 2 - (i + 1) * bw, W, bw); vg.fill();          // 顶
+      vg.rect(-W / 2, -H / 2 + i * bw, W, bw); vg.fill();              // 底
+      vg.rect(-W / 2 + i * bw, -H / 2, bw, H); vg.fill();              // 左
+      vg.rect(W / 2 - (i + 1) * bw, -H / 2, bw, H); vg.fill();          // 右
+    }
+
+    this.initMotes();
 
     this.makeLabel('⚔ 闯 关 打 怪 ⚔', 0, H / 2 - 80, 38, new Color(255, 225, 150));
     this.zoneLbl = this.makeLabel('', 0, H / 2 - 130, 30, new Color(255, 235, 190));
@@ -258,6 +304,7 @@ export class BattleScene extends Component {
     if (!this.node.active) return;
     dt = Math.min(dt, 0.05);
     this.animT += dt;
+    this.stepMotes(dt);
 
     if (!this.over) {
       this.stepZone(dt);
@@ -633,11 +680,15 @@ export class BattleScene extends Component {
     const g = this.stageG;
     g.clear();
 
-    const drawn = [...this.monsters].sort((a, b) => (a.state === 'dead' ? -1 : 1) - (b.state === 'dead' ? -1 : 1) || b.lane - a.lane);
-    for (const m of drawn) this.drawStick(g, m);
+    // 阴影垫底（角色脚下）
     const h = this.hero;
+    if (h.state !== 'dead') this.drawShadow(g, h.x, 0, 40, h.jumpY);
+    for (const m of this.monsters) if (m.state !== 'dead') this.drawShadow(g, m.x, m.lane, 26 * m.scale, m.jumpY);
+
+    const drawn = [...this.monsters].sort((a, b) => (a.state === 'dead' ? -1 : 1) - (b.state === 'dead' ? -1 : 1) || b.lane - a.lane);
+    for (const m of drawn) this.drawPixelSoldier(g, m);
     const blink = h.state !== 'dead' && h.invuln > 0 && Math.floor(h.invuln * 20) % 2 === 0;
-    if (!blink) this.drawStick(g, h);
+    this.updateHeroSprite(blink);
 
     for (const s of this.sparks) {
       const a = 1 - s.life / s.max;
@@ -672,81 +723,223 @@ export class BattleScene extends Component {
       hArc(g, cx, cy, 24, c - 1.05, c + 1.05, 12); g.stroke();
     }
 
+    this.drawMotes(g);   // 氛围浮尘（在角色之上飘）
     this.drawHeroHp(g);
     for (const m of this.monsters) if (m.state !== 'dead' && m.hp < m.hpMax) this.drawMonsterHp(g, m);
+  }
+
+  // 主角赵云精灵：定位/翻转/选帧（玩法状态 → 精灵帧）
+  private updateHeroSprite(blink: boolean) {
+    const h = this.hero;
+    if (this.zyFrames.length < 4) { this.heroNode.active = false; return; }
+    this.heroNode.active = !blink || h.state === 'dead';
+
+    const sx = this.sX(h.x);
+    let y = this.groundY + h.jumpY - Math.max(0, h.crouch) * 24;   // 蹲/跳的高度
+    let ang = 0;
+    if (h.state === 'walk') {          // 无走路帧 → 用骑行颠簸模拟
+      const gp = this.animT * 13;
+      y += Math.abs(Math.sin(gp)) * 9; // 上下颠
+      ang = Math.sin(gp) * 3.5;        // 前后轻摇
+    }
+    this.heroNode.setPosition(sx, y, 0);
+
+    const S = this.SPRITE_SCALE * (h.scaleBoost || 1);
+    // 精灵默认朝左：朝右(dir>=0)时水平翻转
+    this.heroNode.setScale(h.dir >= 0 ? -S : S, S, 1);
+
+    // 选帧：攻击→按进度播 0..3（第2帧带枪气），其余→待机/骑行帧
+    let idx = 3;
+    if (h.state === 'attack') {
+      const p = h.atkType === 2 ? h.slamProg : h.swing;
+      idx = Math.max(0, Math.min(3, Math.floor(p * 4)));
+    }
+    this.heroSp.spriteFrame = this.zyFrames[idx];
+
+    // 死亡：倾倒 + 淡出
+    if (h.state === 'dead') {
+      this.heroNode.angle = (h.dir >= 0 ? -1 : 1) * Math.min(80, h.deadT * 170);
+      this.heroOp.opacity = Math.max(0, Math.round(255 * (1 - h.deadT / 1.4)));
+    } else {
+      this.heroNode.angle = ang;
+      this.heroOp.opacity = 255;
+    }
+  }
+
+  // 像素方块敌兵（程序画，红甲，配合像素风）
+  private drawPixelSoldier(g: Graphics, m: Monster) {
+    const sx = this.sX(m.x);
+    const gy = this.groundY + m.lane + m.jumpY;
+    const u = 7 * m.scale, dir = m.dir;
+    let alpha = 255;
+    if (m.state === 'dead') alpha = Math.max(0, Math.round(255 * (1 - m.deadT / 1.3)));
+    const hit = m.hitT > 0;
+
+    const skin = new Color(233, 190, 150, alpha);
+    const armor = hit ? new Color(255, 255, 255, alpha) : new Color(178, 54, 48, alpha);
+    const armorD = new Color(118, 32, 30, alpha);
+    const dark = new Color(42, 34, 40, alpha);
+    const steel = new Color(184, 188, 200, alpha);
+    const plume = new Color(226, 62, 52, alpha);
+
+    // 中心对齐方块：cx=水平偏移, by=底边离地高, w/h=尺寸
+    const R = (cx: number, by: number, w: number, h: number, c: Color) => {
+      g.fillColor = c; g.rect(sx + cx - w / 2, gy + by, w, h); g.fill();
+    };
+    // 死亡整体压扁下沉
+    const dcompress = m.state === 'dead' ? Math.min(1, m.deadT * 2) : 0;
+    const sy = 1 - dcompress * 0.7;
+
+    const legSw = m.state === 'walk' ? Math.sin(m.phase) * 1.0 * u : 0.4 * u;
+    // 腿
+    R(-0.85 * u + legSw, 0, 1.0 * u, 2.3 * u * sy, dark);
+    R(0.85 * u - legSw, 0, 1.0 * u, 2.3 * u * sy, dark);
+    // 躯干甲
+    R(0, 2.1 * u * sy, 3.0 * u, 2.9 * u * sy, armor);
+    R(0, 2.1 * u * sy, 3.0 * u, 0.5 * u * sy, armorD);          // 腰带
+    R(0, 4.7 * u * sy, 3.4 * u, 0.8 * u * sy, armorD);          // 护肩
+    // 头 + 盔
+    R(0, 5.3 * u * sy, 2.0 * u, 1.9 * u * sy, skin);
+    R(0.42 * u * dir, 6.0 * u * sy, 0.42 * u, 0.42 * u, dark);  // 眼
+    R(0, 6.7 * u * sy, 2.4 * u, 0.9 * u, armorD);               // 盔
+    R(0, 7.4 * u * sy, 0.6 * u, 0.9 * u, plume);                // 盔缨
+    // 长枪（朝向 dir）：攻击时前刺
+    const thrust = m.attacking ? m.swing * 2.4 * u : 0;
+    const spLen = 3.4 * u + thrust;
+    const spY = gy + 4.1 * u * sy;
+    const spX = dir > 0 ? sx + 1.0 * u : sx - 1.0 * u - spLen;
+    g.fillColor = steel; g.rect(spX, spY, spLen, 0.36 * u); g.fill();
+    g.fillColor = plume; g.rect(dir > 0 ? spX + spLen - 0.5 * u : spX, spY - 0.15 * u, 0.5 * u, 0.66 * u); g.fill();  // 红缨枪头
+  }
+
+  // 脚下阴影（把角色"踩"在地上，跳起时缩小变淡）
+  private drawShadow(g: Graphics, wx: number, lane: number, w: number, jumpY: number) {
+    const sx = this.sX(wx), sy = this.groundY + lane;
+    const shrink = 1 - Math.min(0.6, Math.max(0, jumpY) / 320);
+    g.fillColor = new Color(0, 0, 0, Math.round(85 * shrink));
+    g.ellipse(sx, sy - 2, w * shrink, 7 * shrink); g.fill();
+  }
+
+  private initMotes() {
+    const W = DESIGN_W, H = DESIGN_H;
+    this.motes = [];
+    for (let i = 0; i < 26; i++) {
+      this.motes.push({
+        x: (Math.random() - 0.5) * W,
+        y: this.groundY + Math.random() * (H * 0.55),
+        vx: (Math.random() - 0.5) * 14,
+        vy: 6 + Math.random() * 16,
+        ph: Math.random() * 6.28, r: 1.5 + Math.random() * 2.5,
+      });
+    }
+  }
+
+  private stepMotes(dt: number) {
+    const W = DESIGN_W, top = DESIGN_H / 2;
+    for (const m of this.motes) {
+      m.x += m.vx * dt; m.y += m.vy * dt; m.ph += dt * 2;
+      if (m.y > top) { m.y = this.groundY - 20; m.x = (Math.random() - 0.5) * W; }
+      if (m.x < -W / 2 - 10) m.x = W / 2 + 10;
+      else if (m.x > W / 2 + 10) m.x = -W / 2 - 10;
+    }
+  }
+
+  private drawMotes(g: Graphics) {
+    const name = this.theme().name;
+    let col: number[];
+    if (name === '密林') col = [200, 240, 150];        // 萤火
+    else if (name === '雪原') col = [240, 246, 255];   // 飘雪
+    else if (name === '城郊') col = [205, 195, 175];   // 浮尘
+    else if (name === '敌营') col = [255, 150, 80];    // 火星
+    else col = [238, 246, 232];                        // 柳絮
+    for (const m of this.motes) {
+      const a = 0.35 + 0.35 * Math.sin(m.ph);
+      g.fillColor = new Color(col[0], col[1], col[2], Math.round(200 * a));
+      g.circle(m.x, m.y, m.r); g.fill();
+    }
+  }
+
+  private sh(c: number[], f: number): Color {
+    return new Color(
+      Math.max(0, Math.min(255, Math.round(c[0] * f))),
+      Math.max(0, Math.min(255, Math.round(c[1] * f))),
+      Math.max(0, Math.min(255, Math.round(c[2] * f))), 255);
   }
 
   private drawBg() {
     const g = this.bgG, W = DESIGN_W, H = DESIGN_H, gy = this.groundY;
     const t = this.theme();
+    const PX = 12;
     g.clear();
-    // 天
-    g.fillColor = new Color(t.sky[0], t.sky[1], t.sky[2], 255);
-    g.rect(-W / 2, -H / 2, W, H); g.fill();
-    // 远山（视差 0.4）
-    g.fillColor = new Color(t.hill[0], t.hill[1], t.hill[2], 255);
-    const base = gy + 210;
-    g.moveTo(-W / 2, gy);
-    for (let sx = -W / 2; sx <= W / 2; sx += 24) {
-      const y = base + Math.sin((sx + this.camX * 0.4) * 0.008) * 70 + Math.sin((sx + this.camX * 0.4) * 0.021) * 26;
-      g.lineTo(sx, y);
-    }
-    g.lineTo(W / 2, gy); g.close(); g.fill();
-    // 地
+
+    // 天空 3 段（上暗下亮）
+    g.fillColor = this.sh(t.sky, 0.82); g.rect(-W / 2, gy + 340, W, H); g.fill();
+    g.fillColor = this.sh(t.sky, 0.92); g.rect(-W / 2, gy + 170, W, 170); g.fill();
+    g.fillColor = new Color(t.sky[0], t.sky[1], t.sky[2], 255); g.rect(-W / 2, gy, W, 170); g.fill();
+
+    // 远/近山：量化成像素台阶
+    const layer = (par: number, amp: number, baseH: number, fac: number, ph: number) => {
+      g.fillColor = this.sh(t.hill, fac);
+      for (let sx = -W / 2; sx < W / 2; sx += PX) {
+        const wx = sx + this.camX * par + ph;
+        const hRaw = gy + baseH + Math.sin(wx * 0.008) * amp + Math.sin(wx * 0.019) * amp * 0.4;
+        const hy = Math.round(hRaw / PX) * PX;
+        g.rect(sx, gy, PX + 1, hy - gy); g.fill();
+      }
+    };
+    layer(0.35, 55, 150, 0.78, 400);   // 远山（矮、暗）
+    layer(0.55, 95, 230, 1.0, 0);      // 近山
+
+    // 地面
     g.fillColor = new Color(t.ground[0], t.ground[1], t.ground[2], 255);
     g.rect(-W / 2, -H / 2, W, gy + H / 2); g.fill();
-    g.strokeColor = new Color(0, 0, 0, 90); g.lineWidth = 5;
-    g.moveTo(-W / 2, gy); g.lineTo(W / 2, gy); g.stroke();
-    // 地面纹（全速滚动，制造前进感）
-    g.strokeColor = new Color(0, 0, 0, 55); g.lineWidth = 3;
-    const off = ((this.camX % 90) + 90) % 90;
-    for (let sx = -W / 2 - off; sx <= W / 2; sx += 90) {
-      g.moveTo(sx, gy - 8); g.lineTo(sx + 26, gy - 30);
+    // 地表棋盘抖动边（随镜头滚动）
+    g.fillColor = this.sh(t.ground, 0.72);
+    const step = Math.floor(((this.camX % (PX * 2)) + PX * 2) % (PX * 2) / PX);
+    for (let i = 0; i * PX < W + PX; i++) {
+      if ((i + step) % 2 === 0) { g.rect(-W / 2 + i * PX, gy - PX, PX, PX); g.fill(); }
     }
-    g.stroke();
-    // 场景道具（视差 0.85）
-    this.drawProps(t);
+    // 地面横向暗纹（几层，营造纵深）
+    for (let r = 1; r <= 4; r++) {
+      g.fillColor = this.sh(t.ground, 1 - r * 0.05);
+      g.rect(-W / 2, gy - PX * 2 - r * PX * 3, W, PX); g.fill();
+    }
+    this.drawProps(t, PX);
   }
 
-  private drawProps(t: Theme) {
+  private drawProps(t: Theme, PX: number) {
     const g = this.bgG, W = DESIGN_W, gy = this.groundY, p = 0.85, gap = 250;
     const rnd = (n: number) => { const s = Math.sin(n * 127.1) * 43758.5; return s - Math.floor(s); };
+    const snap = (v: number) => Math.round(v / PX) * PX;
+    const blk = (cx: number, by: number, w: number, h: number, c: Color) => {
+      g.fillColor = c; g.rect(snap(cx - w / 2), gy + snap(by), Math.max(PX, snap(w)), Math.max(PX, snap(h))); g.fill();
+    };
     const startW = Math.floor((this.camX - W) / gap) * gap;
     for (let w = startW; w < this.camX + W; w += gap) {
       const sx = (w - this.camX) * p;
-      if (sx < -W / 2 - 80 || sx > W / 2 + 80) continue;
-      const r = rnd(w), sz = 0.7 + r * 0.7;
+      if (sx < -W / 2 - 90 || sx > W / 2 + 90) continue;
+      const r = rnd(w), sz = 0.8 + r * 0.6;
+      const green = new Color(t.hill[0], t.hill[1], t.hill[2], 255);
       switch (t.prop) {
         case 'bush':
-          g.fillColor = new Color(t.hill[0], t.hill[1], t.hill[2], 255);
-          g.circle(sx, gy + 6, 22 * sz); g.fill();
-          g.circle(sx - 18 * sz, gy, 15 * sz); g.fill();
-          g.circle(sx + 18 * sz, gy, 15 * sz); g.fill();
+          blk(sx, 0, 60 * sz, 34 * sz, green); blk(sx, 28 * sz, 34 * sz, 20 * sz, green);
           break;
         case 'tree':
-          g.fillColor = new Color(80, 55, 35, 255);
-          g.rect(sx - 5, gy, 10, 70 * sz); g.fill();
-          g.fillColor = new Color(40, 90, 55, 255);
-          g.circle(sx, gy + 80 * sz, 34 * sz); g.fill();
+          blk(sx, 0, 14, 60 * sz, new Color(84, 56, 36, 255));
+          blk(sx, 52 * sz, 72 * sz, 30 * sz, new Color(46, 96, 58, 255));
+          blk(sx, 78 * sz, 46 * sz, 26 * sz, new Color(54, 110, 66, 255));
           break;
         case 'pine':
-          g.fillColor = new Color(50, 95, 70, 255);
-          g.moveTo(sx, gy + 95 * sz); g.lineTo(sx - 28 * sz, gy); g.lineTo(sx + 28 * sz, gy); g.close(); g.fill();
-          g.fillColor = new Color(240, 245, 250, 255);
-          g.moveTo(sx, gy + 95 * sz); g.lineTo(sx - 12 * sz, gy + 55 * sz); g.lineTo(sx + 12 * sz, gy + 55 * sz); g.close(); g.fill();
+          for (let i = 0; i < 4; i++) blk(sx, i * 22 * sz, (74 - i * 16) * sz, 22 * sz, new Color(52, 98, 72, 255));
+          blk(sx, 0, 14, 22, new Color(84, 56, 36, 255));
           break;
         case 'wall':
-          g.fillColor = new Color(95, 90, 88, 255);
-          g.rect(sx - 40 * sz, gy, 80 * sz, 110 * sz); g.fill();
-          g.fillColor = new Color(70, 66, 64, 255);
-          g.rect(sx - 40 * sz, gy + 110 * sz, 22 * sz, 20); g.fill();
-          g.rect(sx + 18 * sz, gy + 110 * sz, 22 * sz, 20); g.fill();
+          blk(sx, 0, 84 * sz, 120 * sz, new Color(100, 94, 92, 255));
+          blk(sx - 30 * sz, 120 * sz, 24 * sz, 22, new Color(72, 68, 66, 255));
+          blk(sx + 30 * sz, 120 * sz, 24 * sz, 22, new Color(72, 68, 66, 255));
           break;
         case 'tent':
-          g.fillColor = new Color(150, 55, 50, 255);
-          g.moveTo(sx, gy + 80 * sz); g.lineTo(sx - 46 * sz, gy); g.lineTo(sx + 46 * sz, gy); g.close(); g.fill();
-          g.strokeColor = new Color(40, 20, 20, 255); g.lineWidth = 3;
-          g.moveTo(sx, gy + 80 * sz); g.lineTo(sx, gy); g.stroke();
+          for (let i = 0; i < 4; i++) blk(sx, i * 22 * sz, (18 + (4 - i) * 22) * sz, 22 * sz, new Color(150, 55, 50, 255));
           break;
       }
     }
@@ -798,9 +991,8 @@ export class BattleScene extends Component {
     };
 
     const sw = Math.sin(o.phase);
-    // 走路上下颠 / 待机轻呼吸
-    const bob = walking ? Math.abs(sw) * 0.15 * u
-      : o.state === 'idle' ? Math.sin(this.animT * 2.2 + o.phase) * 0.035 * u : 0;
+    // 走路上下颠（待机不再呼吸起伏，只留飘带动）
+    const bob = walking ? Math.abs(sw) * 0.15 * u : 0;
 
     // 蹲/伸姿态（逻辑层已算好 o.crouch）：正=蹲下屈膝，负=踮脚起身
     const crouch = o.crouch;
@@ -1050,7 +1242,7 @@ export class BattleScene extends Component {
       const [h0x, h0y] = T(-0.60 * u, headCy + 0.26 * u), [h1x, h1y] = T(0.60 * u, headCy + 0.30 * u);
       g.strokeColor = bandC; g.lineWidth = 0.18 * u; hLine(g, h0x, h0y, h1x, h1y); g.stroke();
       g.lineWidth = 0.09 * u;
-      const flap = Math.sin(this.animT * 6 + o.phase) * (walking ? 0.11 : 0.05);   // 飘尾甩动
+      const flap = walking ? Math.sin(this.animT * 6 + o.phase) * 0.11 : 0;   // 飘尾仅走路甩动，待机静止
       const [t0x, t0y] = T(-0.58 * u, headCy + 0.28 * u);
       const [t1x, t1y] = T((-0.95 - flap * 0.35) * u, headCy + (0.10 + flap) * u);
       const [t2x, t2y] = T((-0.88 - flap * 0.5) * u, headCy + (-0.08 + flap * 1.5) * u);
