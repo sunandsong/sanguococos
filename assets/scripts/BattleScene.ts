@@ -297,6 +297,8 @@ export class BattleScene extends Component {
     this.makeScrollLayer('bg-far-mtn', 380, 0.25, 0);     // 远山（高）
     this.makeScrollLayer('bg-mid-hills', 300, 0.5, 0);    // 中景丘陵 + 山河牌坊
     this.makeScrollLayer('bg-near-grass', 180, 0.7, -30); // 近景草坡（角色身后）
+    // 地面石块切面：草皮唇边对齐地面线（原尺寸 1:1），主角就站在唇边上 → 与草地融为一体
+    this.makeScrollLayer('bg-fg-stone', 524, 1.0, -494);
 
     // 地面装饰散布：资源存在几张用几张（decor-*.png 丢进 resources 即生效）
     const decorRoot = this.child('grounddecor');
@@ -463,8 +465,6 @@ export class BattleScene extends Component {
 
     // 前景层（主角之上、暗角之下）：每帧重画
     this.fgG = this.child('foreground').addComponent(Graphics);
-    // 最前景枝叶：比镜头滚得快（par>1）→ 穿行树丛的纵深感（在角色之上、暗角之下）
-    this.makeScrollLayer('bg-fg-foliage', 230, 1.25, -220);
 
     // 电影暗角（压暗四周，聚焦中央；盖在角色之上、UI 之下，只画一次）
     const vg = this.child('vignette').addComponent(Graphics);
@@ -1088,7 +1088,7 @@ export class BattleScene extends Component {
     const killed = m.hp <= 0;
     this.addHitStop(killed ? 0.085 : 0.045);   // 顿帧：击杀更久
     this.addShake(killed ? 13 : 6);            // 震屏：击杀更猛
-    AudioMgr.inst.play(killed ? 'kill' : 'hit');
+    if (killed) AudioMgr.inst.play('kill', 0.5); else AudioMgr.inst.play('hit');
     this.spawnBlood(bx, by, kdir, killed ? bloodN + 12 : bloodN);
     if (killed) {
       m.state = 'dead'; m.deadT = 0; m.fallSign = kdir;
@@ -1911,7 +1911,7 @@ export class BattleScene extends Component {
       const speed = 5 + i * 2;
       let bx = (-this.animT * speed - this.camX * 0.12 + i * 267) % span;
       bx = ((bx % span) + span) % span - W / 2 - 140;
-      const by = gy + 190 + (i % 3) * 78;
+      const by = gy + 420 + (i % 3) * 70;   // 抬到远山(顶=gy+380)之上，不被山挡
       const s = 0.85 + (i % 3) * 0.28;
       g.fillColor = col;
       g.rect(snap(bx), snap(by), snap(96 * s), snap(26 * s)); g.fill();
