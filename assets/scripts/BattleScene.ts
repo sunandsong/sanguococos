@@ -188,6 +188,7 @@ export class BattleScene extends Component {
   private slowMoT = 0;             // 胜利慢动作剩余时间
   private dusts: { x: number; y: number; vx: number; vy: number; r: number; life: number; max: number }[] = [];
   private walkDustT = 0;           // 跑动扬尘节流
+  private stepSndT = 0;            // 脚步声节流
   private bossGhosts: { node: Node; sp: Sprite; op: UIOpacity }[] = [];   // Boss 冲刺残影池
   private ghostIdx = 0;
   private ghostT = 0;
@@ -605,9 +606,17 @@ export class BattleScene extends Component {
   }
 
   private heroSwing() {
-    if (this.over || this.zoneState === 'scroll' || this.airborne() || this.hero.jumping || this.choosing) return;
+    if (this.over || this.zoneState === 'scroll' || this.choosing) return;
+    if (this.airborne() && !this.hero.jumping) return;   // 跳劈滞空中不可再出招
     const h = this.hero;
     if (h.atkTimer < this.SWING_DUR + this.HERO_ATK_COOLDOWN) return;   // 还在挥
+    // 空中斩：普通跳跃中可平斩（不进连招、不触发跳劈）
+    if (h.jumping) {
+      h.combo = 0; h.atkType = 0;
+      h.attacking = true; h.atkTimer = 0; h.hitApplied = false;
+      AudioMgr.inst.play('swing', 0.9);
+      return;
+    }
     // 连招：窗口内再点 → 下一段，否则从头
     h.combo = h.atkTimer <= this.COMBO_WINDOW ? (h.combo + 1) % 3 : 0;
     h.atkType = h.combo;
@@ -704,12 +713,12 @@ export class BattleScene extends Component {
     this.zoneLbl.string = `第 ${this.zone + 1} 关 · ${t.name} · ${this.timeOfDay().name}`;
     this.scoreLbl.string = `得分 ${this.score}　❤ ${Math.max(0, Math.ceil(this.hero.hp))}`;
     this.coinLbl.string = `金 ${this.coins}`;
-    this.comboLbl.node.active = this.comboCount >= 2;
+    this.comboLbl.node.active = false;   // 连击提示已关闭
     if (this.comboCount >= 2) {
       this.comboLbl.string = `连击 x${this.comboCount}`;
       this.comboLbl.node.setPosition(this.sX(this.comboX), this.comboY + 100, 0);   // 显示在被打的敌人上方
     }
-    this.arrow.active = !this.over && this.zoneState === 'cleared';
+    this.arrow.active = false;   // 「前进 →」提示已关闭
     if (this.arrow.active) {
       this.arrowT += dt;
       const s = 1 + 0.14 * Math.abs(Math.sin(this.arrowT * 3));
@@ -832,6 +841,12 @@ export class BattleScene extends Component {
         this.walkDustT = 0.16;
         this.spawnDust(h.x - h.dir * 12, this.groundY + 4, 1, 50);
       }
+      // 脚步声：贴地行走按步频响
+      this.stepSndT -= dt;
+      if (h.jumpY <= 0 && !h.jumping && this.stepSndT <= 0) {
+        this.stepSndT = 0.3;
+        AudioMgr.inst.play('step', 0.35);
+      }
     }
 
     // 关卡边界
@@ -928,7 +943,7 @@ export class BattleScene extends Component {
     } else {
       h.state = mv !== 0 ? 'walk' : 'idle';
     }
-    if (h.jumping) h.state = 'idle';   // 跳跃时用站姿（腿不做走路摆动），姿态交给 crouch
+    if (h.jumping && !h.attacking) h.state = 'idle';   // 跳跃站姿；空中出招时保留攻击态
 
     // 跳劈姿态：起跳前下蹲蓄力 → 升起举刀 → 下落劈砍 → 落地保持劈下（用 slamProg 驱动，动作看得清）
     if (h.atkType === 2 && (h.attacking || h.landT > 0)) {
@@ -1157,7 +1172,7 @@ export class BattleScene extends Component {
     const h = this.hero;
     const sy = this.groundY + m.lane + 70 * m.scale;
     const dxv = h.x - m.x, dyv = (this.groundY + 80) - sy, L = Math.hypot(dxv, dyv) || 1;
-    const sp = 430;
+    const sp = 300;   // 箭速（放慢，更好躲）
     this.arrows.push({ x: m.x, y: sy, vx: dxv / L * sp, vy: dyv / L * sp, life: 0 });
     AudioMgr.inst.play('arrow', 0.7);
   }
@@ -1237,7 +1252,7 @@ export class BattleScene extends Component {
     g.strokeColor = new Color(70, 58, 46, 255); g.lineWidth = 3;
     for (const a of this.arrows) {
       const sx = this.sX(a.x), L = Math.hypot(a.vx, a.vy) || 1;
-      g.moveTo(sx - a.vx / L * 16, a.y - a.vy / L * 16); g.lineTo(sx, a.y);
+      g.moveTo(sx - a.vx / L * 30, a.y - a.vy / L * 30); g.lineTo(sx, a.y);
     }
     g.stroke();
     g.fillColor = new Color(190, 60, 50, 255);
