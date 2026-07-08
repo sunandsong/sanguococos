@@ -493,7 +493,7 @@ export class BattleScene extends Component {
     this.hintLbl = this.makeLabel('移动 A·D　跳 W/↑　攻击(连按3下→跳劈)　剑气 K', 0, H / 2 - 210, 22, new Color(200, 200, 210));
 
     // 「前进 →」提示（清关后出现，update 里做缩放呼吸）
-    this.arrow = this.makeLabel('前进 →', W / 2 - 130, 70, 42, new Color(255, 240, 150));
+    this.arrow = this.makeLabel('前进 →', W / 2 - 130, 70, 42, new Color(255, 240, 150)).node;   // 取 node 才能真正显隐
     this.arrow.active = false;
 
     this.banner = this.child('banner');
