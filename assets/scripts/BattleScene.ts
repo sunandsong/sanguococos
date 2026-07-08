@@ -5,6 +5,7 @@ import {
   Sprite, SpriteFrame, Texture2D, Rect, resources,
 } from 'cc';
 import { DESIGN_W, DESIGN_H } from './Constants';
+import { AudioMgr } from './AudioMgr';
 import { hLine, hArc } from './HandDraw';
 const { ccclass, property } = _decorator;
 
@@ -180,6 +181,18 @@ export class BattleScene extends Component {
   private dmgNums: DmgNum[] = [];
   private dmgPoolFree: Node[] = [];
   private dmgLayer!: Node;         // 伤害数字容器
+  private zoneIntroLbl!: Label;    // 关卡开场大字
+  private zoneIntroOp!: UIOpacity;
+  private zoneIntroT = 0;
+  private readonly ZONE_INTRO_DUR = 1.6;
+  private slowMoT = 0;             // 胜利慢动作剩余时间
+  private dusts: { x: number; y: number; vx: number; vy: number; r: number; life: number; max: number }[] = [];
+  private walkDustT = 0;           // 跑动扬尘节流
+  private bossGhosts: { node: Node; sp: Sprite; op: UIOpacity }[] = [];   // Boss 冲刺残影池
+  private ghostIdx = 0;
+  private ghostT = 0;
+  private decorFrames: SpriteFrame[] = [];   // 地面装饰贴图（找到几张用几张）
+  private decorPool: { node: Node; sp: Sprite }[] = [];
   private coins = 0;
   private comboCount = 0;
   private comboT = 0;
@@ -285,6 +298,23 @@ export class BattleScene extends Component {
     this.makeScrollLayer('bg-mid-hills', 300, 0.5, 0);    // 中景丘陵 + 山河牌坊
     this.makeScrollLayer('bg-near-grass', 180, 0.7, -30); // 近景草坡（角色身后）
 
+    // 地面装饰散布：资源存在几张用几张（decor-*.png 丢进 resources 即生效）
+    const decorRoot = this.child('grounddecor');
+    for (let i = 0; i < 16; i++) {
+      const n = new Node('decor' + i); n.layer = this.node.layer; n.parent = decorRoot;
+      n.addComponent(UITransform).setAnchorPoint(0.5, 0);
+      const sp = n.addComponent(Sprite); sp.sizeMode = Sprite.SizeMode.CUSTOM;
+      sp.color = new Color(205, 208, 198, 255);   // 略压暗融入环境
+      n.active = false;
+      this.decorPool.push({ node: n, sp });
+    }
+    for (const res of ['decor-mushroom', 'decor-fern', 'decor-stump', 'decor-log',
+                       'decor-stone', 'decor-flower', 'decor-root', 'decor-grass']) {
+      resources.load(res + '/spriteFrame', SpriteFrame, (e, sf) => {
+        if (!e && sf) { (sf.texture as Texture2D).setFilters(Texture2D.Filter.NEAREST, Texture2D.Filter.NEAREST); this.decorFrames.push(sf); }
+      });
+    }
+
     // Boss 关近景道具（AI 贴图：曹军大旗/青铜火盆/断枪/破盾/拒马；垫在角色之下）
     this.bossPropRoot = this.child('bossprops');
     {
@@ -347,6 +377,14 @@ export class BattleScene extends Component {
     loadKind('archer', 'enemy-archer', 48, [4, 10, 40, 46], [40, 46]);  // 弓手 弓兵
 
     // Boss 精灵（许褚，大刀上劈）：在角色层，默认隐藏
+    for (let i = 0; i < 6; i++) {   // Boss 冲刺残影池（先建=画在 Boss 身后）
+      const n = this.child('bossghost' + i);
+      const u2 = n.getComponent(UITransform)!; u2.setContentSize(64, 64); u2.setAnchorPoint(0.5, 0.156);
+      const sp = n.addComponent(Sprite); sp.sizeMode = Sprite.SizeMode.CUSTOM;
+      const op = n.addComponent(UIOpacity);
+      n.active = false;
+      this.bossGhosts.push({ node: n, sp, op });
+    }
     this.bossNode = this.child('boss');
     this.bossNode.getComponent(UITransform)!.setContentSize(64, 64);
     this.bossNode.getComponent(UITransform)!.setAnchorPoint(0.5, 0.156);   // 锚点在脚（帧底上方10px）→ 对齐地平线
@@ -425,6 +463,8 @@ export class BattleScene extends Component {
 
     // 前景层（主角之上、暗角之下）：每帧重画
     this.fgG = this.child('foreground').addComponent(Graphics);
+    // 最前景枝叶：比镜头滚得快（par>1）→ 穿行树丛的纵深感（在角色之上、暗角之下）
+    this.makeScrollLayer('bg-fg-foliage', 230, 1.25, -220);
 
     // 电影暗角（压暗四周，聚焦中央；盖在角色之上、UI 之下，只画一次）
     const vg = this.child('vignette').addComponent(Graphics);
@@ -460,6 +500,11 @@ export class BattleScene extends Component {
     this.bannerLbl = this.addLabelTo(this.banner, '', 54, new Color(255, 120, 110));
     this.banner.active = false;
 
+    // 关卡开场大字（拍下来再淡出）
+    this.zoneIntroLbl = this.makeLabel('', 0, 150, 64, new Color(255, 224, 130));
+    this.zoneIntroOp = this.zoneIntroLbl.node.addComponent(UIOpacity);
+    this.zoneIntroLbl.node.active = false;
+
     const by = -H / 2 + 120;
     this.makeHoldButton('◀', -270, by, new Color(70, 80, 110), h => (this.leftHeld = h));
     this.makeHoldButton('▶', -130, by, new Color(70, 80, 110), h => (this.rightHeld = h));
@@ -490,6 +535,8 @@ export class BattleScene extends Component {
   }
 
   private startGame() {
+    AudioMgr.inst.playBgm('bgm-battle');
+    this.scheduleOnce(() => this.showZoneIntro('第 1 关', new Color(255, 224, 130)), 0.1);
     this.camX = 0; this.zone = 0; this.zoneState = 'fight'; this.targetCam = 0;
     this.curBiome = -1; this.transActive = false; this.applyBiome(0);   // 复位背景组到第一组
     this.preloadAllBiomes();   // 预载各组，走路换景才有得滑
@@ -550,6 +597,7 @@ export class BattleScene extends Component {
 
   // 普通跳跃：先蹲蓄力 → 起身拉直腾空 → 下降 → 落地缓冲下蹲
   private heroJump() {
+    AudioMgr.inst.play('jump', 0.7);
     if (this.over || this.zoneState === 'scroll' || this.choosing) return;
     const h = this.hero;
     if (h.jumping || h.attacking || h.preJump > 0 || h.landT > 0 || this.airborne()) return;
@@ -564,6 +612,7 @@ export class BattleScene extends Component {
     h.combo = h.atkTimer <= this.COMBO_WINDOW ? (h.combo + 1) % 3 : 0;
     h.atkType = h.combo;
     h.attacking = true; h.atkTimer = 0; h.hitApplied = false;
+    AudioMgr.inst.play(h.atkType === 2 ? 'swing2' : 'swing', 0.9);
     if (h.atkType === 2) h.preJump = this.PREJUMP_DUR;   // 第 3 段：先蹲蓄力，蹲完再跃起下劈
   }
 
@@ -601,7 +650,20 @@ export class BattleScene extends Component {
   update(dt: number) {
     if (!this.node.active) return;
     dt = Math.min(dt, 0.05);
+    if (this.slowMoT > 0) { this.slowMoT -= dt; dt *= 0.35; }   // 胜利慢动作
     this.animT += dt;
+
+    // 关卡开场大字：0.22s 从 1.5 倍拍到 1 倍，尾段 0.35s 淡出
+    if (this.zoneIntroT > 0) {
+      this.zoneIntroT -= dt;
+      const t = this.ZONE_INTRO_DUR - this.zoneIntroT;
+      const aIn = Math.min(1, t / 0.2);
+      const aOut = Math.min(1, Math.max(0, this.zoneIntroT) / 0.35);
+      this.zoneIntroOp.opacity = Math.round(255 * Math.min(aIn, aOut));
+      const sc = 1.5 - 0.5 * Math.min(1, t / 0.22);
+      this.zoneIntroLbl.node.setScale(sc, sc, 1);
+      if (this.zoneIntroT <= 0) this.zoneIntroLbl.node.active = false;
+    }
     this.stepMotes(dt);
 
     // 屏幕震动（整块偏移，短促衰减）
@@ -632,6 +694,8 @@ export class BattleScene extends Component {
     this.cullMonsters();
     this.stepSparks(dt);
     this.stepBloods(dt);
+    this.stepDusts(dt);
+    this.stepBossGhosts(dt);
     this.stepFlashes(dt);
     this.stepDmgNums(dt);
     this.draw();
@@ -688,7 +752,7 @@ export class BattleScene extends Component {
         this.spawnMonster();
         this.waveRemaining--;
       }
-      if (this.waveRemaining === 0 && alive === 0) this.zoneState = 'cleared';
+      if (this.waveRemaining === 0 && alive === 0) { this.zoneState = 'cleared'; AudioMgr.inst.play('clear'); }
     }
     // cleared：推进判定在 stepHero 里
   }
@@ -697,6 +761,9 @@ export class BattleScene extends Component {
   private isBossZone(): boolean { return this.zone >= this.BOSS_ZONE; }
 
   private spawnBoss(): void {
+    this.showZoneIntro('虎痴 · 许褚', new Color(255, 96, 84));
+    AudioMgr.inst.play('roar');
+    this.addShake(16); this.addHitStop(0.1);
     const W = DESIGN_W;
     const hp = 320 + this.zone * 70;
     this.monsters.push({
@@ -759,6 +826,12 @@ export class BattleScene extends Component {
       h.dir = mv;
       h.x += mv * this.heroSpeed * dt;
       h.phase += dt * 15;
+      // 跑动扬尘：贴地时脚后跟出小尘
+      this.walkDustT -= dt;
+      if (h.jumpY <= 0 && this.walkDustT <= 0) {
+        this.walkDustT = 0.16;
+        this.spawnDust(h.x - h.dir * 12, this.groundY + 4, 1, 50);
+      }
     }
 
     // 关卡边界
@@ -785,6 +858,7 @@ export class BattleScene extends Component {
         this.bossSpawned = false;
         this.applyBiome(this.zone);
         this.preloadAllBiomes();
+        if (!this.isBossZone()) this.showZoneIntro(`第 ${this.zone + 1} 关`, new Color(255, 224, 130));   // Boss 关由登场演出接管
       }
     }
 
@@ -809,6 +883,8 @@ export class BattleScene extends Component {
         h.jumpVy -= this.GRAVITY_MOVE * dt;
         if (h.jumpY <= 0) {
           h.jumpY = 0; h.jumpVy = 0; h.jmpLand = this.JUMP_LAND;
+          AudioMgr.inst.play('land', 0.6);
+          this.spawnDust(h.x, this.groundY + 4, 6, 190);   // 落地尘圈
           this.sparks.push({ x: h.x, y: this.groundY + 8, life: 0, max: 0.16 });   // 落地小尘星
         }
       }
@@ -903,6 +979,7 @@ export class BattleScene extends Component {
     const mp = this.moveParams(2);
     for (let k = 0; k < 9; k++) this.sparks.push({ x: h.x + (k - 4) * 22, y: this.groundY + 6, life: 0, max: 0.28 });
     this.addShake(18); this.addHitStop(0.06);   // 跳劈落地：大震 + 顿帧
+    this.spawnDust(this.hero.x, this.groundY + 4, 10, 300);   // 跳劈落地大尘圈
     for (const m of this.monsters) {
       if (m.state === 'dead') continue;
       const dx = m.x - h.x;
@@ -911,6 +988,56 @@ export class BattleScene extends Component {
         this.hitMonster(m, mp.dmg, kdir, mp.knock, mp.launch, mp.blood, m.x, this.groundY + 80 * m.scale);
       }
     }
+  }
+
+  // 尘土粒子：跑动脚下扬尘 / 落地尘圈
+  private spawnDust(x: number, y: number, n: number, spread: number) {
+    for (let i = 0; i < n; i++) {
+      this.dusts.push({
+        x: x + (Math.random() - 0.5) * 14, y: y + Math.random() * 6,
+        vx: (Math.random() - 0.5) * spread, vy: 26 + Math.random() * 34,
+        r: 4 + Math.random() * 5, life: 0, max: 0.4 + Math.random() * 0.25,
+      });
+    }
+  }
+
+  private stepDusts(dt: number) {
+    for (let i = this.dusts.length - 1; i >= 0; i--) {
+      const d = this.dusts[i];
+      d.life += dt;
+      d.x += d.vx * dt; d.y += d.vy * dt;
+      d.vy *= 0.92; d.vx *= 0.95;
+      if (d.life >= d.max) this.dusts.splice(i, 1);
+    }
+  }
+
+  // Boss 冲刺残影：冲刺中每隔一小段留一个当前帧的淡影
+  private stepBossGhosts(dt: number) {
+    for (const g of this.bossGhosts) {
+      if (!g.node.active) continue;
+      g.op.opacity = Math.max(0, g.op.opacity - 620 * dt);
+      if (g.op.opacity <= 4) g.node.active = false;
+    }
+    const b = this.monsters.find(m => m.kind === 'boss');
+    if (!b || (b.dashT || 0) <= 0 || !this.bossNode.active) return;
+    this.ghostT -= dt;
+    if (this.ghostT > 0) return;
+    this.ghostT = 0.05;
+    const g = this.bossGhosts[this.ghostIdx++ % this.bossGhosts.length];
+    if (!g) return;
+    g.sp.spriteFrame = this.bossSp.spriteFrame;
+    g.node.setPosition(this.bossNode.getPosition());
+    g.node.setScale(this.bossNode.getScale());
+    g.node.active = true;
+    g.op.opacity = 150;
+  }
+
+  // 关卡/Boss 开场大字：放大拍下 → 停留 → 淡出
+  private showZoneIntro(text: string, color: Color) {
+    this.zoneIntroLbl.string = text;
+    this.zoneIntroLbl.color = color;
+    this.zoneIntroLbl.node.active = true;
+    this.zoneIntroT = this.ZONE_INTRO_DUR;
   }
 
   private addShake(mag: number) { this.shakeT = 0.18; this.shakeMag = Math.max(this.shakeMag, mag); }
@@ -961,9 +1088,11 @@ export class BattleScene extends Component {
     const killed = m.hp <= 0;
     this.addHitStop(killed ? 0.085 : 0.045);   // 顿帧：击杀更久
     this.addShake(killed ? 13 : 6);            // 震屏：击杀更猛
+    AudioMgr.inst.play(killed ? 'kill' : 'hit');
     this.spawnBlood(bx, by, kdir, killed ? bloodN + 12 : bloodN);
     if (killed) {
       m.state = 'dead'; m.deadT = 0; m.fallSign = kdir;
+      m.jumpVy = Math.max(m.jumpVy, 230 + Math.random() * 150);   // 尸体弹飞
       this.score += 1 + Math.floor(this.comboCount / 5);
       this.spawnDrop(m);
     }
@@ -983,6 +1112,7 @@ export class BattleScene extends Component {
   // 打开三选一升级面板（暂停战斗）
   private openUpgrade() {
     this.choosing = true;
+    AudioMgr.inst.play('levelup');
     const idx = [...Array(this.UPGRADES.length).keys()];
     for (let i = idx.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [idx[i], idx[j]] = [idx[j], idx[i]]; }
     for (let c = 0; c < 3; c++) {
@@ -1009,6 +1139,7 @@ export class BattleScene extends Component {
     if (h.invuln > 0 || this.airborne() || this.over) return;   // 无敌帧 + 空中免伤
     h.hp -= dmg;
     h.invuln = 0.7;
+    AudioMgr.inst.play('hurt');
     h.hitT = this.HIT_DUR;
     const away = h.x >= fromX ? 1 : -1;
     h.kx = away * 360;
@@ -1028,6 +1159,7 @@ export class BattleScene extends Component {
     const dxv = h.x - m.x, dyv = (this.groundY + 80) - sy, L = Math.hypot(dxv, dyv) || 1;
     const sp = 430;
     this.arrows.push({ x: m.x, y: sy, vx: dxv / L * sp, vy: dyv / L * sp, life: 0 });
+    AudioMgr.inst.play('arrow', 0.7);
   }
 
   private stepArrows(dt: number) {
@@ -1062,7 +1194,7 @@ export class BattleScene extends Component {
         // 飞入口袋：向目标加速插值
         const k = Math.min(1, dt * 11);
         d.sx += (px - d.sx) * k; d.sy += (py - d.sy) * k;
-        if (Math.hypot(px - d.sx, py - d.sy) < 26) { this.coins++; this.drops.splice(i, 1); continue; }
+        if (Math.hypot(px - d.sx, py - d.sy) < 26) { this.coins++; AudioMgr.inst.play('coin', 0.5); this.drops.splice(i, 1); continue; }
       } else {
         d.vy -= 640 * dt; d.y += d.vy * dt;
         if (d.y < this.groundY) { d.y = this.groundY; d.vy = 0; }
@@ -1128,7 +1260,17 @@ export class BattleScene extends Component {
   private stepMonsters(dt: number) {
     const h = this.hero;
     for (const m of this.monsters) {
-      if (m.state === 'dead') { m.deadT += dt; continue; }
+      if (m.state === 'dead') {
+        m.deadT += dt;
+        // 尸体惯性：击退滑行 + 抛物线落地
+        if (Math.abs(m.vx) > 1) { m.x += m.vx * dt; m.vx *= 0.9; }
+        if (m.jumpY > 0 || m.jumpVy !== 0) {
+          m.jumpY += m.jumpVy * dt;
+          m.jumpVy -= 2600 * dt;
+          if (m.jumpY <= 0) { m.jumpY = 0; m.jumpVy = 0; this.spawnDust(m.x, this.groundY + 4, 3, 120); }
+        }
+        continue;
+      }
       if (m.hitT > 0) m.hitT -= dt;
       if (Math.abs(m.vx) > 1) { m.x += m.vx * dt; m.vx *= 0.82; }
 
@@ -1203,6 +1345,7 @@ export class BattleScene extends Component {
       m.slamCd = Math.min(m.slamCd || 0, 0.8);   // 立刻酝酿一次重击
       m.dashCd = 1.6;
       this.addShake(14); this.addHitStop(0.08);
+      AudioMgr.inst.play('roar');
       this.spawnHitFlash(this.sX(m.x), this.groundY + 80);
       for (let i = 0; i < 2; i++) this.spawnMonster();   // 增援两个小兵
     }
@@ -1216,6 +1359,7 @@ export class BattleScene extends Component {
         m.slamState = 'strike'; m.slamT = 0.45;
         const tx = m.slamX || m.x;
         this.addShake(20); this.addHitStop(0.05);
+        AudioMgr.inst.play('slam');
         this.spawnHitFlash(this.sX(tx), this.groundY + 26);
         this.spawnHitFlash(this.sX(tx) - 40, this.groundY + 20);
         this.spawnHitFlash(this.sX(tx) + 40, this.groundY + 20);
@@ -1382,6 +1526,8 @@ export class BattleScene extends Component {
     if (this.over) return;
     this.over = true;
     this.zoneState = 'cleared';
+    this.slowMoT = 1.0;   // 胜利慢动作
+    AudioMgr.inst.play('win');
     this.bannerLbl.color = new Color(255, 224, 130);
     this.bannerLbl.string = `通关！  击败 Boss · 得分 ${this.score}`;
     this.banner.active = true;
@@ -1392,6 +1538,7 @@ export class BattleScene extends Component {
 
   private gameOver() {
     this.over = true;
+    AudioMgr.inst.play('lose');
     this.bannerLbl.color = new Color(255, 120, 110);
     this.hero.state = 'dead'; this.hero.deadT = 0; this.hero.fallSign = 1;
     this.bannerLbl.string = `阵亡！  第 ${this.zone + 1} 关 · 得分 ${this.score}`;
@@ -1406,10 +1553,17 @@ export class BattleScene extends Component {
     this.drawBg();
     this.updateScrollLayers();
     this.updateBossProps();
+    this.updateGroundDecor();
     const g = this.stageG;
     g.clear();
     this.drawSceneTint(g);   // 色调/夜晚压暗：在角色之下，只暗背景
     this.drawBossProps(g);   // Boss 关专属近景道具（大旗/火盆/残骸，角色之下）
+    for (const d of this.dusts) {   // 尘土（角色之下）
+      const a = 1 - d.life / d.max;
+      g.fillColor = new Color(168, 152, 128, Math.round(120 * a));
+      g.circle(this.sX(d.x), d.y, d.r * (0.7 + 0.9 * (d.life / d.max)));
+      g.fill();
+    }
 
     // 阴影垫底（仅像素兵；赵云/许褚精灵自带影子）
     const h = this.hero;
@@ -1786,6 +1940,30 @@ export class BattleScene extends Component {
       }
     }
 
+    // 密林落叶：几片叶子缓缓飘落（确定性动画，无状态）
+    {
+      const W = DESIGN_W, H = DESIGN_H, t = this.animT;
+      for (let i = 0; i < 7; i++) {
+        const fall = ((t * (26 + i * 5) + i * 137) % (H + 80));
+        const x = (((i * 211.7 + Math.sin(t * 0.6 + i) * 90) % W) + W) % W - W / 2;
+        const y = H / 2 + 40 - fall;
+        const sway = Math.sin(t * 2 + i * 1.3) * 0.9;
+        g.strokeColor = new Color(150, 140, 78, 110);
+        g.lineWidth = 3;
+        g.moveTo(x, y); g.lineTo(x + 8 * Math.cos(sway), y + 8 * Math.sin(sway) - 3); g.stroke();
+      }
+      // 夜战：萤火虫（缓慢游走 + 呼吸闪烁）
+      if (this.timeOfDay().name === '夜晚') {
+        for (let i = 0; i < 10; i++) {
+          const fx = ((i * 173.3) % W) - W / 2 + Math.sin(t * 0.7 + i * 2.1) * 70;
+          const fy = this.groundY + 60 + (i % 4) * 90 + Math.sin(t * 0.9 + i * 1.7) * 45;
+          const pulse = 0.5 + 0.5 * Math.sin(t * 3 + i * 2.4);
+          g.fillColor = new Color(190, 255, 140, Math.round(50 + 150 * pulse));
+          g.circle(fx, fy, 2.5 + pulse * 1.5); g.fill();
+        }
+      }
+    }
+
     // Boss 关：漫天火星缓缓上飘（前景，加压迫感；确定性动画无状态）
     if (this.zone >= this.BOSS_ZONE) {
       const W = DESIGN_W, H = DESIGN_H, t = this.animT;
@@ -1831,6 +2009,30 @@ export class BattleScene extends Component {
     g.fillColor = gr; g.rect(-W / 2, -H / 2, W, H); g.fill();
     const dk = this.timeOfDay().dark;
     if (dk > 0) { g.fillColor = new Color(6, 12, 32, Math.round(dk * 255)); g.rect(-W / 2, -H / 2, W, H); g.fill(); }
+  }
+
+  // 地面装饰：世界坐标网格伪随机散布（近大远小、随机镜像、随镜头滚动）
+  private updateGroundDecor() {
+    if (!this.decorFrames.length) return;
+    const W = DESIGN_W, gy = this.groundY, gap = 130;
+    const rnd = (n: number, k: number) => { const v = Math.sin(n * 127.1 + k * 269.3) * 43758.5453; return v - Math.floor(v); };
+    let pi = 0;
+    const startW = Math.floor((this.camX - W / 2 - gap) / gap) * gap;
+    for (let wx = startW; wx < this.camX + W / 2 + gap && pi < this.decorPool.length; wx += gap) {
+      if (rnd(wx, 11) < 0.3) continue;   // 三成空位，避免整齐
+      const sf = this.decorFrames[Math.floor(rnd(wx, 12) * this.decorFrames.length) % this.decorFrames.length];
+      const band = rnd(wx, 13);
+      const near = 0.7 + band * 0.75;
+      const e = this.decorPool[pi++];
+      e.node.active = true;
+      e.sp.spriteFrame = sf;
+      const dh = 36 * near;
+      const dw = dh * sf.rect.width / Math.max(1, sf.rect.height);
+      e.node.getComponent(UITransform)!.setContentSize(dw, dh);
+      e.node.setPosition(this.sX(wx + rnd(wx, 14) * gap * 0.6), gy - 12 - band * 100, 0);
+      e.node.setScale(rnd(wx, 15) < 0.5 ? -1 : 1, 1, 1);
+    }
+    for (; pi < this.decorPool.length; pi++) this.decorPool[pi].node.active = false;
   }
 
   // Boss 关道具贴图：按世界坐标定位（临近 Boss 关时随镜头自然滑入）
@@ -1913,16 +2115,72 @@ export class BattleScene extends Component {
 
     // 远山改用真图层（updateFarLayer）；这里只保留天空
 
-    // 地面：与近景草同色的竖直渐变（近地平线≈草色 → 越往下越暗），下方过渡自然不发灰
-    const top = [40, 51, 57];   // 贴近近景草上部色
-    const bot = [16, 22, 26];   // 屏底更暗
-    const bands = 20, region = gy + H / 2;   // 从地平线到屏底
-    for (let i = 0; i < bands; i++) {
-      const f0 = i / bands;
-      const c = this.blend(top, bot, f0);
-      g.fillColor = new Color(c[0], c[1], c[2], 255);
-      const y1 = gy - f0 * region;
-      g.rect(-W / 2, y1 - region / bands - 1, W, region / bands + 2); g.fill();
+    // 地面：绿色阶梯渐变（色调贴近近景草，越往下越暗）+ 色阶交界棋盘抖动 → 像素感
+    const top = [52, 68, 42];   // 地平线附近 ≈ 草色
+    const bot = [12, 18, 10];   // 屏底最暗
+    const steps = 6, region = gy + H / 2;
+    const stepH = region / steps;
+    for (let i = 0; i < steps; i++) {
+      const c = this.blend(top, bot, i / (steps - 1));
+      const col = new Color(c[0], c[1], c[2], 255);
+      const yTop = gy - i * stepH;
+      g.fillColor = col;
+      g.rect(-W / 2, yTop - stepH - 1, W, stepH + 1); g.fill();
+      // 抖动过渡：本阶颜色向上一行咬进上一阶（棋盘格，随镜头滚动不穿帮）
+      if (i > 0) {
+        g.fillColor = col;
+        const shift = ((Math.floor(this.camX / PX) + i) % 2) * PX - (((this.camX % (PX * 2)) + PX * 2) % (PX * 2));
+        for (let x = -W / 2 - PX * 2; x < W / 2 + PX * 2; x += PX * 2) {
+          g.rect(x + shift, yTop, PX, PX); g.fill();
+        }
+      }
+    }
+
+    // 地面细节：撒草簇/石子/土斑/亮叶，打破大块纯色（世界坐标定点 → 随镜头滚动，近大远小）
+    const rnd2 = (n: number, k: number) => { const v = Math.sin(n * 127.1 + k * 311.7) * 43758.5453; return v - Math.floor(v); };
+    const gap = 46;
+    const startW = Math.floor((this.camX - W / 2 - gap) / gap) * gap;
+    for (let wxi = startW; wxi < this.camX + W / 2 + gap; wxi += gap) {
+      const sx = this.sX(wxi + rnd2(wxi, 1) * gap);
+      const band = rnd2(wxi, 2);                       // 0..1 → 离地平线远近
+      const y = gy - 14 - band * 112;   // 只撒在可见地面带（下方由暗灌木剪影接管）
+      const near = 0.75 + band * 0.75;                 // 越靠屏下越大
+      const kind = rnd2(wxi, 3);
+      if (kind < 0.4) {
+        // 草簇：三笔短草
+        g.strokeColor = new Color(62, 86, 52, 200); g.lineWidth = 2.5 * near;
+        for (let b2 = -1; b2 <= 1; b2++) {
+          g.moveTo(sx + b2 * 4 * near, y);
+          g.lineTo(sx + b2 * 7 * near, y + (11 + rnd2(wxi, 4 + b2) * 6) * near);
+        }
+        g.stroke();
+      } else if (kind < 0.6) {
+        // 石子（亮面+暗底）
+        g.fillColor = new Color(70, 76, 84, 220);
+        g.ellipse(sx, y + 3 * near, 7 * near, 4.5 * near); g.fill();
+        g.fillColor = new Color(94, 100, 108, 150);
+        g.ellipse(sx - 1.5 * near, y + 4.5 * near, 4 * near, 2.5 * near); g.fill();
+      } else if (kind < 0.85) {
+        // 土斑（暗绿褐横抹，融入绿地）
+        g.fillColor = new Color(20, 28, 16, 130);
+        g.ellipse(sx, y, 20 * near, 5 * near); g.fill();
+      } else {
+        // 亮草叶点缀
+        g.fillColor = new Color(86, 110, 64, 140);
+        g.ellipse(sx, y + 2, 5 * near, 2.5 * near); g.fill();
+      }
+    }
+
+    // 底部暗植被剪影带：垫在前景大草后面 → 草缝里是深色草影而不是灰板
+    const bushTop = gy - 138;
+    const dkBush = new Color(13, 21, 16, 255);
+    g.fillColor = dkBush;
+    g.rect(-W / 2, -H / 2, W, bushTop + H / 2); g.fill();   // 底色块（灌木带主体）
+    for (let wxi = startW; wxi < this.camX + W / 2 + gap; wxi += 34) {   // 顶缘波浪丛形
+      const r = 14 + rnd2(wxi, 7) * 24;
+      const bx = this.sX(wxi + rnd2(wxi, 8) * 30);
+      g.fillColor = dkBush;
+      g.circle(bx, bushTop + rnd2(wxi, 9) * 10, r); g.fill();
     }
   }
 
