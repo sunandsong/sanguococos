@@ -292,6 +292,7 @@ export class BattleScene extends Component {
   private readonly ZONE_WEATHER = ['落叶', '晴', '雨', '晴', '晴', '雨', '晴', '雪', '晴', '余烬'];
   private weather = '晴';
   private snowAcc = 0;   // 地面积雪厚度 0→1（下雪时间越久越厚，换天气后消融）
+  private stormK = 0;    // 乌云浓度 0→1（雨天聚拢，雨停消散）
   private wparts: { x: number; y: number; vx: number; vy: number; ph: number; len: number; sz: number; c: number; d: number }[] = [];
   private wimpacts: { x: number; y: number; life: number; max: number; t: string; sz: number; c: number; d: number }[] = [];   // 落地溅落
   private lightT = 0;    // 闪电亮度 0..1
@@ -722,7 +723,7 @@ export class BattleScene extends Component {
     this.monsters = []; this.sparks = []; this.bloods = []; this.waves = [];
     this.stains = []; this.stuckArrows = []; this.stepT = 0;   // 清战场残留
     this.shockT = 0; this.slowMo = 0; this.node.setScale(1, 1, 1);   // 复位特效/慢动作
-    this.snowAcc = 0;   // 积雪清零
+    this.snowAcc = 0; this.stormK = 0;   // 积雪/乌云清零
     this.hpLag = 100;   // 血条残影复位
     this.arrows = []; this.drops = []; this.flashes = [];
     this.hitStop = 0; this.shakeT = 0; this.shakeMag = 0; this.node.setPosition(0, 0, 0);
@@ -882,11 +883,12 @@ export class BattleScene extends Component {
     // 顿帧：命中瞬间全场定格几帧（打击感灵魂）
     if (this.hitStop > 0) { this.hitStop = Math.max(0, this.hitStop - dt); this.draw(); return; }
 
-    // 击杀慢动作：全场 0.3 倍速 + 镜头微推近（终结一击的仪式感）
+    // 击杀慢动作（仅 Boss）：0.3 倍速 + 镜头微推近；末段速度平滑升回 1，不突兀
     if (this.slowMo > 0) {
       this.slowMo -= dt;
-      dt *= 0.3;
-      const z = 1 + 0.05 * Math.min(1, this.slowMo / 0.25);
+      const k = this.slowMo > 0.25 ? 0.3 : 0.3 + 0.7 * (1 - Math.max(0, this.slowMo) / 0.25);
+      dt *= k;
+      const z = 1 + 0.05 * Math.min(1, this.slowMo / 0.3);
       this.node.setScale(z, z, 1);
       if (this.slowMo <= 0) this.node.setScale(1, 1, 1);
     }
@@ -1360,9 +1362,8 @@ export class BattleScene extends Component {
       m.jumpVy = Math.max(m.jumpVy, 230 + Math.random() * 150);   // 尸体弹飞
       this.score += 1 + Math.floor(this.comboCount / 5);
       this.spawnDrop(m);
-      // 击杀慢动作：Boss 击杀最久；清掉本波最后一个也来一下
-      if (m.kind === 'boss') this.slowMo = 0.6;
-      else if (this.aliveCount() === 0 && this.waveRemaining === 0) this.slowMo = 0.32;
+      // 击杀慢动作：只在击杀 Boss 时演出（普通清波太频繁太短，读起来像卡顿，已去掉）
+      if (m.kind === 'boss') this.slowMo = 0.75;
     }
   }
 
@@ -2652,6 +2653,9 @@ export class BattleScene extends Component {
     // 地面积雪：下雪时约 22 秒堆满，换天气后约 5 秒消融
     if (this.weather === '雪') this.snowAcc = Math.min(1, this.snowAcc + dt / 22);
     else if (this.snowAcc > 0) this.snowAcc = Math.max(0, this.snowAcc - dt / 5);
+    // 乌云：雨天约 3 秒聚拢压顶，雨停约 2.5 秒散开
+    if (this.weather === '雨') this.stormK = Math.min(1, this.stormK + dt / 3);
+    else if (this.stormK > 0) this.stormK = Math.max(0, this.stormK - dt / 2.5);
     // 溅落粒子始终推进（即使切晴也让残留播完）
     for (let i = this.wimpacts.length - 1; i >= 0; i--) {
       const s = this.wimpacts[i]; s.life += dt;
@@ -2891,15 +2895,22 @@ export class BattleScene extends Component {
   // 飘云（慢速视差，块状）
   private drawClouds(t: Theme, PX: number) {
     const g = this.bgG, W = DESIGN_W, gy = this.groundY;
-    const col = this.sh(this.timeOfDay().sky, 1.16);
+    const k = this.stormK;   // 乌云浓度：雨天 0→1
+    // 云色：平时亮云 → 雨天渐变成深灰乌云
+    const bright = this.sh(this.timeOfDay().sky, 1.16);
+    const col = new Color(
+      Math.round(bright.r + (86 - bright.r) * k),
+      Math.round(bright.g + (92 - bright.g) * k),
+      Math.round(bright.b + (106 - bright.b) * k), 255);
     const snap = (v: number) => Math.round(v / PX) * PX;
     const span = W + 280;
-    for (let i = 0; i < 5; i++) {
-      const speed = 5 + i * 2;
+    const n = 5 + Math.round(k * 3);            // 雨天云更多（5 → 8）
+    for (let i = 0; i < n; i++) {
+      const speed = (5 + i * 2) * (1 + k * 0.6);   // 乌云滚得快一点
       let bx = (-this.animT * speed - this.camX * 0.12 + i * 267) % span;
       bx = ((bx % span) + span) % span - W / 2 - 140;
-      const by = gy + 420 + (i % 3) * 70;   // 抬到远山(顶=gy+380)之上，不被山挡
-      const s = 0.85 + (i % 3) * 0.28;
+      const by = gy + 420 + (i % 3) * 70 - (i >= 5 ? 36 : 0);   // 增补的云稍低，铺满天空
+      const s = (0.85 + (i % 3) * 0.28) * (1 + k * 0.55);       // 乌云更大更厚
       g.fillColor = col;
       g.rect(snap(bx), snap(by), snap(96 * s), snap(26 * s)); g.fill();
       g.rect(snap(bx + 22 * s), snap(by + 18 * s), snap(60 * s), snap(20 * s)); g.fill();
