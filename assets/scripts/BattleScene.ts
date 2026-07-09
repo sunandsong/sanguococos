@@ -228,6 +228,8 @@ export class BattleScene extends Component {
   private zoneIntroT = 0;
   private readonly ZONE_INTRO_DUR = 1.6;
   private slowMoT = 0;             // 胜利慢动作剩余时间
+  private deadRedT = 0;            // 阵亡红闪剩余
+  private deadT2 = 0;              // 阵亡计时(不受慢动作缩放，用于演出)
   private dusts: { x: number; y: number; vx: number; vy: number; r: number; life: number; max: number }[] = [];
   private walkDustT = 0;           // 跑动扬尘节流
   private stepSndT = 0;            // 脚步声节流
@@ -714,8 +716,17 @@ export class BattleScene extends Component {
     this.deadOverlay = this.child('deadover');
     {
       const dg = this.deadOverlay.addComponent(Graphics);
-      dg.fillColor = new Color(150, 152, 156, 150); dg.rect(-W / 2, -H / 2, W, H); dg.fill();   // 灰罩(压色彩)
-      dg.fillColor = new Color(18, 20, 24, 70); dg.rect(-W / 2, -H / 2, W, H); dg.fill();       // 略压暗
+      dg.fillColor = new Color(120, 120, 126, 120); dg.rect(-W / 2, -H / 2, W, H); dg.fill();   // 整体压灰(去色感)
+      // 电影暗角：四边各画若干细带，边缘最深 → 向内淡出为 0（各边深度均小于半屏，绝不过中线重叠）
+      const bands = 14, dx = W * 0.26 / bands, dy = H * 0.20 / bands;
+      for (let i = 0; i < bands; i++) {
+        const a = Math.round(85 * ((bands - i) / bands));   // 越靠边(i小)越深
+        dg.fillColor = new Color(24, 9, 11, a);
+        dg.rect(-W / 2 + i * dx, -H / 2, dx + 1, H); dg.fill();            // 左
+        dg.rect(W / 2 - (i + 1) * dx, -H / 2, dx + 1, H); dg.fill();       // 右
+        dg.rect(-W / 2, -H / 2 + i * dy, W, dy + 1); dg.fill();            // 底
+        dg.rect(-W / 2, H / 2 - (i + 1) * dy, W, dy + 1); dg.fill();       // 顶
+      }
       this.deadOverlayOp = this.deadOverlay.addComponent(UIOpacity);
       this.deadOverlay.active = false;
     }
@@ -859,6 +870,7 @@ export class BattleScene extends Component {
     this.leftHeld = this.rightHeld = false;
     this.banner.active = false; this.restartBtn.active = false; this.arrow.active = false;
     this.deadOverlay.active = false;   // 撤掉阵亡灰化
+    this.deadRedT = 0; this.deadT2 = 0; this.slowMoT = 0;   // 复位阵亡演出
   }
 
   private waveCount(zone: number): number { return this.ZONE_PLAN[Math.min(zone, this.ZONE_PLAN.length - 1)].count; }
@@ -962,7 +974,9 @@ export class BattleScene extends Component {
   update(dt: number) {
     if (!this.node.active) return;
     dt = Math.min(dt, 0.05);
-    if (this.slowMoT > 0) { this.slowMoT -= dt; dt *= 0.35; }   // 胜利慢动作
+    if (this.deadRedT > 0) this.deadRedT -= dt;
+    if (this.over && this.hero.state === 'dead') this.deadT2 += dt;
+    if (this.slowMoT > 0) { this.slowMoT -= dt; dt *= 0.35; }   // 慢动作(胜利/坠落)
     this.animT += dt;
 
     // 关卡开场大字：0.22s 从 1.5 倍拍到 1 倍，尾段 0.35s 淡出
@@ -2108,7 +2122,8 @@ export class BattleScene extends Component {
     this.over = true;
     this.zoneState = 'cleared';
     this.slowMoT = 1.0;   // 胜利慢动作
-    AudioMgr.inst.play('win');
+    AudioMgr.inst.fadeOutBgm(1.4); AudioMgr.inst.stopAmb();   // 战斗乐淡出
+    AudioMgr.inst.playStinger('win', 0.85, 0.8);   // 庆祝乐淡入
     this.bannerLbl.color = new Color(255, 224, 130);
     this.bannerLbl.fontSize = 54; this.bannerLbl.lineHeight = 58;   // 恢复常规字号
     this.bannerLbl.string = `通关！  击败 Boss · 得分 ${this.score}`;
@@ -2122,23 +2137,29 @@ export class BattleScene extends Component {
 
   private gameOver() {
     this.over = true;
-    AudioMgr.inst.play('lose');
+    AudioMgr.inst.fadeOutBgm(1.6); AudioMgr.inst.stopAmb();   // 战斗乐淡出
+    this.scheduleOnce(() => AudioMgr.inst.playStinger('lose', 0.8, 1.2), 2.0);   // 伤感乐延后 2s 淡入
     this.hero.state = 'dead'; this.hero.deadT = 0; this.hero.fallSign = 1;
+    this.slowMoT = 2.4;               // 坠落慢动作(更久)
+    this.deadRedT = 0.55;             // 受创红闪
+    this.deadT2 = 0;
+    this.addShake(15);
+    for (let i = 0; i < 14; i++) this.spawnDust(this.hero.x + (Math.random() - 0.5) * 30, this.groundY + 6, 1, 220);   // 倒地扬尘
     // 画面变灰(渐显) + 「阵亡」大字淡入 + 「重来」延迟浮现
     this.deadOverlay.active = true;
     this.deadOverlayOp.opacity = 0;
-    tween(this.deadOverlayOp).to(0.8, { opacity: 255 }).start();
+    tween(this.deadOverlayOp).to(2.0, { opacity: 255 }).start();   // 灰罩缓缓浮现
     this.bannerLbl.color = new Color(225, 66, 58);
     this.bannerLbl.fontSize = 96; this.bannerLbl.lineHeight = 100;
     this.bannerLbl.string = '阵 亡';
     this.banner.active = true;
     this.bannerOp.opacity = 0;
-    tween(this.bannerOp).delay(0.25).to(0.7, { opacity: 255 }).start();
+    tween(this.bannerOp).delay(1.2).to(1.4, { opacity: 255 }).start();
     this.banner.setScale(0.86, 0.86, 1);
-    tween(this.banner).delay(0.25).to(0.7, { scale: new Vec3(1, 1, 1) }, { easing: 'quadOut' }).start();
+    tween(this.banner).delay(1.2).to(1.4, { scale: new Vec3(1, 1, 1) }, { easing: 'quadOut' }).start();
     this.restartBtn.active = true;
     this.restartOp.opacity = 0;
-    tween(this.restartOp).delay(0.9).to(0.4, { opacity: 255 }).start();
+    tween(this.restartOp).delay(2.8).to(0.6, { opacity: 255 }).start();
   }
 
   // ---------- 绘制 ----------
@@ -2319,8 +2340,16 @@ export class BattleScene extends Component {
     }
 
     if (h.state === 'dead') {
-      this.heroNode.angle = (h.dir >= 0 ? 1 : -1) * Math.min(80, h.deadT * 170);   // 向后倒（背对攻击方向）
-      this.heroOp.opacity = Math.max(0, Math.round(255 * (1 - h.deadT / 1.4)));
+      const d = h.deadT;   // 阵亡演出计时
+      this.heroNode.angle = (h.dir >= 0 ? 1 : -1) * Math.min(90, d * 72);          // 缓缓倒地(90°)
+      const sink = Math.min(1, d / 1.3) * 14 * this.SPRITE_SCALE;                  // 身体略下沉
+      this.heroNode.setPosition(sx, y - sink, 0);
+      const gray = Math.min(1, d / 1.8);                                           // 渐渐灰化
+      const bt = this.charTint();
+      const gv = (bt.r + bt.g + bt.b) / 3;
+      this.heroSp.color = this.footSp.color = this.legsSp.color =
+        new Color(Math.round(bt.r + (gv - bt.r) * gray), Math.round(bt.g + (gv - bt.g) * gray), Math.round(bt.b + (gv - bt.b) * gray), 255);
+      this.heroOp.opacity = Math.max(0, Math.round(255 * (1 - Math.max(0, d - 2.6) / 1.4)));   // 先看倒地 2.6s，再溶解
     } else {
       // 次级动作：走路身体微摆（步频节律的小角度）
       const wob = h.state === 'walk' && hk === 0 && !h.jumping ? Math.sin(this.animT * 9) * 1.8 : 0;
@@ -3309,6 +3338,13 @@ export class BattleScene extends Component {
   private drawFg() {
     const g = this.fgG;
     g.clear();
+
+    // 阵亡红闪：全屏血红罩，快速淡出
+    if (this.deadRedT > 0) {
+      const a = Math.round(150 * Math.min(1, this.deadRedT / 0.55));
+      g.fillColor = new Color(140, 12, 10, a);
+      g.rect(-DESIGN_W / 2, -DESIGN_H / 2, DESIGN_W, DESIGN_H); g.fill();
+    }
 
     // 赵云挥砍大刀气（罩在精灵前方，让"刀"更大更猛）
     const h = this.hero;

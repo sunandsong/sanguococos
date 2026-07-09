@@ -1,4 +1,4 @@
-import { Node, AudioSource, AudioClip, resources, director } from 'cc';
+import { Node, AudioSource, AudioClip, resources, director, tween } from 'cc';
 
 // 极简音频管理：懒加载 + 缓存 + 缺文件静默跳过（音效没下齐也不报错）
 // 约定：所有音频放 resources/audio/ 下，用文件名（不含扩展名）播放。
@@ -12,6 +12,7 @@ export class AudioMgr {
   private source: AudioSource;      // 音效（playOneShot 可叠加）
   private bgmSource: AudioSource;   // BGM（循环独占）
   private ambSource: AudioSource;   // 环境音（循环独占：雨声等）
+  private stingerSource: AudioSource;   // 结局乐（胜利/阵亡，单次，可淡入）
   private cache: Record<string, AudioClip> = {};
   private missing: Record<string, boolean> = {};   // 已知缺失，不再重试
   sfxVolume = 1.0;
@@ -26,6 +27,7 @@ export class AudioMgr {
     this.bgmSource.loop = true;
     this.ambSource = n.addComponent(AudioSource);
     this.ambSource.loop = true;
+    this.stingerSource = n.addComponent(AudioSource);
   }
 
   private load(name: string, cb: (clip: AudioClip | null) => void) {
@@ -57,6 +59,26 @@ export class AudioMgr {
   }
 
   stopBgm() { this.bgmSource.stop(); }
+
+  /** BGM 淡出后停止（默认 1.2s） */
+  fadeOutBgm(sec = 1.2) {
+    const src = this.bgmSource;
+    if (!src.playing) return;
+    tween(src).to(sec, { volume: 0 }).call(() => { src.stop(); src.volume = this.bgmVolume; }).start();
+  }
+
+  /** 播放结局乐（单次，从 0 淡入）：与战斗乐交叉过渡 */
+  playStinger(name: string, vol = 0.8, fadeIn = 0.9) {
+    const src = this.stingerSource;
+    this.load(name, clip => {
+      if (!clip) return;
+      src.stop();
+      src.clip = clip;
+      src.volume = 0;
+      src.play();
+      tween(src).to(fadeIn, { volume: vol }).start();
+    });
+  }
 
   /** 循环播放环境音（雨声等；同名重复调用不重启） */
   playAmb(name: string, vol = 0.5) {
