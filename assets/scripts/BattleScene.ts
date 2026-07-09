@@ -836,7 +836,7 @@ export class BattleScene extends Component {
 
   private startGame() {
     AudioMgr.inst.playBgm('bgm-battle');
-    this.scheduleOnce(() => this.showZoneIntro('第 1 关', new Color(255, 224, 130)), 0.1);
+    // this.scheduleOnce(() => this.showZoneIntro('第 1 关', new Color(255, 224, 130)), 0.1);   // 关数大字已关闭
     this.camX = 0; this.zone = 0; this.zoneState = 'fight'; this.targetCam = 0;
     this.curBiome = -1; this.transActive = false; this.applyBiome(0);   // 复位背景组到第一组
     this.preloadAllBiomes();   // 预载各组，走路换景才有得滑
@@ -1232,7 +1232,7 @@ export class BattleScene extends Component {
         this.applyBiome(this.zone);
         this.setWeather(this.weatherFor(this.zone));   // 新关天气
         this.preloadAllBiomes();
-        if (!this.isBossZone()) this.showZoneIntro(`第 ${this.zone + 1} 关`, new Color(255, 224, 130));   // Boss 关由登场演出接管
+        // 关数大字已关闭（Boss 关仍有登场演出）
       }
     }
 

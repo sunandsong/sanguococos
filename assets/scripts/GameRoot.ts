@@ -59,12 +59,12 @@ export class GameRoot extends Component {
     make('Mountains', Mountains);      // 山（挡住太阳 + 忍者下沉部分）
     make('Clouds', Clouds);            // 云（在山前飘）
     make('Geese', Geese);              // 小鸟（横飞）
-    make('City', City);                // 城墙（4 档，点击升级）
+    // make('City', City);                // 城墙（已去掉城池）
     make('House', House);              // 主公府（4 档，随等级切）
     make('Farms', Farms);              // 农田（城前菱形田）
     make('Hoppers', Hoppers);          // 蚂蚱（地面跳）
     make('Soldiers', Soldiers);        // 城外脸谱兵（先黑脸）
-    make('CityEnterers', CityEnterers); // 3 路小人从地图边走进城门（模仿 H5 demo）
+    // make('CityEnterers', CityEnterers); // 进城门小人（随城池一并去掉）
     make('SkyOverlay', DayNightController); // 昼夜遮罩（盖在场景上）
     make('Stars', Stars);              // 星星（在遮罩之上，夜空发亮）
     make('Moon', Moon);                // 月亮（在遮罩之上，夜空发亮）
