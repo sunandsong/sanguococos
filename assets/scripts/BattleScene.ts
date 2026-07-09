@@ -171,8 +171,15 @@ export class BattleScene extends Component {
   private deadOverlayOp!: UIOpacity;
   private bannerOp!: UIOpacity;
   private restartOp!: UIOpacity;
+  private lastDt = 0.016;   // 本帧 dt（供 draw 阶段的粒子推进用）
+  // 小动物（氛围点缀：蝴蝶飘/小鸟啄食/兔子窜屏，会被主角惊扰）
+  private critters: { n: Node; sp: Sprite; op: UIOpacity; kind: number; state: number; x: number; y: number; vx: number; vy: number; ph: number; wait: number }[] = [];
+  private birdStandSF: SpriteFrame | null = null;
+  private birdFlySF: SpriteFrame | null = null;
+  // 草屑（跳劈落地掀飞的碎草叶）
+  private grassBits: { x: number; y: number; vx: number; vy: number; ang: number; va: number; life: number; max: number }[] = [];
   // 近景草丛（独立草株：风摆 + 主角走过拨开回弹；前后两排夹住角色）
-  private nearGrass: { n: Node; lx: number; by: number; ph: number; ang: number; vel: number; par: number }[] = [];
+  private nearGrass: { n: Node; op: UIOpacity; lx: number; by: number; ph: number; ang: number; vel: number; par: number; fly: number; fx: number; fy: number; fvx: number; fvy: number; spin: number; regrow: number; sc: number }[] = [];
   // 前景叶片（独立元件，绕叶柄弹簧摆；雨天被雨滴敲击 → 下压回弹 + 水花）
   private fgLeaves: { n: Node; lx: number; by: number; ph: number; ang: number; vel: number; hitCd: number }[] = [];
   private leafFxG!: Graphics;   // 叶面水花层（在叶片之上）
@@ -433,6 +440,33 @@ export class BattleScene extends Component {
     }
 
     this.stageG = this.child('stage').addComponent(Graphics);
+
+    // 小动物节点（3蝴蝶+1鸟+1兔）
+    {
+      const mkC = (name: string, w: number, hh: number, kind: number, ph: number, wait: number) => {
+        const n = new Node(name); n.layer = this.node.layer; n.parent = this.node;
+        const u = n.addComponent(UITransform); u.setContentSize(w, hh); u.setAnchorPoint(0.5, 0.5);
+        const sp = n.addComponent(Sprite); sp.sizeMode = Sprite.SizeMode.CUSTOM;
+        const op = n.addComponent(UIOpacity); n.active = false;
+        this.critters.push({ n, sp, op, kind, state: 0, x: 0, y: 0, vx: 0, vy: 0, ph, wait });
+        return sp;
+      };
+      const loadSF = (res: string, cb: (sf: SpriteFrame) => void) => {
+        resources.load(res + '/spriteFrame', SpriteFrame, (e, sf) => {
+          if (e || !sf) return;
+          (sf.texture as Texture2D).setFilters(Texture2D.Filter.NEAREST, Texture2D.Filter.NEAREST);
+          cb(sf);
+        });
+      };
+      const bSps: Sprite[] = [];
+      for (let i = 0; i < 3; i++) bSps.push(mkC('butterfly' + i, 33, 28, 0, i * 2.1, 2 + i * 3));
+      loadSF('critter-butterfly', sf => { for (const sp of bSps) sp.spriteFrame = sf; });
+      const birdSp = mkC('bird', 62, 30, 1, 0, 3);
+      loadSF('critter-bird-stand', sf => { this.birdStandSF = sf; birdSp.spriteFrame = sf; });
+      loadSF('critter-bird-fly', sf => { this.birdFlySF = sf; });
+      mkC('rabbit', 66, 33, 2, 0, 10);
+      loadSF('critter-rabbit', sf => { const r = this.critters.find(c => c.kind === 2); if (r) r.sp.spriteFrame = sf; });
+    }
 
     // Boss 法术特效节点（法阵×2 + 冲击波）：父节点压扁做地面透视，子节点旋转贴图 → 盘面旋转
     const mkFx = (name: string) => {
@@ -942,10 +976,12 @@ export class BattleScene extends Component {
       this.zoneIntroLbl.node.setScale(sc, sc, 1);
       if (this.zoneIntroT <= 0) this.zoneIntroLbl.node.active = false;
     }
+    this.lastDt = dt;
     this.stepMotes(dt);
     this.stepWeather(dt);
     this.updateFgLeaves(dt);      // 前景叶片（摇曳/雨打）
     this.updateNearGrass(dt);     // 地面小草株（风摆/拨草）
+    this.stepCritters(dt);        // 小动物（蝴蝶/小鸟/兔子）
     this.drawLeafSplashes(dt);    // 叶面大水花（画在叶片之上）
     if (this.slamBoltT > 0) this.slamBoltT -= dt;   // 跳劈闪电衰减
     if (this.shockT > 0) this.shockT -= dt;         // Boss 冲击波衰减
@@ -1305,6 +1341,34 @@ export class BattleScene extends Component {
     this.addShake(18); this.addHitStop(0.06);   // 跳劈落地：大震 + 顿帧
     this.spawnDust(this.hero.x, this.groundY + 4, 10, 300);   // 跳劈落地大尘圈
     this.genSlamBolt(this.sX(h.x), this.groundY + 6);   // 天降一道闪电劈在落点
+    // 冲击波掀草：范围内草株向外猛压（弹簧会自己甩回震荡），并溅起草屑
+    {
+      const hx = this.sX(h.x);
+      const span = DESIGN_W + 260;
+      for (const G of this.nearGrass) {
+        if (G.fly !== 0) continue;
+        const gx = (((G.lx - this.camX * G.par) % span) + span) % span - span / 2;
+        const d = gx - hx;
+        if (Math.abs(d) < 180) {   // 近处：整株连根掀飞 → 消失
+          G.fly = 1;
+          G.fvx = (d >= 0 ? 1 : -1) * (160 + Math.random() * 220);
+          G.fvy = 460 + Math.random() * 300;
+          G.spin = (d >= 0 ? 1 : -1) * (260 + Math.random() * 240);
+        } else if (Math.abs(d) < 280) {   // 远处：压弯震荡
+          const k = 1 - Math.abs(d) / 280;
+          G.vel += (d >= 0 ? 1 : -1) * (280 + Math.random() * 140) * k;
+        }
+      }
+      for (let i = 0; i < 12; i++) {
+        const dir = i % 2 ? 1 : -1;
+        this.grassBits.push({
+          x: h.x + dir * (20 + Math.random() * 90), y: this.groundY + 4,
+          vx: dir * (120 + Math.random() * 260), vy: 260 + Math.random() * 320,
+          ang: Math.random() * 6.28, va: (Math.random() - 0.5) * 18,
+          life: 0, max: 0.55 + Math.random() * 0.3,
+        });
+      }
+    }
     for (const m of this.monsters) {
       if (m.state === 'dead') continue;
       const dx = m.x - h.x;
@@ -2142,6 +2206,7 @@ export class BattleScene extends Component {
     for (const m of this.monsters) if (m.state !== 'dead' && m.hp < m.hpMax && m.kind !== 'boss') this.drawMonsterHp(g, m);
 
     this.drawFg();       // 前景遮挡 + 统一色调（独立图层）
+    this.stepGrassBits(this.lastDt, this.fgG);   // 草屑（跳劈掀飞）
     this.drawSunSide(this.fgG);   // 太阳侧入光（清晨/黄昏的镜头感）
     this.drawWeather(this.fgG);   // 天气（雨/雪/落叶/余烬/闪电）叠在最前
     this.drawSlamBolt(this.fgG);  // 跳劈落地闪电
@@ -2703,14 +2768,16 @@ export class BattleScene extends Component {
       let sc = (s0 + ((i * 37) % 100) / 100 * (s1 - s0)) * (i % 2 ? -1 : 1);
       if (i % 9 === 4) sc *= 2.2;   // 偶尔一两株明显大一号
       n.setScale(sc, Math.abs(sc), 1);
+      const op = n.addComponent(UIOpacity);
       n.active = false;
       resources.load(`grass-${kind}/spriteFrame`, SpriteFrame, (e, sf) => {
         if (e || !sf) return; sp.spriteFrame = sf; n.active = true;
       });
       this.nearGrass.push({
-        n, lx: i * (DESIGN_W + 260) / count + ((i * 53) % 60),
+        n, op, lx: i * (DESIGN_W + 260) / count + ((i * 53) % 60),
         by: this.groundY + baseOff + ((i * 41) % (jit * 2)) - jit,
         ph: i * 1.31 + par * 5, ang: 0, vel: 0, par,
+        fly: 0, fx: 0, fy: 0, fvx: 0, fvy: 0, spin: 0, regrow: 0, sc,
       });
     }
   }
@@ -2723,6 +2790,34 @@ export class BattleScene extends Component {
     const gust = 1 + 0.4 * Math.sin(this.animT * 0.6) * Math.sin(this.animT * 1.3);
     for (const G of this.nearGrass) {
       const sx = (((G.lx - this.camX * G.par) % span) + span) % span - span / 2;
+      // 被掀飞：抛物线 + 自旋 + 渐隐 → 消失，几秒后原地长回
+      if (G.fly === 1) {
+        G.fvy -= 1700 * dt;
+        G.fx += G.fvx * dt; G.fy += G.fvy * dt;
+        G.n.setPosition(sx + G.fx, G.by + G.fy, 0);
+        G.n.angle += G.spin * dt;
+        G.op.opacity = Math.max(0, G.op.opacity - 420 * dt);
+        if (G.op.opacity <= 4) { G.fly = 2; G.regrow = 7 + Math.random() * 5; G.n.setScale(0.001, 0.001, 1); }
+        continue;
+      }
+      // 消失中：倒计时重生（原地长出来）
+      if (G.fly === 2) {
+        G.regrow -= dt;
+        G.n.setPosition(sx, G.by, 0);
+        if (G.regrow <= 0) {
+          G.fly = 3; G.fx = 0; G.fy = 0; G.n.angle = 0; G.ang = 0; G.vel = 0;
+          G.op.opacity = 255;
+        }
+        continue;
+      }
+      // 长回中：缩放 0→原大
+      if (G.fly === 3) {
+        const cur = G.n.scale.y + Math.abs(G.sc) * dt * 0.8;
+        if (cur >= Math.abs(G.sc)) { G.fly = 0; G.n.setScale(G.sc, Math.abs(G.sc), 1); }
+        else G.n.setScale(G.sc >= 0 ? cur : -cur, cur, 1);
+        G.n.setPosition(sx, G.by, 0);
+        continue;
+      }
       G.n.setPosition(sx, G.by, 0);
       // 主角拨草：近处的草被推向背离主角的方向
       const dxh = sx - heroSx;
@@ -2795,6 +2890,123 @@ export class BattleScene extends Component {
         g.fillColor = new Color(228, 240, 252, Math.round(105 * a));    // 更淡
         g.circle(sp.x + dx, sp.y + dy, 2.4 * (1 - p * 0.4)); g.fill();
       }
+    }
+  }
+
+  // 草屑：被掀飞的碎草叶（抛物线 + 自旋 + 渐隐）
+  private stepGrassBits(dt: number, g: Graphics) {
+    for (let i = this.grassBits.length - 1; i >= 0; i--) {
+      const b = this.grassBits[i];
+      b.life += dt;
+      if (b.life >= b.max) { this.grassBits.splice(i, 1); continue; }
+      b.vy -= 1500 * dt;
+      b.x += b.vx * dt; b.y += b.vy * dt;
+      b.ang += b.va * dt;
+      if (b.y < this.groundY - 4) { this.grassBits.splice(i, 1); continue; }
+      const a = 1 - b.life / b.max;
+      const sx = this.sX(b.x), L = 7;
+      g.strokeColor = new Color(112, 124, 58, Math.round(235 * a)); g.lineWidth = 2.5;
+      g.moveTo(sx - Math.cos(b.ang) * L, b.y - Math.sin(b.ang) * L);
+      g.lineTo(sx + Math.cos(b.ang) * L, b.y + Math.sin(b.ang) * L);
+      g.stroke();
+    }
+  }
+
+  // 小动物行为：蝴蝶花间飘(近了惊飞)、小鸟落地啄食(靠近/开打惊飞)、兔子蹦跳窜屏
+  private stepCritters(dt: number) {
+    if (!this.critters.length || !this.hero) return;
+    const W = DESIGN_W, gy = this.groundY, t = this.animT;
+    const heroSx = this.sX(this.hero.x);
+    const calm = this.timeOfDay().name !== '夜晚' && this.weather !== '雨';
+    for (const c of this.critters) {
+      // ---------- 蝴蝶 ----------
+      if (c.kind === 0) {
+        if (c.state === 0) {           // 隐藏等待
+          c.wait -= dt;
+          if (c.wait <= 0 && calm) {
+            c.x = this.camX + (Math.random() - 0.5) * W * 0.8;
+            c.y = gy + 34 + Math.random() * 62;
+            c.state = 1; c.op.opacity = 0; c.n.active = true;
+          }
+          continue;
+        }
+        const sx = this.sX(c.x);
+        if (c.state === 1) {           // 花间飘
+          c.op.opacity = Math.min(210, c.op.opacity + 260 * dt);
+          const wx = Math.sin(t * 0.55 + c.ph);
+          c.x += wx * 30 * dt;
+          const yy = c.y + Math.sin(t * 2.2 + c.ph) * 13;
+          c.n.setPosition(sx, yy, 0);
+          c.n.setScale(wx >= 0 ? -1 : 1, 0.55 + 0.45 * Math.abs(Math.sin(t * 11 + c.ph)), 1);   // 扑翼
+          if (Math.abs(sx - heroSx) < 85 || !calm) {   // 惊飞
+            c.state = 2; c.vx = (sx >= heroSx ? 1 : -1) * (150 + Math.random() * 90); c.vy = 190;
+          }
+        } else {                        // 惊飞逃离
+          c.x += c.vx * dt; c.y += c.vy * dt;
+          c.n.setPosition(this.sX(c.x), c.y, 0);
+          c.n.setScale(c.vx >= 0 ? -1 : 1, 0.5 + 0.5 * Math.abs(Math.sin(t * 16)), 1);
+          c.op.opacity = Math.max(0, c.op.opacity - 260 * dt);
+          if (c.op.opacity <= 0) { c.state = 0; c.n.active = false; c.wait = 5 + Math.random() * 9; }
+        }
+        continue;
+      }
+      // ---------- 小鸟 ----------
+      if (c.kind === 1) {
+        if (c.state === 0) {
+          c.wait -= dt;
+          if (c.wait <= 0 && calm) {
+            const away = heroSx >= 0 ? -1 : 1;   // 优先落在主角对侧
+            c.x = this.camX + away * (120 + Math.random() * 190);
+            if (Math.abs(this.sX(c.x) - heroSx) < 130) { c.wait = 2; continue; }   // 别落在主角脚边
+            c.state = 1; c.op.opacity = 0; c.n.active = true;
+            if (this.birdStandSF) c.sp.spriteFrame = this.birdStandSF;
+          }
+          continue;
+        }
+        const sx = this.sX(c.x);
+        if (c.state === 1) {           // 啄食
+          c.op.opacity = Math.min(255, c.op.opacity + 300 * dt);
+          c.n.setPosition(sx, gy + 15, 0);
+          const peck = Math.max(0, Math.sin(t * 2.6 + 1)) ** 6;
+          c.n.angle = -16 * peck;      // 低头啄
+          c.n.setScale(sx >= heroSx ? -1 : 1, 1, 1);   // 面朝主角方向(图朝左)
+          if (Math.abs(sx - heroSx) < 150 || (this.hero.attacking && Math.abs(sx - heroSx) < 260) || !calm) {   // 惊飞（挥刀只吓近处的）
+            c.state = 2; c.vx = (sx >= heroSx ? 1 : -1) * (230 + Math.random() * 90); c.vy = 300;
+            if (this.birdFlySF) c.sp.spriteFrame = this.birdFlySF;
+            c.n.angle = 0;
+          }
+        } else {                        // 惊飞出屏
+          c.x += c.vx * dt; c.y = (c.y || gy + 15) + c.vy * dt;
+          c.vy += 60 * dt;              // 越飞越快向上
+          c.n.setPosition(this.sX(c.x), c.y, 0);
+          c.n.setScale((c.vx >= 0 ? -1 : 1) * 1, 0.6 + 0.4 * Math.abs(Math.sin(t * 15)), 1);
+          if (c.y > DESIGN_H / 2 + 60 || Math.abs(this.sX(c.x)) > W / 2 + 80) {
+            c.state = 0; c.n.active = false; c.y = 0; c.wait = 9 + Math.random() * 14;
+          }
+        }
+        continue;
+      }
+      // ---------- 兔子 ----------
+      if (c.state === 0) {
+        c.wait -= dt;
+        if (c.wait <= 0) {
+          const side = Math.random() < 0.5 ? -1 : 1;
+          c.x = this.camX - side * (W / 2 + 70);
+          c.vx = side * (300 + Math.random() * 90);
+          c.y = 0; c.vy = 330;
+          c.state = 1; c.op.opacity = 255; c.n.active = true;
+        }
+        continue;
+      }
+      // 窜屏（连续蹦跳）
+      c.x += c.vx * dt;
+      c.vy -= 1500 * dt;
+      c.y += c.vy * dt;
+      if (c.y <= 0) { c.y = 0; c.vy = 330; }
+      c.n.setPosition(this.sX(c.x), gy + 15 + c.y, 0);
+      c.n.setScale(c.vx >= 0 ? -1 : 1, 1, 1);
+      c.n.angle = (c.vx >= 0 ? -1 : 1) * Math.max(-18, Math.min(18, c.vy * 0.04));
+      if (Math.abs(this.sX(c.x)) > W / 2 + 100) { c.state = 0; c.n.active = false; c.wait = 14 + Math.random() * 22; }
     }
   }
 
