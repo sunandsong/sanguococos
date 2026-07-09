@@ -461,7 +461,7 @@ export class BattleScene extends Component {
       const bSps: Sprite[] = [];
       for (let i = 0; i < 3; i++) bSps.push(mkC('butterfly' + i, 33, 28, 0, i * 2.1, 2 + i * 3));
       loadSF('critter-butterfly', sf => { for (const sp of bSps) sp.spriteFrame = sf; });
-      const birdSp = mkC('bird', 62, 30, 1, 0, 3);
+      const birdSp = mkC('bird', 38, 18, 1, 0, 3);   // 小鸟缩小（原 62×30 太大）
       loadSF('critter-bird-stand', sf => { this.birdStandSF = sf; birdSp.spriteFrame = sf; });
       loadSF('critter-bird-fly', sf => { this.birdFlySF = sf; });
       mkC('rabbit', 66, 33, 2, 0, 10);
@@ -1280,6 +1280,19 @@ export class BattleScene extends Component {
           if (Math.abs(dx) <= mp.range + 34 * m.scale && inFront) {   // 含敌人体型/武器 → 碰到就算
             const kdir = mp.both ? (dx >= 0 ? 1 : -1) : h.dir;
             this.hitMonster(m, mp.dmg, kdir, mp.knock, mp.launch, mp.blood, (h.x + m.x) / 2, this.groundY + 80 * m.scale);
+          }
+        }
+        // 兔子也能打：一刀带走，掉 2 金币（彩蛋小奖励）
+        for (const c of this.critters) {
+          if (c.kind !== 2 || c.state === 0 || c.y > 70) continue;
+          const dxc = c.x - h.x;
+          if (Math.abs(dxc) <= mp.range + 20 && (mp.both || dxc * h.dir > -30)) {
+            this.spawnHitFlash(this.sX(c.x), this.groundY + 24);
+            this.spawnDust(c.x, this.groundY + 8, 4, 150);
+            this.spawnBlood(c.x, this.groundY + 26, dxc >= 0 ? 1 : -1, 6);
+            for (let k = 0; k < 2; k++) this.drops.push({ x: c.x + (Math.random() - 0.5) * 30, y: this.groundY + 40, vy: 150 + Math.random() * 90, life: 0, flying: false, sx: 0, sy: 0 });
+            AudioMgr.inst.play('hit');
+            c.state = 0; c.n.active = false; c.wait = 18 + Math.random() * 16;   // 一段时间后再来一只
           }
         }
       }
@@ -2732,6 +2745,8 @@ export class BattleScene extends Component {
   // 切换天气 + 铺满粒子
   private setWeather(type: string) {
     this.weather = type;
+    if (type === '雨') AudioMgr.inst.playAmb('rain', 0.45);   // 雨声循环
+    else AudioMgr.inst.stopAmb();
     this.wparts = [];
     this.wimpacts = [];
     this.lightT = 0; this.lightCd = 2 + Math.random() * 4;
@@ -2918,6 +2933,14 @@ export class BattleScene extends Component {
     const W = DESIGN_W, gy = this.groundY, t = this.animT;
     const heroSx = this.sX(this.hero.x);
     const calm = this.timeOfDay().name !== '夜晚' && this.weather !== '雨';
+    // 威胁源：主角 + 活着的敌人（鸟和蝴蝶谁近怕谁）
+    const threats: number[] = [heroSx];
+    for (const m of this.monsters) if (m.state !== 'dead') threats.push(this.sX(m.x));
+    const nearThreat = (sx: number) => {
+      let d = 1e9, x = heroSx;
+      for (const tx of threats) { const dd = Math.abs(sx - tx); if (dd < d) { d = dd; x = tx; } }
+      return { d, x };
+    };
     for (const c of this.critters) {
       // ---------- 蝴蝶 ----------
       if (c.kind === 0) {
@@ -2938,8 +2961,9 @@ export class BattleScene extends Component {
           const yy = c.y + Math.sin(t * 2.2 + c.ph) * 13;
           c.n.setPosition(sx, yy, 0);
           c.n.setScale(wx >= 0 ? -1 : 1, 0.55 + 0.45 * Math.abs(Math.sin(t * 11 + c.ph)), 1);   // 扑翼
-          if (Math.abs(sx - heroSx) < 85 || !calm) {   // 惊飞
-            c.state = 2; c.vx = (sx >= heroSx ? 1 : -1) * (150 + Math.random() * 90); c.vy = 190;
+          const nt = nearThreat(sx);
+          if (nt.d < 85 || !calm) {   // 惊飞（主角或敌人靠近都跑）
+            c.state = 2; c.vx = (sx >= nt.x ? 1 : -1) * (150 + Math.random() * 90); c.vy = 190;
           }
         } else {                        // 惊飞逃离
           c.x += c.vx * dt; c.y += c.vy * dt;
@@ -2970,8 +2994,9 @@ export class BattleScene extends Component {
           const peck = Math.max(0, Math.sin(t * 2.6 + 1)) ** 6;
           c.n.angle = -16 * peck;      // 低头啄
           c.n.setScale(sx >= heroSx ? -1 : 1, 1, 1);   // 面朝主角方向(图朝左)
-          if (Math.abs(sx - heroSx) < 150 || (this.hero.attacking && Math.abs(sx - heroSx) < 260) || !calm) {   // 惊飞（挥刀只吓近处的）
-            c.state = 2; c.vx = (sx >= heroSx ? 1 : -1) * (230 + Math.random() * 90); c.vy = 300;
+          const nt = nearThreat(sx);
+          if (nt.d < 150 || (this.hero.attacking && Math.abs(sx - heroSx) < 260) || !calm) {   // 惊飞（主角/敌人靠近，或近处挥刀）
+            c.state = 2; c.vx = (sx >= nt.x ? 1 : -1) * (230 + Math.random() * 90); c.vy = 300;
             if (this.birdFlySF) c.sp.spriteFrame = this.birdFlySF;
             c.n.angle = 0;
           }
@@ -3081,6 +3106,7 @@ export class BattleScene extends Component {
       this.lightCd -= dt;
       if (this.lightCd <= 0) {   // 主闪
         this.lightT = 1; this.genBolt(); this.addShake(5);
+        AudioMgr.inst.play('thunder', 0.7);
         this.flickN = 2 + Math.floor(Math.random() * 2); this.flickT = 0.06 + Math.random() * 0.06;
         this.lightCd = 5 + Math.random() * 8;
       }
@@ -3256,7 +3282,7 @@ export class BattleScene extends Component {
   // 飘云（慢速视差，块状）
   private drawClouds(t: Theme, PX: number) {
     const g = this.bgG, W = DESIGN_W, gy = this.groundY;
-    const k = this.stormK;   // 乌云浓度：雨天 0→1
+    const k = 0;   // 乌云效果已关闭（想恢复改回 this.stormK）
     // 云色：平时亮云 → 雨天渐变成深灰乌云
     const bright = this.sh(this.timeOfDay().sky, 1.16);
     const col = new Color(

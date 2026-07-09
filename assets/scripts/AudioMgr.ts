@@ -11,6 +11,7 @@ export class AudioMgr {
 
   private source: AudioSource;      // 音效（playOneShot 可叠加）
   private bgmSource: AudioSource;   // BGM（循环独占）
+  private ambSource: AudioSource;   // 环境音（循环独占：雨声等）
   private cache: Record<string, AudioClip> = {};
   private missing: Record<string, boolean> = {};   // 已知缺失，不再重试
   sfxVolume = 1.0;
@@ -23,6 +24,8 @@ export class AudioMgr {
     this.source = n.addComponent(AudioSource);
     this.bgmSource = n.addComponent(AudioSource);
     this.bgmSource.loop = true;
+    this.ambSource = n.addComponent(AudioSource);
+    this.ambSource.loop = true;
   }
 
   private load(name: string, cb: (clip: AudioClip | null) => void) {
@@ -54,4 +57,22 @@ export class AudioMgr {
   }
 
   stopBgm() { this.bgmSource.stop(); }
+
+  /** 循环播放环境音（雨声等；同名重复调用不重启） */
+  playAmb(name: string, vol = 0.5) {
+    if ((this.ambSource as unknown as { _ambName?: string })._ambName === name && this.ambSource.playing) return;
+    this.load(name, clip => {
+      if (!clip) return;
+      (this.ambSource as unknown as { _ambName?: string })._ambName = name;
+      this.ambSource.stop();
+      this.ambSource.clip = clip;
+      this.ambSource.volume = vol;
+      this.ambSource.play();
+    });
+  }
+
+  stopAmb() {
+    (this.ambSource as unknown as { _ambName?: string })._ambName = '';
+    this.ambSource.stop();
+  }
 }
