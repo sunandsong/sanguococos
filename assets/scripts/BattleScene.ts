@@ -2,7 +2,7 @@ import {
   _decorator, Component, Node, Graphics, Label, LabelOutline,
   UITransform, UIOpacity, Color, tween, Vec3,
   input, Input, EventKeyboard, KeyCode,
-  Sprite, SpriteFrame, Texture2D, Rect, resources,
+  Sprite, SpriteFrame, Texture2D, Rect, resources, gfx,
 } from 'cc';
 import { DESIGN_W, DESIGN_H } from './Constants';
 import { AudioMgr } from './AudioMgr';
@@ -93,9 +93,9 @@ export class BattleScene extends Component {
   // near 没有专属图就复用 bg-near-grass。最后一组固定给 Boss 关。
   // 第 1-5 关=青原，第 6-9 关=密林，第 10 关(Boss)=焦土。
   private readonly BIOMES = [
-    { name: '密林', far: 'bg-far-forest', mid: 'bg-mid-forest', near: 'bg-near-forest' },   // 第 1-5 关
-    { name: '青原', far: 'bg-far-mtn',    mid: 'bg-mid-hills',  near: 'bg-near-grass' },     // 第 6-9 关
-    { name: '焦土', far: 'bg-far-ruins',  mid: 'bg-mid-ruins',  near: 'bg-near-ruins' },     // 第 10 关 Boss 专属
+    { name: '密林', far: 'bg-far-forest', mid: 'bg-mid-forest', near: 'bg-near-forest', fg: 'bg-fg-forest' },   // 第 1-5 关
+    { name: '青原', far: 'bg-far-mtn',    mid: 'bg-mid-hills',  near: 'bg-near-grass',  fg: 'bg-fg-grass' },    // 第 6-9 关
+    { name: '焦土', far: 'bg-far-ruins',  mid: 'bg-mid-ruins',  near: 'bg-near-ruins',  fg: 'bg-fg-ruins' },    // 第 10 关 Boss 专属
   ];
 
   // 场景只两种（一套素材通用）；主要靠时段变化出氛围
@@ -148,6 +148,8 @@ export class BattleScene extends Component {
   private bgG!: Graphics;
   private stageG!: Graphics;
   private fgG!: Graphics;   // 前景层（主角之上、暗角之下）
+  private glowG!: Graphics;   // 辉光层（加法混合，亮元素发光）
+  private fgSilG!: Graphics;  // 前景剪影层（最前，暗色草木框景）
   private bossPropRoot!: Node;   // Boss 关近景道具容器（角色之下）
   private bossProps: { node: Node; wx: number; dy: number; res: string }[] = [];
   private bossGlowG!: Graphics;  // 道具垫底层：接地影 + 火盆暖光晕（在道具贴图之下）
@@ -155,6 +157,28 @@ export class BattleScene extends Component {
   private layers: { tiles: Node[]; w: number; par: number; baseY: number; dispH: number }[] = [];   // 视差背景层（远→近）
   private bgCache: Record<string, SpriteFrame> = {};   // 背景图缓存（换关不重复加载）
   private curBiome = -1;   // 当前已应用的背景组，-1=未设
+  private fgLayerIdx = -1;   // 图片前景层在 this.layers 里的真实索引（石头层在它之前）
+  private heroVx = 0;        // 主角平滑水平速度（披风/盔缨滞后拖拽用）
+  private prevHeroX = 0;
+  // 战场残留：血渍/脚印（地面贴花）+ 插在地上的箭
+  private stains: { x: number; y: number; r: number; life: number; max: number; kind: string }[] = [];
+  private stuckArrows: { x: number; y: number; ang: number; life: number; max: number }[] = [];
+  private stepT = 0;         // 脚步节拍（雪脚印/雨水花）
+  private stepPar = 1;       // 左右脚交替
+  private hpLag = 100;   // 掉血残影（血条上缓慢追上的亮橙段）
+  // 曹旗旗面切条（横条随 sin 相位摆动 → 垂旗飘动；杆/横杆静止）
+  private flagStrips: { n: Node; bx: number; amp: number; ph: number }[] = [];
+  // Boss 法术贴图特效：法阵(双层反向旋转) + 冲击波环（加法混合，黑底自动消失）
+  private fxRune: { n: Node; c: Node; op: UIOpacity }[] = [];   // n=压扁的地面透视父节点, c=旋转的贴图子节点
+  private fxShock: { n: Node; c: Node; op: UIOpacity } | null = null;
+  private fxReady = false;
+  private shockT = 0;        // 冲击波剩余时间
+  private shockX = 0;        // 冲击波世界 x
+  // 击杀慢动作 + 攻击残影
+  private slowMo = 0;        // 慢动作剩余时间（击杀触发，全场 0.3 倍速 + 微推近）
+  private ghosts: { n: Node; foot: Sprite; upper: Sprite; legs: Sprite; op: UIOpacity; life: number }[] = [];
+  private ghostCd = 0;
+  private readonly GHOST_LIFE = 0.22;
   // 卷屏走路换景：老场景左滑出、新场景右滑入
   private transActive = false;
   private transP = 0;        // 换景进度 0→1
@@ -271,6 +295,8 @@ export class BattleScene extends Component {
   private boltBranches: number[][][] = [];// 分叉
   private flickN = 0;    // 剩余抖闪次数
   private flickT = 0;    // 距下次抖闪
+  private slamBolt: number[][] = [];   // 跳劈落地闪电折线
+  private slamBoltT = 0;               // 剩余显示时间
 
   private leftHeld = false;
   private rightHeld = false;
@@ -350,7 +376,42 @@ export class BattleScene extends Component {
         this.bossProps.push({ node: n, wx, dy, res });
       };
       // 旗/枪/盾/拒马放大一倍增强存在感；火盆保持
-      mk('boss-flag', arenaX + 245, 116, 226, true);    // 曹旗（右侧，镜像）
+      // 曹旗：杆/横杆静止 + 旗面切 8 条随风飘（切条波浪）
+      {
+        const n = new Node('boss-flag'); n.layer = this.node.layer; n.parent = this.bossPropRoot;
+        const nu = n.addComponent(UITransform); nu.setAnchorPoint(0.5, 0); nu.setContentSize(116, 226);
+        n.setScale(-1, 1, 1);   // 镜像（与原版一致）
+        this.bossProps.push({ node: n, wx: arenaX + 245, dy: 0, res: 'boss-flag' });
+        resources.load('boss-flag/spriteFrame', SpriteFrame, (e, base) => {
+          if (e || !base) return;
+          const tex = base.texture as Texture2D;
+          const TW = tex.width, TH = tex.height;
+          const sx = 116 / TW, sy = 226 / TH;
+          const piece = (rx: number, ry: number, rw: number, rh: number, name: string) => {
+            const c = new Node(name); c.layer = this.node.layer; c.parent = n;
+            const u = c.addComponent(UITransform); u.setAnchorPoint(0, 1);
+            u.setContentSize(rw * sx, rh * sy);
+            const sp = c.addComponent(Sprite); sp.sizeMode = Sprite.SizeMode.CUSTOM;
+            const sf = new SpriteFrame(); sf.texture = tex; sf.rect = new Rect(rx, ry, rw, rh);
+            sp.spriteFrame = sf;
+            c.setPosition((rx - TW / 2) * sx, (TH - ry) * sy, 0);
+            return c;
+          };
+          const poleW = Math.round(TW * 0.36);
+          piece(0, 0, poleW, TH, 'pole');                       // 杆+矛头（静止）
+          const clothX = poleW, clothW = TW - poleW;
+          const topH = Math.round(TH * 0.26);
+          piece(clothX, 0, clothW, topH, 'top');                // 横杆+旗面顶部（静止=固定端）
+          const clothY = topH, clothH = Math.round(TH * 0.64);
+          const N = 8, rh = Math.ceil(clothH / N);
+          this.flagStrips = [];
+          for (let i = 0; i < N; i++) {
+            const ry = clothY + i * rh;
+            const c = piece(clothX, ry, clothW, Math.min(rh + 2, TH - ry), 'strip' + i);   // +2 重叠遮缝
+            this.flagStrips.push({ n: c, bx: (clothX - TW / 2) * sx, amp: 6.5 * Math.pow((i + 1) / N, 1.25), ph: i * 0.55 });
+          }
+        });
+      }
       mk('boss-brazier', arenaX + 158, 53, 38);         // 火盆（右侧）
       mk('boss-spear', arenaX - 60, 50, 82);            // 断枪插地
       mk('boss-shield', arenaX + 70, 58, 38);           // 破盾倒地
@@ -359,6 +420,28 @@ export class BattleScene extends Component {
     }
 
     this.stageG = this.child('stage').addComponent(Graphics);
+
+    // Boss 法术特效节点（法阵×2 + 冲击波）：父节点压扁做地面透视，子节点旋转贴图 → 盘面旋转
+    const mkFx = (name: string) => {
+      const n = new Node(name); n.layer = this.node.layer; n.parent = this.node;
+      n.addComponent(UITransform).setAnchorPoint(0.5, 0.5);
+      const op = n.addComponent(UIOpacity);
+      const c = new Node(name + '-tex'); c.layer = this.node.layer; c.parent = n;
+      const cu = c.addComponent(UITransform); cu.setAnchorPoint(0.5, 0.5); cu.setContentSize(512, 512);
+      const sp = c.addComponent(Sprite); sp.sizeMode = Sprite.SizeMode.CUSTOM;
+      // 贴图已做"亮度→alpha"处理（黑底=透明、亮部=发光色），标准透明混合即可
+      n.active = false;
+      return { n, c, op, sp };
+    };
+    const r0 = mkFx('fxrune0'), r1 = mkFx('fxrune1'), sh = mkFx('fxshock');
+    this.fxRune = [r0, r1]; this.fxShock = sh;
+    resources.load('fx-rune-circle/spriteFrame', SpriteFrame, (e, sf) => {
+      if (e || !sf) { console.warn('法阵贴图加载失败：', e); return; }
+      r0.sp.spriteFrame = sf; r1.sp.spriteFrame = sf; this.fxReady = true;
+    });
+    resources.load('fx-shockwave/spriteFrame', SpriteFrame, (e, sf) => {
+      if (e || !sf) return; sh.sp.spriteFrame = sf;
+    });
 
     // 敌人精灵池（轻步兵）：预建若干精灵节点，逐帧分配给活着的小怪
     const enemyLayer = this.child('enemies');
@@ -428,6 +511,24 @@ export class BattleScene extends Component {
       this.bossHeadNode.setPosition(-1, 34, 0);
     });
 
+    // 攻击残影池：结构镜像主角(全身/上半身/腿)，建在主角之前=渲染在身后
+    for (let i = 0; i < 4; i++) {
+      const n = new Node('ghost' + i); n.layer = this.node.layer; n.parent = this.node;
+      n.addComponent(UITransform).setAnchorPoint(0.5, 0);
+      const op = n.addComponent(UIOpacity);
+      const mk = (name: string, w: number, hh: number, x: number, y: number) => {
+        const c = new Node(name); c.layer = this.node.layer; c.parent = n;
+        const u = c.addComponent(UITransform); u.setContentSize(w, hh); u.setAnchorPoint(0.5, 0);
+        const sp = c.addComponent(Sprite); sp.sizeMode = Sprite.SizeMode.CUSTOM;
+        sp.color = new Color(140, 210, 255, 255);   // 冷青残影色
+        c.setPosition(x, y, 0);
+        return sp;
+      };
+      const legs = mk('l', 32, 28, 0, 0), upper = mk('u', 52, 22, -6, 26), foot = mk('f', 40, 44, 1, 0);
+      n.active = false;
+      this.ghosts.push({ n, foot, upper, legs, op, life: 0 });
+    }
+
     // 主角 = 骑马赵云上半身(带刺枪攻击) + 步战赵云腿（拼接的下马赵云）
     this.heroNode = this.child('hero');
     this.heroNode.getComponent(UITransform)!.setAnchorPoint(0.5, 0);
@@ -480,6 +581,15 @@ export class BattleScene extends Component {
 
     // 前景层（主角之上、暗角之下）：每帧重画
     this.fgG = this.child('foreground').addComponent(Graphics);
+    // 辉光层：加法混合，让亮元素(刀气/剑气/金币/火)真正发光
+    this.glowG = this.child('glow').addComponent(Graphics);
+    (this.glowG as any).srcBlendFactor = gfx.BlendFactor.SRC_ALPHA;
+    (this.glowG as any).dstBlendFactor = gfx.BlendFactor.ONE;
+    // 前景剪影层（保留空节点）
+    this.fgSilG = this.child('fgsil').addComponent(Graphics);
+    // 图片前景层（AI 生成的暗色草木剪影）：在角色之前，最前景，随关卡换
+    this.makeScrollLayer('bg-fg-forest', 580, 0.9, -512);   // tiles 建在 fgsil 之后=最前
+    this.fgLayerIdx = this.layers.length - 1;               // 记住前景层真实索引(石头层在它之前)
 
     // 电影暗角（压暗四周，聚焦中央；盖在角色之上、UI 之下，只画一次）
     const vg = this.child('vignette').addComponent(Graphics);
@@ -498,13 +608,28 @@ export class BattleScene extends Component {
     // 伤害数字容器（在角色之上）
     this.dmgLayer = this.child('dmglayer');
 
-    this.makeLabel('⚔ 闯 关 打 怪 ⚔', 0, H / 2 - 80, 38, new Color(255, 225, 150));
     this.zoneLbl = this.makeLabel('', 0, H / 2 - 130, 30, new Color(255, 235, 190));
+    this.zoneLbl.node.active = false;   // 关数提示已隐藏（换关横幅仍会报关数）
     this.scoreLbl = this.makeLabel('', 0, H / 2 - 172, 28, new Color(255, 240, 200));
-    this.coinLbl = this.makeLabel('', W / 2 - 90, H / 2 - 130, 30, new Color(250, 210, 90));
+    this.scoreLbl.node.active = false;   // 得分/血量文字已隐藏（血条仍在头顶）
+    this.coinLbl = this.makeLabel('', 241, H / 2 - 71, 24, new Color(255, 224, 120));   // 顶部金币徽章上的数字
+
+    // 主角头像（AI 像素画方形头像，血条左端；方形金框画在 drawHeroHp 里）
+    {
+      const avN = new Node('avatar'); avN.layer = this.node.layer; avN.parent = this.node;
+      const au = avN.addComponent(UITransform); au.setAnchorPoint(0.5, 0.5); au.setContentSize(52, 52);
+      const asp = avN.addComponent(Sprite); asp.sizeMode = Sprite.SizeMode.CUSTOM;
+      avN.setPosition(-267, H / 2 - 69, 0);
+      resources.load('avatar-zhaoyun/spriteFrame', SpriteFrame, (e, sf) => {
+        if (e || !sf) return;
+        (sf.texture as Texture2D).setFilters(Texture2D.Filter.NEAREST, Texture2D.Filter.NEAREST);
+        asp.spriteFrame = sf;
+      });
+    }
     this.comboLbl = this.makeLabel('', 0, H / 2 - 245, 34, new Color(255, 180, 90));
     this.comboLbl.node.active = false;
-    this.hintLbl = this.makeLabel('移动 A·D　跳 W/↑　攻击(连按3下→跳劈)　剑气 K', 0, H / 2 - 210, 22, new Color(200, 200, 210));
+    this.hintLbl = this.makeLabel('', 0, H / 2 - 210, 22, new Color(200, 200, 210));
+    this.hintLbl.node.active = false;   // 操作提示已隐藏
 
     // 「前进 →」提示（清关后出现，update 里做缩放呼吸）
     this.arrow = this.makeLabel('前进 →', W / 2 - 130, 70, 42, new Color(255, 240, 150)).node;   // 取 node 才能真正显隐
@@ -521,13 +646,11 @@ export class BattleScene extends Component {
     this.zoneIntroLbl.node.active = false;
 
     const by = -H / 2 + 120;
-    this.makeHoldButton('◀', -270, by, new Color(70, 80, 110), h => (this.leftHeld = h));
-    this.makeHoldButton('▶', -130, by, new Color(70, 80, 110), h => (this.rightHeld = h));
+    this.makeHoldButton('▶', -200, by, new Color(70, 80, 110), h => (this.rightHeld = h));   // 只留前进（后退按钮去掉，键盘 A 仍可后退）
     this.makeTapButton('攻击', 250, by, 180, 92, new Color(150, 60, 55), () => this.heroSwing());
     this.makeTapButton('剑气', 80, by, 150, 84, new Color(55, 105, 140), () => this.heroSpecial());
     this.makeTapButton('跳', -130, by + 108, 120, 84, new Color(80, 110, 80), () => this.heroJump());
 
-    this.makeTapButton('收兵', -300, H / 2 - 60, 130, 66, new Color(90, 70, 66), () => this.close());
     this.restartBtn = this.makeTapButton('再战', 0, 10, 190, 88, new Color(70, 110, 70), () => this.startGame());
     this.restartBtn.active = false;
 
@@ -567,6 +690,9 @@ export class BattleScene extends Component {
       jumping: false, jmpPre: 0, jmpLand: 0,
     };
     this.monsters = []; this.sparks = []; this.bloods = []; this.waves = [];
+    this.stains = []; this.stuckArrows = []; this.stepT = 0;   // 清战场残留
+    this.shockT = 0; this.slowMo = 0; this.node.setScale(1, 1, 1);   // 复位特效/慢动作
+    this.hpLag = 100;   // 血条残影复位
     this.arrows = []; this.drops = []; this.flashes = [];
     this.hitStop = 0; this.shakeT = 0; this.shakeMag = 0; this.node.setPosition(0, 0, 0);
     for (const d of this.dmgNums) { d.n.active = false; this.dmgPoolFree.push(d.n); }
@@ -690,6 +816,18 @@ export class BattleScene extends Component {
     }
     this.stepMotes(dt);
     this.stepWeather(dt);
+    if (this.slamBoltT > 0) this.slamBoltT -= dt;   // 跳劈闪电衰减
+    if (this.shockT > 0) this.shockT -= dt;         // Boss 冲击波衰减
+    // 掉血残影缓慢追上当前血量
+    const hpN = Math.max(0, this.hero ? this.hero.hp : 0);
+    this.hpLag = this.hpLag > hpN ? Math.max(hpN, this.hpLag - dt * 42) : hpN;
+
+    // 主角平滑速度（披风/盔缨滞后拖拽）
+    if (this.hero) {
+      const hvx = (this.hero.x - this.prevHeroX) / Math.max(dt, 1e-4);
+      this.prevHeroX = this.hero.x;
+      this.heroVx += (hvx - this.heroVx) * Math.min(1, dt * 8);
+    }
 
     // 屏幕震动（整块偏移，短促衰减）
     if (this.shakeT > 0) {
@@ -701,6 +839,15 @@ export class BattleScene extends Component {
 
     // 顿帧：命中瞬间全场定格几帧（打击感灵魂）
     if (this.hitStop > 0) { this.hitStop = Math.max(0, this.hitStop - dt); this.draw(); return; }
+
+    // 击杀慢动作：全场 0.3 倍速 + 镜头微推近（终结一击的仪式感）
+    if (this.slowMo > 0) {
+      this.slowMo -= dt;
+      dt *= 0.3;
+      const z = 1 + 0.05 * Math.min(1, this.slowMo / 0.25);
+      this.node.setScale(z, z, 1);
+      if (this.slowMo <= 0) this.node.setScale(1, 1, 1);
+    }
 
     if (!this.over) {
       this.stepZone(dt);
@@ -721,6 +868,8 @@ export class BattleScene extends Component {
     this.stepBloods(dt);
     this.stepDusts(dt);
     this.stepBossGhosts(dt);
+    this.stepGhosts(dt);
+    this.stepStains(dt);
     this.stepFlashes(dt);
     this.stepDmgNums(dt);
     this.draw();
@@ -728,7 +877,7 @@ export class BattleScene extends Component {
     const t = this.theme();
     this.zoneLbl.string = `第 ${this.zone + 1} 关 · ${t.name} · ${this.timeOfDay().name}`;
     this.scoreLbl.string = `得分 ${this.score}　❤ ${Math.max(0, Math.ceil(this.hero.hp))}`;
-    this.coinLbl.string = `金 ${this.coins}`;
+    this.coinLbl.string = `${this.coins}`;
     this.comboLbl.node.active = false;   // 连击提示已关闭
     if (this.comboCount >= 2) {
       this.comboLbl.string = `连击 x${this.comboCount}`;
@@ -864,6 +1013,15 @@ export class BattleScene extends Component {
         this.stepSndT = 0.3;
         AudioMgr.inst.play('step', 0.35);
       }
+      // 天气联动脚步：雪天留脚印、雨天踩水花
+      if (h.jumpY <= 0 && !h.jumping) {
+        this.stepT -= dt;
+        if (this.stepT <= 0) {
+          this.stepT = 0.17; this.stepPar = -this.stepPar;
+          if (this.weather === '雪') this.addStain(h.x - mv * 8, this.groundY + this.stepPar * 4, 5, 'foot');
+          else if (this.weather === '雨') this.spawnWImpact(this.sX(h.x) + (Math.random() - 0.5) * 14, this.groundY, '雨', 0, 0, 1);
+        }
+      } else this.stepT = 0;
     }
 
     // 关卡边界
@@ -1013,6 +1171,7 @@ export class BattleScene extends Component {
     for (let k = 0; k < 9; k++) this.sparks.push({ x: h.x + (k - 4) * 22, y: this.groundY + 6, life: 0, max: 0.28 });
     this.addShake(18); this.addHitStop(0.06);   // 跳劈落地：大震 + 顿帧
     this.spawnDust(this.hero.x, this.groundY + 4, 10, 300);   // 跳劈落地大尘圈
+    this.genSlamBolt(this.sX(h.x), this.groundY + 6);   // 天降一道闪电劈在落点
     for (const m of this.monsters) {
       if (m.state === 'dead') continue;
       const dx = m.x - h.x;
@@ -1045,6 +1204,37 @@ export class BattleScene extends Component {
   }
 
   // Boss 冲刺残影：冲刺中每隔一小段留一个当前帧的淡影
+  // 主角攻击残影：挥砍/跳劈期间每隔几帧留一个冷青虚影，快速渐隐
+  private stepGhosts(dt: number) {
+    for (const g of this.ghosts) {
+      if (g.life <= 0) continue;
+      g.life -= dt;
+      g.op.opacity = Math.max(0, Math.round(130 * (g.life / this.GHOST_LIFE)));
+      if (g.life <= 0) g.n.active = false;
+    }
+    const h = this.hero;
+    const active = h.state !== 'dead' && (h.attacking || (h.atkType === 2 && (h.jumpY > 2 || h.landT > this.LAND_DUR * 0.6)));
+    if (!active || !this.heroNode.active) { this.ghostCd = 0; return; }
+    this.ghostCd -= dt;
+    if (this.ghostCd > 0) return;
+    this.ghostCd = 0.055;
+    const g = this.ghosts.find(x => x.life <= 0);
+    if (!g) return;
+    g.life = this.GHOST_LIFE;
+    g.n.active = true;
+    g.n.setPosition(this.heroNode.position);
+    g.n.setScale(this.heroNode.scale);
+    g.n.angle = this.heroNode.angle;
+    g.op.opacity = 130;
+    // 镜像当前可见的部件与帧
+    g.foot.node.active = this.footNode.active;
+    if (this.footNode.active) g.foot.spriteFrame = this.footSp.spriteFrame;
+    g.upper.node.active = this.heroSp.node.active;
+    if (this.heroSp.node.active) g.upper.spriteFrame = this.heroSp.spriteFrame;
+    g.legs.node.active = this.legsSp.node.active;
+    if (this.legsSp.node.active) g.legs.spriteFrame = this.legsSp.spriteFrame;
+  }
+
   private stepBossGhosts(dt: number) {
     for (const g of this.bossGhosts) {
       if (!g.node.active) continue;
@@ -1128,6 +1318,9 @@ export class BattleScene extends Component {
       m.jumpVy = Math.max(m.jumpVy, 230 + Math.random() * 150);   // 尸体弹飞
       this.score += 1 + Math.floor(this.comboCount / 5);
       this.spawnDrop(m);
+      // 击杀慢动作：Boss 击杀最久；清掉本波最后一个也来一下
+      if (m.kind === 'boss') this.slowMo = 0.6;
+      else if (this.aliveCount() === 0 && this.waveRemaining === 0) this.slowMo = 0.32;
     }
   }
 
@@ -1200,12 +1393,18 @@ export class BattleScene extends Component {
     for (let i = this.arrows.length - 1; i >= 0; i--) {
       const a = this.arrows[i];
       a.life += dt; a.x += a.vx * dt; a.y += a.vy * dt;
+      a.vy -= 70 * dt;   // 更轻微的下坠 → 飞得更远才插地
       const hy = this.groundY + 50 + h.jumpY;   // 胸膛高度
       if (Math.abs(a.x - h.x) < 30 && Math.abs(a.y - hy) < 55) {
         this.hurtHero(6 + Math.floor(this.zone * 0.5), a.x);
         this.arrows.splice(i, 1); continue;
       }
-      if (a.life > 3.5 || a.y < this.groundY - 60) this.arrows.splice(i, 1);
+      if (a.y <= this.groundY + 2 && a.vy < 0) {   // 落地 → 插在地上（战场残留）
+        this.stuckArrows.push({ x: a.x, y: this.groundY + 2, ang: Math.atan2(a.vy, a.vx), life: 0, max: 8 });
+        if (this.stuckArrows.length > 24) this.stuckArrows.shift();
+        this.arrows.splice(i, 1); continue;
+      }
+      if (a.life > 4.5) this.arrows.splice(i, 1);
     }
   }
 
@@ -1410,6 +1609,7 @@ export class BattleScene extends Component {
       if ((m.slamT || 0) <= 0) {
         m.slamState = 'strike'; m.slamT = 0.45;
         const tx = m.slamX || m.x;
+        this.shockT = 0.38; this.shockX = tx;   // 冲击波环贴图炸开
         this.addShake(20); this.addHitStop(0.05);
         AudioMgr.inst.play('slam');
         this.spawnHitFlash(this.sX(tx), this.groundY + 26);
@@ -1462,6 +1662,48 @@ export class BattleScene extends Component {
     }
   }
 
+  // Boss 法术贴图编排：法阵双层反向旋转+充能渐强+临爆闪烁；冲击波环炸开放大淡出
+  private updateBossFx() {
+    const b = this.monsters.find(m => m.kind === 'boss' && m.state !== 'dead');
+    const st = b ? (b.slamState || 'none') : 'none';
+    const R = this.BOSS_SLAM_R;
+    // 法阵（蓄力）
+    if (this.fxReady && b && st === 'windup') {
+      const p = 1 - (b.slamT || 0) / this.BOSS_SLAM_WINDUP;   // 0→1 充能
+      const cx = this.sX(b.slamX || b.x), cy = this.groundY + b.lane + 2;
+      const grow = 0.5 + 0.5 * p;                              // 随充能变大
+      const pulse = 1 + 0.04 * Math.sin(this.animT * 7);       // 呼吸
+      const flick = p > 0.78 ? (Math.sin(this.animT * 46) > 0 ? 1 : 0.5) : 1;   // 临爆高频闪
+      const base = (R * 2.6) / 512;
+      const cfg = [
+        { s: 1.0, rot: this.animT * 40 },      // 外层 顺时针
+        { s: 0.58, rot: -this.animT * 64 },    // 内层 逆时针（交错流动感）
+      ];
+      for (let i = 0; i < 2; i++) {
+        const r = this.fxRune[i];
+        r.n.active = true;
+        r.n.setPosition(cx, cy, 0);
+        const s = base * grow * pulse * cfg[i].s;
+        r.n.setScale(s, s * 0.18, 1);          // 父节点压得更扁=平铺地面透视
+        r.c.angle = cfg[i].rot;                // 子节点旋转=盘面自转
+        r.op.opacity = Math.round((110 + 145 * p) * flick);
+      }
+    } else {
+      for (const r of this.fxRune) r.n.active = false;
+    }
+    // 冲击波环（砸下）
+    if (this.fxShock) {
+      if (this.shockT > 0 && this.fxShock.c.getComponent(Sprite)!.spriteFrame) {
+        const q = 1 - this.shockT / 0.38;      // 0→1 扩散
+        const s = ((R * 3.0) / 512) * (0.3 + 1.7 * q);
+        this.fxShock.n.active = true;
+        this.fxShock.n.setPosition(this.sX(this.shockX), this.groundY + 2, 0);
+        this.fxShock.n.setScale(s, s * 0.18, 1);
+        this.fxShock.op.opacity = Math.round(255 * (1 - q) * (1 - q));   // 快速淡出
+      } else this.fxShock.n.active = false;
+    }
+  }
+
   // Boss 重击预警：地面危险区（分层暗红底 + 立体亮边 + 向心瞄准环 + 警示刻度），砸下时冲击环 + 裂纹
   private drawBossWarning(g: Graphics) {
     const b = this.monsters.find(m => m.kind === 'boss' && m.state !== 'dead');
@@ -1473,6 +1715,11 @@ export class BattleScene extends Component {
 
     if (st === 'windup') {
       const p = 1 - (b.slamT || 0) / this.BOSS_SLAM_WINDUP;   // 0→1 充能
+      if (this.fxReady) {
+        // 贴图法阵接管视觉（updateBossFx）；这里只垫一层淡淡的危险红底，保证可读性
+        g.fillColor = new Color(90, 12, 8, Math.round(36 + 30 * p)); ell(R); g.fill();
+        return;
+      }
       const pulse = 0.5 + 0.5 * Math.sin(p * 26);             // 呼吸闪
       // ① 分层暗红危险底（外淡→内浓，做出"渐变/凹陷"质感）
       g.fillColor = new Color(60, 8, 6, 60); ell(R); g.fill();
@@ -1546,13 +1793,61 @@ export class BattleScene extends Component {
     }
   }
 
+  // ---------- 战场残留（血渍/脚印/插地箭） ----------
+  private addStain(x: number, y: number, r: number, kind: string) {
+    this.stains.push({ x, y, r, life: 0, max: kind === 'blood' ? 4 : 5, kind });
+    if (this.stains.length > 40) this.stains.shift();   // 上限，先进先出
+  }
+
+  private stepStains(dt: number) {
+    for (let i = this.stains.length - 1; i >= 0; i--) {
+      const s = this.stains[i]; s.life += dt;
+      if (s.life >= s.max) this.stains.splice(i, 1);
+    }
+    for (let i = this.stuckArrows.length - 1; i >= 0; i--) {
+      const a = this.stuckArrows[i]; a.life += dt;
+      if (a.life >= a.max) this.stuckArrows.splice(i, 1);
+    }
+  }
+
+  // 地面贴花：血渍暗红、雪脚印压痕（画在角色/影子之下）
+  private drawStains(g: Graphics) {
+    for (const s of this.stains) {
+      const fade = Math.min(1, (s.max - s.life) / (s.max * 0.35));   // 末段渐隐
+      if (s.kind === 'blood') {
+        g.fillColor = new Color(118, 22, 18, Math.round(150 * fade));
+        g.ellipse(this.sX(s.x), s.y - 2, s.r * 1.6, s.r * 0.5); g.fill();
+      } else {   // 雪地脚印
+        g.fillColor = new Color(52, 58, 74, Math.round(90 * fade));
+        g.ellipse(this.sX(s.x), s.y - 2, 6, 2.6); g.fill();
+      }
+    }
+    // 插在地上的箭（斜插，杆+尾羽）
+    for (const a of this.stuckArrows) {
+      const fade = Math.min(1, (a.max - a.life) / 1.2);
+      const sx = this.sX(a.x), ca = Math.cos(a.ang), sa = Math.sin(a.ang), L = 30;
+      g.strokeColor = new Color(38, 28, 18, Math.round(255 * fade)); g.lineWidth = 5;
+      g.moveTo(sx, a.y); g.lineTo(sx - ca * L, a.y - sa * L); g.stroke();
+      g.strokeColor = new Color(228, 192, 122, Math.round(255 * fade)); g.lineWidth = 2.5;
+      g.moveTo(sx, a.y); g.lineTo(sx - ca * L, a.y - sa * L); g.stroke();
+      g.strokeColor = new Color(214, 62, 50, Math.round(255 * fade)); g.lineWidth = 2.5;
+      const tx = sx - ca * L, ty = a.y - sa * L;
+      g.moveTo(tx, ty); g.lineTo(tx + ca * 8 + sa * 6, ty + sa * 8 - ca * 6);
+      g.moveTo(tx, ty); g.lineTo(tx + ca * 8 - sa * 6, ty + sa * 8 + ca * 6); g.stroke();
+    }
+  }
+
   private stepBloods(dt: number) {
     for (let i = this.bloods.length - 1; i >= 0; i--) {
       const b = this.bloods[i];
       b.life += dt;
       b.vy -= 780 * dt;                 // 重力小一点 → 更慢更飘
       b.x += b.vx * dt; b.y += b.vy * dt;
-      if (b.life >= b.max || b.y < this.groundY - 30) this.bloods.splice(i, 1);
+      if (b.y <= this.groundY && b.vy < 0) {   // 落地 → 少量留血渍（战场残留）
+        if (Math.random() < 0.35) this.addStain(b.x, this.groundY + (Math.random() - 0.5) * 8, b.r * (1.1 + Math.random() * 0.9), 'blood');
+        this.bloods.splice(i, 1); continue;
+      }
+      if (b.life >= b.max) this.bloods.splice(i, 1);
     }
   }
 
@@ -1617,6 +1912,7 @@ export class BattleScene extends Component {
       g.fill();
     }
 
+    this.drawStains(g);       // 战场残留：血渍/脚印/插地箭（贴地，最底）
     this.drawNightLight(g);   // 夜晚：角色脚下暖光地面光斑（在角色之下）
     this.drawBacklight(g);    // 低日时段：角色背光描边（在角色之下、边缘露出）
 
@@ -1630,6 +1926,7 @@ export class BattleScene extends Component {
     const drawn = [...this.monsters].sort((a, b) => (a.state === 'dead' ? -1 : 1) - (b.state === 'dead' ? -1 : 1) || b.lane - a.lane);
     this.updateEnemySprites(drawn);   // 小怪 = 轻步兵精灵（Boss 单独用精灵）
     this.updateBossSprite();
+    this.updateBossFx();              // Boss 法术贴图特效（法阵/冲击波）
     const blink = h.state !== 'dead' && h.invuln > 0 && Math.floor(h.invuln * 20) % 2 === 0;
     if (this.DISMOUNT && !blink && h.state !== 'dead') this.drawHeroLegs(g);   // 火柴腿（在上半身之后画=垫腰下）
     this.updateHeroSprite(blink);
@@ -1676,6 +1973,44 @@ export class BattleScene extends Component {
 
     this.drawFg();       // 前景遮挡 + 统一色调（独立图层）
     this.drawWeather(this.fgG);   // 天气（雨/雪/落叶/余烬/闪电）叠在最前
+    this.drawSlamBolt(this.fgG);  // 跳劈落地闪电
+    this.drawGlow();              // Bloom 辉光（加法层，亮元素发光）
+  }
+
+  // 次级动作：披风 + 盔缨（画在角色身后）。核心=滞后拖拽(速度反向) + sin 抖动 → 布料感
+  private drawHeroTrim(g: Graphics) {
+    const h = this.hero;
+    if (h.state === 'dead') return;
+    const t = this.animT;
+    const hx = this.sX(h.x);
+    const y = this.groundY + Math.max(0, h.jumpY - Math.max(0, h.crouch) * 24);
+    const back = -h.dir;                                              // 背向
+    const lag = Math.max(-24, Math.min(24, -this.heroVx * 0.045));    // 移动越快拖得越开
+    const amp = 1 + Math.min(1.4, Math.abs(this.heroVx) / 300);       // 跑动时抖得更欢
+    const fl = (Math.sin(t * 5.3) * 3 + Math.sin(t * 8.9) * 1.6) * amp;
+
+    // 披风（深红布片，肩部锚定、下摆飘）
+    const capeD = new Color(140, 34, 36, 235), capeL = new Color(186, 58, 52, 235);
+    const sx0 = hx + back * 3, sy0 = y + 63;                          // 肩
+    g.fillColor = capeD;
+    g.moveTo(sx0, sy0);
+    g.lineTo(hx + back * 15 + lag * 0.5, y + 44 + fl * 0.5);
+    g.lineTo(hx + back * 21 + lag, y + 20 + fl);
+    g.lineTo(hx + back * 7 + lag * 0.6, y + 18 + fl * 0.6);
+    g.close(); g.fill();
+    g.strokeColor = capeL; g.lineWidth = 2;                            // 内侧亮边（体积感）
+    g.moveTo(sx0, sy0 - 2);
+    g.lineTo(hx + back * 12 + lag * 0.55, y + 40 + fl * 0.55);
+    g.lineTo(hx + back * 17 + lag * 0.9, y + 22 + fl * 0.9); g.stroke();
+
+    // 盔缨（头顶红缨往后飘）
+    g.strokeColor = new Color(212, 50, 46, 255); g.lineWidth = 4;
+    g.moveTo(hx + h.dir * 1, y + 82);
+    g.lineTo(hx + back * 7 + lag * 0.4, y + 88 + fl * 0.4);
+    g.lineTo(hx + back * 13 + lag * 0.7, y + 83 + fl * 0.8); g.stroke();
+    g.strokeColor = new Color(238, 92, 70, 255); g.lineWidth = 2;      // 缨梢亮色
+    g.moveTo(hx + back * 10 + lag * 0.55, y + 86 + fl * 0.6);
+    g.lineTo(hx + back * 16 + lag * 0.85, y + 82 + fl * 0.95); g.stroke();
   }
 
   // 主角 = 骑马上半身(带攻击) + 步战腿：定位/翻转/选帧
@@ -1690,7 +2025,9 @@ export class BattleScene extends Component {
     const ang = -h.dir * 42 * hk;      // 挨揍后仰
 
     const S = this.SPRITE_SCALE * (h.scaleBoost || 1);
-    this.heroNode.setPosition(sx, y, 0);
+    // 次级动作：走路微颠（小弹跳），让身体"活"起来
+    const bob = h.state === 'walk' && !h.jumping ? Math.abs(Math.sin(this.animT * 9)) * 2.5 : 0;
+    this.heroNode.setPosition(sx, y + bob, 0);
     // 蹲姿(squash)：绕脚底压身高，竖压则横宽；踮脚则拉高。
     // 跳跃(stretch)：腾空垂直速度越大越拉长，到顶点速度归零→缩回原位。
     const squashY = 1 - h.crouch * 0.34;   // 蹲/踮（含起跳蓄力、落地深蹲、攻击）
@@ -1732,7 +2069,9 @@ export class BattleScene extends Component {
       this.heroNode.angle = (h.dir >= 0 ? 1 : -1) * Math.min(80, h.deadT * 170);   // 向后倒（背对攻击方向）
       this.heroOp.opacity = Math.max(0, Math.round(255 * (1 - h.deadT / 1.4)));
     } else {
-      this.heroNode.angle = ang;
+      // 次级动作：走路身体微摆（步频节律的小角度）
+      const wob = h.state === 'walk' && hk === 0 && !h.jumping ? Math.sin(this.animT * 9) * 1.8 : 0;
+      this.heroNode.angle = ang + wob;
       this.heroOp.opacity = 255;
     }
   }
@@ -1932,9 +2271,10 @@ export class BattleScene extends Component {
       }
     };
     const gy = this.groundY;
-    // 主角脚下月光银白光斑
+    // 主角脚下月光银白光斑（跳起时像光源远离地面：光斑变大变淡）
     const h = this.hero;
-    if (h.state !== 'dead') pool(this.sX(h.x), gy - 2, 120, [200, 205, 220], 1.0);
+    const jk = Math.min(1, Math.max(0, h.jumpY) / 200);
+    if (h.state !== 'dead') pool(this.sX(h.x), gy - 2, 120 * (1 + jk * 0.3), [200, 205, 220], 1.0 - jk * 0.6);
     // 小怪脚下微光
     for (const m of this.monsters) {
       if (m.state === 'dead') continue;
@@ -1979,21 +2319,89 @@ export class BattleScene extends Component {
       }
     };
     const h = this.hero;
-    if (h.state !== 'dead') glow(this.sX(h.x) + sun * 16, gy + 42, 48, 1);
+    const hy = gy + 42 + h.jumpY - Math.max(0, h.crouch) * 24;   // 跟随跳跃/蹲姿
+    if (h.state !== 'dead') glow(this.sX(h.x) + sun * 16, hy, 48, 1);
     for (const m of this.monsters) {
       if (m.state === 'dead' || m.kind === 'boss') continue;
-      glow(this.sX(m.x) + sun * 11, gy + m.lane + 32 * m.scale, 30 * m.scale, 0.75);
+      glow(this.sX(m.x) + sun * 11, gy + m.lane + m.jumpY + 32 * m.scale, 30 * m.scale, 0.75);
     }
   }
 
   private drawShadow(g: Graphics, wx: number, lane: number, w: number, jumpY: number) {
     const sx = this.sX(wx), sy = this.groundY + lane;
-    const shrink = 1 - Math.min(0.6, Math.max(0, jumpY) / 320);
+    const shrink = 1 - Math.min(0.72, Math.max(0, jumpY) / 200);   // 跳得越高影子缩得越明显
     const c = this.shadowCfg();
     const halfLen = w * c.sx * shrink;
     const cx = sx + c.ox * (halfLen - w * shrink);   // 一端锚在脚下、朝背光方向拉长
     g.fillColor = new Color(0, 0, 0, Math.round(c.a * 170 * shrink));
     g.ellipse(cx, sy - 2, halfLen, 7 * shrink); g.fill();
+  }
+
+  // Bloom 辉光（加法混合层）：给亮元素叠柔和外发光
+  private drawGlow() {
+    const g = this.glowG; g.clear();
+    const glow = (x: number, y: number, r: number, col: number[], inten: number) => {
+      for (let i = 3; i >= 1; i--) {
+        g.fillColor = new Color(col[0], col[1], col[2], Math.round(inten * 24 * (4 - i) / 3));
+        g.circle(x, y, r * (i / 3)); g.fill();
+      }
+    };
+    // 金币
+    for (const d of this.drops) {
+      const x = d.flying ? d.sx : this.sX(d.x), y = d.flying ? d.sy : d.y + Math.sin(d.life * 7) * 3 + 15;
+      glow(x, y, 20, [255, 205, 90], 1);
+    }
+    // 剑气波
+    for (const w of this.waves) { const a = Math.max(0, 1 - w.life / w.max); glow(this.sX(w.x), w.y, 34, [150, 235, 255], a * 1.1); }
+    // 赵云刀气（挥砍中段最亮）
+    const h = this.hero;
+    if (h.attacking && h.state !== 'dead') {
+      const s = h.atkType === 2 ? h.slamProg : h.swing;
+      const a = 1 - Math.abs(s - 0.4) / 0.6;
+      if (a > 0.05) glow(this.sX(h.x) + h.dir * 40, this.groundY + 74 + h.jumpY, 52, [170, 240, 255], a * 1.3);
+    }
+    // 天气：余烬 / 闪电
+    if (this.weather === '余烬') for (const p of this.wparts) glow(p.x, p.y, p.sz * 3, [255, 150, 50], 0.5 + 0.5 * Math.sin(p.ph * 3));
+    if (this.lightT > 0.02 && this.bolt.length > 1) for (const pt of this.bolt) glow(pt[0], pt[1], 26, [170, 205, 255], this.lightT * 0.8);
+    if (this.slamBoltT > 0) for (const pt of this.slamBolt) glow(pt[0], pt[1], 22, [170, 210, 255], (this.slamBoltT / 0.26) * 0.9);   // 跳劈闪电辉光
+    // 敌人受击白闪：加法白光罩在身体上（乘法着色变不了白，加法能"打亮"精灵）
+    for (const m of this.monsters) {
+      if (m.state === 'dead' || m.hitT <= 0) continue;
+      const hk = Math.min(1, m.hitT / this.HIT_DUR);
+      const cx = this.sX(m.x), cy = this.groundY + m.lane + m.jumpY;
+      const isBoss = m.kind === 'boss';
+      const bw = isBoss ? 58 : 22 * m.scale, bh = isBoss ? 105 : 36 * m.scale, byc = isBoss ? 105 : 36 * m.scale;
+      for (let i = 2; i >= 1; i--) {
+        g.fillColor = new Color(255, 255, 255, Math.round(52 * hk * (3 - i) / 2));
+        g.ellipse(cx, cy + byc, bw * (i / 2), bh * (i / 2)); g.fill();
+      }
+    }
+  }
+
+  // 前景剪影层：最前的暗色草丛(摇曳)，框住画面、拉出纵深
+  private drawForeground() {
+    const g = this.fgSilG; g.clear();
+    const W = DESIGN_W, H = DESIGN_H, t = this.animT, gy = this.groundY;
+    const ruins = this.curBiome >= 0 && this.BIOMES[this.curBiome].name === '焦土';
+    const dk = ruins ? [22, 13, 9] : [9, 17, 10];
+    // 底部暗丘（把草根压在一起、盖住最底apron）
+    g.fillColor = new Color(dk[0], dk[1], dk[2], 240);
+    g.moveTo(-W / 2, -H / 2);
+    for (let x = -W / 2; x <= W / 2; x += 44) {
+      const n = Math.sin(x * 0.02 + t * 0.5) * 16 + Math.sin(x * 0.09 + 1.7) * 10;
+      g.lineTo(x, gy - 46 + n);
+    }
+    g.lineTo(W / 2, -H / 2); g.close(); g.fill();
+    // 草叶（细，摇曳）：中间矮、两侧高 → 只框边，不挡中央打斗
+    for (let i = 0; i < 46; i++) {
+      const x = -W / 2 - 20 + i * (W + 40) / 45;
+      const edge = Math.min(1, Math.abs(x) / (W / 2));   // 0中央 1边缘
+      const rootY = gy - 44 - ((i * 29) % 30);
+      const hgt = (42 + ((i * 53) % 46)) * (0.55 + edge * 1.05);
+      const sway = Math.sin(t * 1.1 + i * 0.7) * (12 + hgt * 0.07);
+      g.strokeColor = new Color(dk[0], dk[1], dk[2], 235); g.lineWidth = 3 + ((i * 17) % 4);
+      g.moveTo(x, rootY); g.lineTo(x + sway * 0.5, rootY + hgt * 0.6); g.lineTo(x + sway, rootY + hgt); g.stroke();
+    }
   }
 
   private initMotes() {
@@ -2123,6 +2531,37 @@ export class BattleScene extends Component {
   }
 
   // 生成一道天空闪电：锯齿主干 + 1~2 条分叉
+  // 跳劈落地闪电：绘制（外发光 + 亮芯，随时间快速衰减 + 抖闪）
+  private drawSlamBolt(g: Graphics) {
+    if (this.slamBoltT <= 0 || this.slamBolt.length < 2) return;
+    const a = (this.slamBoltT / 0.26) * (0.7 + 0.3 * Math.sin(this.animT * 60));   // 快速衰减 + 高频抖闪
+    const path = () => { g.moveTo(this.slamBolt[0][0], this.slamBolt[0][1]); for (let i = 1; i < this.slamBolt.length; i++) g.lineTo(this.slamBolt[i][0], this.slamBolt[i][1]); };
+    g.strokeColor = new Color(150, 195, 255, Math.round(150 * a)); g.lineWidth = 12;   // 外发光
+    path(); g.stroke();
+    g.strokeColor = new Color(250, 252, 255, Math.round(250 * a)); g.lineWidth = 4;    // 亮芯
+    path(); g.stroke();
+    // 落点电光爆闪
+    const tip = this.slamBolt[this.slamBolt.length - 1];
+    g.fillColor = new Color(210, 230, 255, Math.round(120 * a));
+    g.circle(tip[0], tip[1], 26 * (1.4 - a * 0.4)); g.fill();
+  }
+
+  // 跳劈落地闪电：从天顶劈到落点的锯齿电光（短暂显示后消失）
+  private genSlamBolt(x: number, y: number) {
+    const H = DESIGN_H, top = H / 2;
+    const steps = 9;
+    let sx = x + (Math.random() - 0.5) * 140;   // 起点在天顶、略偏
+    const pts: number[][] = [];
+    for (let i = 0; i <= steps; i++) {
+      const t = i / steps;
+      const px = sx + (x - sx) * t + (i > 0 && i < steps ? (Math.random() - 0.5) * 52 : 0);
+      pts.push([px, top + (y - top) * t]);
+    }
+    pts[steps] = [x, y];   // 末端钉在落点
+    this.slamBolt = pts;
+    this.slamBoltT = 0.26;
+  }
+
   private genBolt() {
     const W = DESIGN_W, H = DESIGN_H, top = H / 2;
     const endY = H * (0.21 + Math.random() * 0.10);   // 更长，但仍停在天空(高于中景山/树线)
@@ -2422,6 +2861,13 @@ export class BattleScene extends Component {
         }
       }
     }
+    // 曹旗飘动：旗面横条按相位摆（阵风起伏 → 时缓时急）
+    if (this.flagStrips.length) {
+      const gust = 1 + 0.5 * Math.sin(t * 0.7) * Math.sin(t * 1.7);   // 阵风强度慢变
+      for (const st of this.flagStrips) {
+        st.n.setPosition(st.bx + Math.sin(t * 2.6 + st.ph) * st.amp * gust, st.n.position.y, 0);
+      }
+    }
   }
 
   // Boss 关：火盆火苗/火星（盆身是贴图，火焰用代码叠加在盆口上）
@@ -2588,12 +3034,12 @@ export class BattleScene extends Component {
   // 某层(0远/1中/2近)在某组的资源名
   private layerRes(li: number, bi: number): string {
     const b = this.BIOMES[bi];
-    return li === 0 ? b.far : li === 1 ? b.mid : b.near;
+    return li === 0 ? b.far : li === 1 ? b.mid : li === 2 ? b.near : b.fg;   // 3=最前景层
   }
   // 预加载所有背景组到缓存（换景要用；缺图静默跳过）
   private preloadAllBiomes() {
     for (let bi = 0; bi < this.BIOMES.length; bi++) {
-      for (let li = 0; li < 3; li++) {
+      for (let li = 0; li < 4; li++) {
         const res = this.layerRes(li, bi);
         if (this.bgCache[res]) continue;
         resources.load(res + '/spriteFrame', SpriteFrame, (e, sf) => { if (!e && sf) this.bgCache[res] = sf; });
@@ -2601,7 +3047,7 @@ export class BattleScene extends Component {
     }
   }
 
-  // 直接把背景组套到 3 层（用于开局/换景结束）
+  // 直接把背景组套到 4 层（远/中/近/前景；用于开局/换景结束）
   private applyBiome(zone: number) {
     const bi = this.biomeIndexFor(zone);
     if (bi === this.curBiome) return;
@@ -2609,6 +3055,7 @@ export class BattleScene extends Component {
     this.setLayerImage(0, this.layerRes(0, bi));
     this.setLayerImage(1, this.layerRes(1, bi));
     this.setLayerImage(2, this.layerRes(2, bi));
+    if (this.fgLayerIdx >= 0) this.setLayerImage(this.fgLayerIdx, this.layerRes(3, bi));   // 前景层(石头层不动)
   }
 
   // 所有视差层：各自速度无缝横向滚动；卷屏换景时走"老左滑出/新右滑入"
@@ -2706,12 +3153,57 @@ export class BattleScene extends Component {
     g.strokeColor = new Color(255, 220, 150, 220); g.lineWidth = 2; g.roundRect(x, y, w, hh, 6); g.stroke();
   }
 
+  // 顶部 HUD：血条（心形图标 + 掉血残影 + 变色 + 高光/刻度）+ 金币徽章
   private drawHeroHp(g: Graphics) {
-    const y = DESIGN_H / 2 - 260, w = 360, x = -w / 2, hh = 22;
-    g.fillColor = new Color(0, 0, 0, 160); g.roundRect(x, y, w, hh, 6); g.fill();
+    const w = 340, hh = 26, x = -197, y = DESIGN_H / 2 - 84;   // 整条 HUD 居中：头像→心→血条→金币
     const p = Math.max(0, this.hero.hp / this.hero.hpMax);
-    g.fillColor = new Color(90, 210, 110, 255); g.roundRect(x + 2, y + 2, (w - 4) * p, hh - 4, 5); g.fill();
-    g.strokeColor = new Color(255, 255, 255, 200); g.lineWidth = 2; g.roundRect(x, y, w, hh, 6); g.stroke();
+    const lag = Math.max(p, this.hpLag / this.hero.hpMax);
+    // 底槽（外圈深边 + 内槽）
+    g.fillColor = new Color(10, 8, 12, 210); g.roundRect(x - 3, y - 3, w + 6, hh + 6, 10); g.fill();
+    g.fillColor = new Color(44, 36, 42, 255); g.roundRect(x, y, w, hh, 7); g.fill();
+    // 掉血残影（亮橙，缓慢被追上 → 看清刚掉了多少血）
+    if (lag > p + 0.003) {
+      g.fillColor = new Color(255, 168, 84, 230);
+      g.roundRect(x + 2, y + 2, (w - 4) * lag, hh - 4, 5); g.fill();
+    }
+    // 血量填充：绿 → 黄 → 红
+    const col = p > 0.5 ? new Color(88, 208, 108, 255) : p > 0.25 ? new Color(235, 195, 70, 255) : new Color(228, 70, 58, 255);
+    g.fillColor = col;
+    if (p > 0.003) { g.roundRect(x + 2, y + 2, (w - 4) * p, hh - 4, 5); g.fill(); }
+    // 顶部高光条（体积感）
+    if (p > 0.02) {
+      g.fillColor = new Color(255, 255, 255, 48);
+      g.roundRect(x + 5, y + hh * 0.56, (w - 10) * p, hh * 0.3, 4); g.fill();
+    }
+    // 25% 刻度
+    g.strokeColor = new Color(0, 0, 0, 90); g.lineWidth = 2;
+    for (let i = 1; i < 4; i++) { const tx = x + w * i / 4; g.moveTo(tx, y + 3); g.lineTo(tx, y + hh - 3); }
+    g.stroke();
+    // 金描边
+    g.strokeColor = new Color(255, 232, 190, 130); g.lineWidth = 2; g.roundRect(x, y, w, hh, 7); g.stroke();
+    // 最左端主角头像底板（头像 Sprite 节点盖在上面）+ 方形金框
+    const ax = -267, ay = y + hh / 2 + 2, ar = 29;
+    g.fillColor = new Color(14, 12, 18, 230); g.roundRect(ax - ar, ay - ar, ar * 2, ar * 2, 8); g.fill();
+    g.strokeColor = new Color(255, 214, 120, 210); g.lineWidth = 3; g.roundRect(ax - ar, ay - ar, ar * 2, ar * 2, 8); g.stroke();
+    g.strokeColor = new Color(120, 88, 30, 220); g.lineWidth = 1.5; g.roundRect(ax - ar + 3, ay - ar + 3, ar * 2 - 6, ar * 2 - 6, 6); g.stroke();
+
+    // 左端心形图标
+    const hx = x - 22, hy = y + hh / 2;
+    g.fillColor = new Color(16, 10, 12, 200); g.circle(hx, hy, 17); g.fill();   // 底盘
+    g.fillColor = new Color(232, 62, 58, 255);
+    g.circle(hx - 5, hy + 3, 6.5); g.fill(); g.circle(hx + 5, hy + 3, 6.5); g.fill();
+    g.moveTo(hx - 10.5, hy + 0.5); g.lineTo(hx, hy - 12); g.lineTo(hx + 10.5, hy + 0.5); g.close(); g.fill();
+    g.fillColor = new Color(255, 190, 190, 220); g.circle(hx - 4, hy + 5, 2.2); g.fill();   // 高光
+    // 右端金币徽章（数字由 coinLbl 盖在上面）
+    const bx = x + w + 20, cy = y + hh / 2;
+    g.fillColor = new Color(10, 8, 12, 200); g.roundRect(bx, y - 3, 132, hh + 6, 15); g.fill();
+    g.strokeColor = new Color(255, 214, 120, 90); g.lineWidth = 2; g.roundRect(bx, y - 3, 132, hh + 6, 15); g.stroke();
+    const cx = bx + 24;
+    g.fillColor = new Color(120, 82, 20, 255); g.circle(cx, cy, 12); g.fill();
+    g.fillColor = new Color(255, 202, 58, 255); g.circle(cx, cy, 10); g.fill();
+    g.strokeColor = new Color(168, 112, 22, 255); g.lineWidth = 2;
+    g.moveTo(cx, cy - 5); g.lineTo(cx, cy + 5); g.stroke();
+    g.fillColor = new Color(255, 240, 168, 255); g.circle(cx - 3.2, cy + 3.2, 3); g.fill();
   }
 
   private drawMonsterHp(g: Graphics, m: Monster) {

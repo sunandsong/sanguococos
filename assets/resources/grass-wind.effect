@@ -1,0 +1,92 @@
+// 前景草：随风摆(草梢位移) + 主角拨草(靠近处向两侧推开)
+CCEffect %{
+  techniques:
+  - passes:
+    - vert: sprite-vs:vert
+      frag: sprite-fs:frag
+      depthStencilState:
+        depthTest: false
+        depthWrite: false
+      blendState:
+        targets:
+        - blend: true
+          blendSrc: src_alpha
+          blendDst: one_minus_src_alpha
+          blendSrcAlpha: src_alpha
+          blendDstAlpha: one_minus_src_alpha
+      rasterizerState:
+        cullMode: none
+      properties:
+        alphaThreshold: { value: 0.5 }
+        windParam: { value: [0.03, 2.0, 0.02, 1.0], editor: { tooltip: "x=频率 y=风速 z=幅度 w=方向遮罩(1顶部动/0底部动)" } }
+        heroParam: { value: [0.0, 90.0, 0.05, 0.0], editor: { tooltip: "x=主角x y=衰减 z=拨开幅度" } }
+}%
+
+CCProgram sprite-vs %{
+  precision highp float;
+  #include <builtin/uniforms/cc-global>
+  #if USE_LOCAL
+    #include <builtin/uniforms/cc-local>
+  #endif
+  in vec3 a_position;
+  in vec2 a_texCoord;
+  in vec4 a_color;
+
+  out vec4 color;
+  out vec2 uv0;
+  out float vWorldX;
+
+  vec4 vert () {
+    vec4 pos = vec4(a_position, 1);
+    #if USE_LOCAL
+      pos = cc_matWorld * pos;
+    #endif
+    vWorldX = pos.x;
+    pos = cc_matViewProj * pos;
+    uv0 = a_texCoord;
+    color = a_color;
+    return pos;
+  }
+}%
+
+CCProgram sprite-fs %{
+  precision highp float;
+  #include <builtin/uniforms/cc-global>
+  #if USE_ALPHA_TEST
+    #include <builtin/internal/alpha-test>
+  #endif
+  #include <legacy/output>
+
+  in vec4 color;
+  in vec2 uv0;
+  in float vWorldX;
+
+  #pragma builtin(local)
+  layout(set = 2, binding = 12) uniform sampler2D cc_spriteTexture;
+
+  uniform Constant {
+    vec4 windParam;   // x=freq y=speed z=amp w=maskDir(1顶动/0底动)
+    vec4 heroParam;   // x=heroX y=falloff z=push
+  };
+
+  vec4 frag () {
+    vec2 uv = uv0;
+    // 竖直遮罩：草梢动、草根不动（w 决定哪端是梢）
+    float mask = mix(uv.y, 1.0 - uv.y, windParam.w);
+    // 随风摆
+    float wind = sin(vWorldX * windParam.x + cc_time.x * windParam.y) * windParam.z * mask;
+    // 主角拨草：靠近主角处向背离方向推开
+    float dx = vWorldX - heroParam.x;
+    float fall = exp(-(dx * dx) / max(1.0, heroParam.y * heroParam.y));
+    float push = sign(dx) * heroParam.z * fall * mask;
+    uv.x += wind + push;
+
+    vec4 o = vec4(1.0, 1.0, 1.0, 1.0);
+    o *= texture(cc_spriteTexture, uv);
+    o *= color;
+    #if USE_ALPHA_TEST
+      ALPHA_TEST(o);
+    #endif
+    return CCFragOutput(o);
+  }
+}%
