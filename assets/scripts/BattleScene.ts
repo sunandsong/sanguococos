@@ -167,9 +167,12 @@ export class BattleScene extends Component {
   private stepPar = 1;       // 左右脚交替
   private hpLag = 100;   // 掉血残影（血条上缓慢追上的亮橙段）
   private deadOverlay!: Node;   // 阵亡灰化遮罩
+  private spcCdG: Graphics | null = null;   // 剑气按钮冷却扇形遮罩
   private deadOverlayOp!: UIOpacity;
   private bannerOp!: UIOpacity;
   private restartOp!: UIOpacity;
+  // 近景草丛（独立草株：风摆 + 主角走过拨开回弹；前后两排夹住角色）
+  private nearGrass: { n: Node; lx: number; by: number; ph: number; ang: number; vel: number; par: number }[] = [];
   // 前景叶片（独立元件，绕叶柄弹簧摆；雨天被雨滴敲击 → 下压回弹 + 水花）
   private fgLeaves: { n: Node; lx: number; by: number; ph: number; ang: number; vel: number; hitCd: number }[] = [];
   private leafFxG!: Graphics;   // 叶面水花层（在叶片之上）
@@ -590,6 +593,9 @@ export class BattleScene extends Component {
     });
 
     // 前景层（主角之上、暗角之下）：每帧重画
+    // 地面小草株（脚面高，角色同平面，可拨动）
+    this.makeGrassRow(this.node, 40, 0.07, 0.14, -8, 6, 1.0);
+
     this.fgG = this.child('foreground').addComponent(Graphics);
     // 辉光层：加法混合，让亮元素(刀气/剑气/金币/火)真正发光
     this.glowG = this.child('glow').addComponent(Graphics);
@@ -733,6 +739,12 @@ export class BattleScene extends Component {
       hArc(g, -r * 0.1, 0, r * 0.26, -0.95, 0.95, 10); g.stroke();
     });
     tapFx(spc, () => this.heroSpecial());
+    // 剑气冷却扇形遮罩（子节点，每帧重画）
+    {
+      const cdN = new Node('spccd'); cdN.layer = this.node.layer; cdN.parent = spc;
+      cdN.addComponent(UITransform);
+      this.spcCdG = cdN.addComponent(Graphics);
+    }
     // 跳（攻击正上方）：白色 ↑ 箭头
     const jmp = this.makeCircleBtn('jump', 240, by + 123, 44, [72, 112, 76], (g, r) => {
       g.fillColor = new Color(240, 248, 240, 240);
@@ -933,12 +945,14 @@ export class BattleScene extends Component {
     this.stepMotes(dt);
     this.stepWeather(dt);
     this.updateFgLeaves(dt);      // 前景叶片（摇曳/雨打）
+    this.updateNearGrass(dt);     // 地面小草株（风摆/拨草）
     this.drawLeafSplashes(dt);    // 叶面大水花（画在叶片之上）
     if (this.slamBoltT > 0) this.slamBoltT -= dt;   // 跳劈闪电衰减
     if (this.shockT > 0) this.shockT -= dt;         // Boss 冲击波衰减
     // 掉血残影缓慢追上当前血量
     const hpN = Math.max(0, this.hero ? this.hero.hp : 0);
     this.hpLag = this.hpLag > hpN ? Math.max(hpN, this.hpLag - dt * 42) : hpN;
+    this.updateSkillCd();   // 剑气冷却环
 
     // 主角平滑速度（披风/盔缨滞后拖拽）
     if (this.hero) {
@@ -1670,7 +1684,7 @@ export class BattleScene extends Component {
         m.state = 'attack';
         if (!m.attacking && m.atkCd <= 0) { m.attacking = true; m.struck = false; m.swing = 0; m.atkCd = m.kind === 'boss' ? 1.4 : 1.0; }
         if (m.attacking) {
-          m.swing = Math.min(1, m.swing + dt * 3.5);
+          m.swing = Math.min(1, m.swing + dt * 2.6);   // 起手稍慢 → 预警感叹号看得清、来得及应对
           if (!m.struck && m.swing >= 0.55) {
             m.struck = true;
             if (adx <= (m.kind === 'boss' ? 130 : 62)) this.hurtHero(m.atk, m.x);
@@ -2676,6 +2690,54 @@ export class BattleScene extends Component {
     this.wparts.sort((a, b) => a.d - b.d);   // 远→近排序：近景后画=盖在前
   }
 
+  // 造一排草株：n株，缩放[s0,s1]，地面偏移 baseOff±jit，视差 par
+  private makeGrassRow(parent: Node, count: number, s0: number, s1: number, baseOff: number, jit: number, par: number) {
+    const sizes: [number, number][] = [[355, 240], [268, 240], [60, 240]];
+    for (let i = 0; i < count; i++) {
+      const kind = (i * 7 + Math.floor(par * 10)) % 3;
+      const n = new Node('grass-' + par + '-' + i); n.layer = this.node.layer; n.parent = parent;
+      const u = n.addComponent(UITransform);
+      u.setContentSize(sizes[kind][0], sizes[kind][1]);
+      u.setAnchorPoint(0.5, 0.03);   // 根部锚点 → 绕根摆
+      const sp = n.addComponent(Sprite); sp.sizeMode = Sprite.SizeMode.CUSTOM;
+      let sc = (s0 + ((i * 37) % 100) / 100 * (s1 - s0)) * (i % 2 ? -1 : 1);
+      if (i % 9 === 4) sc *= 2.2;   // 偶尔一两株明显大一号
+      n.setScale(sc, Math.abs(sc), 1);
+      n.active = false;
+      resources.load(`grass-${kind}/spriteFrame`, SpriteFrame, (e, sf) => {
+        if (e || !sf) return; sp.spriteFrame = sf; n.active = true;
+      });
+      this.nearGrass.push({
+        n, lx: i * (DESIGN_W + 260) / count + ((i * 53) % 60),
+        by: this.groundY + baseOff + ((i * 41) % (jit * 2)) - jit,
+        ph: i * 1.31 + par * 5, ang: 0, vel: 0, par,
+      });
+    }
+  }
+
+  // 近景草丛：风摆 + 主角拨草（靠近时被推向两侧，离开后弹簧回摆）
+  private updateNearGrass(dt: number) {
+    if (!this.nearGrass.length) return;
+    const span = DESIGN_W + 260;
+    const heroSx = this.hero && this.hero.state !== 'dead' ? this.sX(this.hero.x) : -99999;
+    const gust = 1 + 0.4 * Math.sin(this.animT * 0.6) * Math.sin(this.animT * 1.3);
+    for (const G of this.nearGrass) {
+      const sx = (((G.lx - this.camX * G.par) % span) + span) % span - span / 2;
+      G.n.setPosition(sx, G.by, 0);
+      // 主角拨草：近处的草被推向背离主角的方向
+      const dxh = sx - heroSx;
+      if (Math.abs(dxh) < 52) {
+        const k = 1 - Math.abs(dxh) / 52;
+        const target = (dxh >= 0 ? 1 : -1) * 26 * k;
+        G.vel += (target - G.ang) * 30 * dt;
+      }
+      // 弹簧回摆
+      G.vel += (-58 * G.ang - 7 * G.vel) * dt;
+      G.ang += G.vel * dt;
+      G.n.angle = Math.sin(this.animT * 1.4 + G.ph) * 2.4 * gust + G.ang;
+    }
+  }
+
   // 前景叶片：视差跟随 + 常时轻摆 + 雨天雨滴敲击（角冲量→弹簧回弹）+ 命中水花
   private updateFgLeaves(dt: number) {
     if (!this.fgLeaves.length) return;
@@ -3494,6 +3556,47 @@ export class BattleScene extends Component {
     g.strokeColor = new Color(168, 112, 22, 255); g.lineWidth = 2;
     g.moveTo(cx, cy - 5); g.lineTo(cx, cy + 5); g.stroke();
     g.fillColor = new Color(255, 240, 168, 255); g.circle(cx - 3.2, cy + 3.2, 3); g.fill();
+  }
+
+  // 剑气冷却：按钮上盖一块顺时针消退的暗色扇形（转完=可用）
+  private updateSkillCd() {
+    const g = this.spcCdG;
+    if (!g) return;
+    g.clear();
+    if (!this.hero) return;
+    const cd = this.hero.specialCd;
+    if (cd <= 0) return;
+    const total = this.specialCdCur || this.SPECIAL_CD;
+    const f = Math.min(1, cd / total);
+    const R = 53;
+    g.fillColor = new Color(0, 0, 0, 145);
+    g.moveTo(0, 0);
+    const seg = 30;
+    for (let i = 0; i <= seg; i++) {
+      const a = Math.PI / 2 - (i / seg) * f * Math.PI * 2;   // 从12点顺时针
+      g.lineTo(Math.cos(a) * R, Math.sin(a) * R);
+    }
+    g.close(); g.fill();
+  }
+
+  // 小怪攻击预警：起手到命中前，头顶弹出脉动的红黄感叹号（公平感）
+  private drawAttackWarns(g: Graphics) {
+    for (const m of this.monsters) {
+      if (m.kind === 'boss' || m.state !== 'attack' || !m.attacking || m.struck) continue;
+      if (m.swing >= 0.55) continue;   // 已到命中帧
+      const x = this.sX(m.x), y = this.groundY + m.lane + m.jumpY + 78 * m.scale;
+      const pulse = 0.65 + 0.35 * Math.sin(this.animT * 20);
+      const a = Math.round(255 * pulse);
+      // 底盘小圆
+      g.fillColor = new Color(30, 16, 10, Math.round(170 * pulse));
+      g.circle(x, y + 12, 13); g.fill();
+      // 感叹号（竖条 + 点）
+      g.fillColor = new Color(255, 208, 70, a);
+      g.roundRect(x - 3, y + 8, 6, 15, 3); g.fill();
+      g.circle(x, y + 2, 3.2); g.fill();
+      g.strokeColor = new Color(225, 70, 50, a); g.lineWidth = 1.5;
+      g.circle(x, y + 12, 13); g.stroke();
+    }
   }
 
   private drawMonsterHp(g: Graphics, m: Monster) {
