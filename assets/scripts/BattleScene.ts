@@ -166,6 +166,10 @@ export class BattleScene extends Component {
   private stepT = 0;         // 脚步节拍（雪脚印/雨水花）
   private stepPar = 1;       // 左右脚交替
   private hpLag = 100;   // 掉血残影（血条上缓慢追上的亮橙段）
+  private deadOverlay!: Node;   // 阵亡灰化遮罩
+  private deadOverlayOp!: UIOpacity;
+  private bannerOp!: UIOpacity;
+  private restartOp!: UIOpacity;
   // 前景叶片（独立元件，绕叶柄弹簧摆；雨天被雨滴敲击 → 下压回弹 + 水花）
   private fgLeaves: { n: Node; lx: number; by: number; ph: number; ang: number; vel: number; hitCd: number }[] = [];
   private leafFxG!: Graphics;   // 叶面水花层（在叶片之上）
@@ -666,9 +670,20 @@ export class BattleScene extends Component {
     this.arrow = this.makeLabel('前进 →', W / 2 - 130, 70, 42, new Color(255, 240, 150)).node;   // 取 node 才能真正显隐
     this.arrow.active = false;
 
+    // 阵亡灰化遮罩（盖住战场与 HUD；banner/按钮在其上）
+    this.deadOverlay = this.child('deadover');
+    {
+      const dg = this.deadOverlay.addComponent(Graphics);
+      dg.fillColor = new Color(150, 152, 156, 150); dg.rect(-W / 2, -H / 2, W, H); dg.fill();   // 灰罩(压色彩)
+      dg.fillColor = new Color(18, 20, 24, 70); dg.rect(-W / 2, -H / 2, W, H); dg.fill();       // 略压暗
+      this.deadOverlayOp = this.deadOverlay.addComponent(UIOpacity);
+      this.deadOverlay.active = false;
+    }
+
     this.banner = this.child('banner');
     this.banner.setPosition(0, 90, 0);
     this.bannerLbl = this.addLabelTo(this.banner, '', 54, new Color(255, 120, 110));
+    this.bannerOp = this.banner.addComponent(UIOpacity);
     this.banner.active = false;
 
     // 关卡开场大字（拍下来再淡出）
@@ -677,12 +692,71 @@ export class BattleScene extends Component {
     this.zoneIntroLbl.node.active = false;
 
     const by = -H / 2 + 120;
-    this.makeHoldButton('▶', -200, by, new Color(70, 80, 110), h => (this.rightHeld = h));   // 只留前进（后退按钮去掉，键盘 A 仍可后退）
-    this.makeTapButton('攻击', 250, by, 180, 92, new Color(150, 60, 55), () => this.heroSwing());
-    this.makeTapButton('剑气', 80, by, 150, 84, new Color(55, 105, 140), () => this.heroSpecial());
-    this.makeTapButton('跳', -130, by + 108, 120, 84, new Color(80, 110, 80), () => this.heroJump());
+    // —— 圆形操控钮（左：前进/跳；右：攻击大钮 + 剑气小钮）——
+    const tapFx = (n: Node, cb: () => void) => {
+      n.on(Node.EventType.TOUCH_START, () => n.setScale(0.9, 0.9, 1), this);
+      const up = () => { tween(n).to(0.05, { scale: new Vec3(1.08, 1.08, 1) }).to(0.08, { scale: new Vec3(1, 1, 1) }).start(); };
+      n.on(Node.EventType.TOUCH_END, () => { up(); cb(); }, this);
+      n.on(Node.EventType.TOUCH_CANCEL, up, this);
+    };
+    // —— 左手：方向键组（◀ ▶ 等大并排）——
+    const mkDir = (name: string, x: number, flip: number, hold: (h: boolean) => void) => {
+      const n = this.makeCircleBtn(name, x, by, 50, [66, 80, 112], (g, r) => {
+        g.fillColor = new Color(240, 245, 252, 240);
+        g.moveTo(-flip * r * 0.26, r * 0.4); g.lineTo(flip * r * 0.46, 0); g.lineTo(-flip * r * 0.26, -r * 0.4); g.close(); g.fill();
+      });
+      n.on(Node.EventType.TOUCH_START, () => { hold(true); n.setScale(0.9, 0.9, 1); }, this);
+      const up = () => { hold(false); n.setScale(1, 1, 1); };
+      n.on(Node.EventType.TOUCH_END, up, this);
+      n.on(Node.EventType.TOUCH_CANCEL, up, this);
+      return n;
+    };
+    mkDir('back', -290, -1, h => (this.leftHeld = h));
+    mkDir('fwd', -160, 1, h => (this.rightHeld = h));
 
-    this.restartBtn = this.makeTapButton('再战', 0, 10, 190, 88, new Color(70, 110, 70), () => this.startGame());
+    // —— 右手：攻击大钮 + 技能扇形（剑气/跳环绕）——
+    const atk = this.makeCircleBtn('atk', 262, by, 66, [152, 58, 52], (g, r) => {
+      g.lineCap = Graphics.LineCap.ROUND;
+      g.strokeColor = new Color(238, 243, 250, 250); g.lineWidth = 9;     // 刀刃
+      g.moveTo(-r * 0.14, -r * 0.14); g.lineTo(r * 0.44, r * 0.44); g.stroke();
+      g.strokeColor = new Color(255, 214, 120, 250); g.lineWidth = 5;     // 护手
+      g.moveTo(-r * 0.02, -r * 0.32); g.lineTo(-r * 0.32, -r * 0.02); g.stroke();
+      g.strokeColor = new Color(96, 62, 40, 255); g.lineWidth = 7;        // 刀柄
+      g.moveTo(-r * 0.2, -r * 0.2); g.lineTo(-r * 0.42, -r * 0.42); g.stroke();
+    });
+    tapFx(atk, () => this.heroSwing());
+    // 剑气（攻击左侧偏上）：青白新月波
+    const spc = this.makeCircleBtn('spc', 145, by + 43, 44, [54, 102, 138], (g, r) => {
+      g.strokeColor = new Color(160, 238, 255, 255); g.lineWidth = 6;
+      hArc(g, -r * 0.1, 0, r * 0.42, -1.15, 1.15, 12); g.stroke();
+      g.strokeColor = new Color(240, 252, 255, 255); g.lineWidth = 3;
+      hArc(g, -r * 0.1, 0, r * 0.26, -0.95, 0.95, 10); g.stroke();
+    });
+    tapFx(spc, () => this.heroSpecial());
+    // 跳（攻击正上方）：白色 ↑ 箭头
+    const jmp = this.makeCircleBtn('jump', 240, by + 123, 44, [72, 112, 76], (g, r) => {
+      g.fillColor = new Color(240, 248, 240, 240);
+      g.moveTo(0, r * 0.52); g.lineTo(r * 0.4, r * 0.04); g.lineTo(-r * 0.4, r * 0.04); g.close(); g.fill();
+      g.roundRect(-r * 0.13, -r * 0.48, r * 0.26, r * 0.52, 4); g.fill();
+    });
+    tapFx(jmp, () => this.heroJump());
+
+    // 「重来」：超链接式文字（下划线），点击重开
+    {
+      const n = this.child('btn-restart');
+      n.setPosition(0, -20, 0);   // 紧跟「阵亡」大字下方
+      n.getComponent(UITransform)!.setContentSize(220, 90);   // 点击热区比文字大
+      this.addLabelTo(n, '重来', 46, new Color(150, 200, 255));
+      // 下划线（单独子节点画，避免和 Label 同节点冲突）
+      const un = new Node('underline'); un.layer = this.node.layer; un.parent = n;
+      un.addComponent(UITransform);
+      const ug = un.addComponent(Graphics);
+      ug.strokeColor = new Color(150, 200, 255, 220); ug.lineWidth = 3;
+      ug.moveTo(-50, -30); ug.lineTo(50, -30); ug.stroke();
+      this.restartOp = n.addComponent(UIOpacity);
+      tapFx(n, () => this.startGame());
+      this.restartBtn = n;
+    }
     this.restartBtn.active = false;
 
     this.node.active = false;
@@ -738,6 +812,7 @@ export class BattleScene extends Component {
     this.score = 0; this.spawnT = 0; this.over = false;
     this.leftHeld = this.rightHeld = false;
     this.banner.active = false; this.restartBtn.active = false; this.arrow.active = false;
+    this.deadOverlay.active = false;   // 撤掉阵亡灰化
   }
 
   private waveCount(zone: number): number { return this.ZONE_PLAN[Math.min(zone, this.ZONE_PLAN.length - 1)].count; }
@@ -1944,9 +2019,12 @@ export class BattleScene extends Component {
     this.slowMoT = 1.0;   // 胜利慢动作
     AudioMgr.inst.play('win');
     this.bannerLbl.color = new Color(255, 224, 130);
+    this.bannerLbl.fontSize = 54; this.bannerLbl.lineHeight = 58;   // 恢复常规字号
     this.bannerLbl.string = `通关！  击败 Boss · 得分 ${this.score}`;
     this.banner.active = true;
+    this.bannerOp.opacity = 255;
     this.restartBtn.active = true;
+    this.restartOp.opacity = 255;
     this.banner.setScale(0.3, 0.3, 1);
     tween(this.banner).to(0.35, { scale: new Vec3(1, 1, 1) }, { easing: 'backOut' }).start();
   }
@@ -1954,13 +2032,22 @@ export class BattleScene extends Component {
   private gameOver() {
     this.over = true;
     AudioMgr.inst.play('lose');
-    this.bannerLbl.color = new Color(255, 120, 110);
     this.hero.state = 'dead'; this.hero.deadT = 0; this.hero.fallSign = 1;
-    this.bannerLbl.string = `阵亡！  第 ${this.zone + 1} 关 · 得分 ${this.score}`;
+    // 画面变灰(渐显) + 「阵亡」大字淡入 + 「重来」延迟浮现
+    this.deadOverlay.active = true;
+    this.deadOverlayOp.opacity = 0;
+    tween(this.deadOverlayOp).to(0.8, { opacity: 255 }).start();
+    this.bannerLbl.color = new Color(225, 66, 58);
+    this.bannerLbl.fontSize = 96; this.bannerLbl.lineHeight = 100;
+    this.bannerLbl.string = '阵 亡';
     this.banner.active = true;
+    this.bannerOp.opacity = 0;
+    tween(this.bannerOp).delay(0.25).to(0.7, { opacity: 255 }).start();
+    this.banner.setScale(0.86, 0.86, 1);
+    tween(this.banner).delay(0.25).to(0.7, { scale: new Vec3(1, 1, 1) }, { easing: 'quadOut' }).start();
     this.restartBtn.active = true;
-    this.banner.setScale(0.3, 0.3, 1);
-    tween(this.banner).to(0.3, { scale: new Vec3(1, 1, 1) }, { easing: 'backOut' }).start();
+    this.restartOp.opacity = 0;
+    tween(this.restartOp).delay(0.9).to(0.4, { opacity: 255 }).start();
   }
 
   // ---------- 绘制 ----------
@@ -3759,6 +3846,26 @@ export class BattleScene extends Component {
     const ol = n.addComponent(LabelOutline);
     ol.color = new Color(20, 15, 12, 255); ol.width = 4;
     return lbl;
+  }
+
+  // 圆形技能钮：底盘投影 + 体积渐变 + 金描边 + 顶部高光 + 图标
+  private makeCircleBtn(name: string, x: number, y: number, r: number, base: [number, number, number], icon: (g: Graphics, r: number) => void): Node {
+    const n = this.child('cbtn-' + name);
+    n.setPosition(x, y, 0);
+    n.getComponent(UITransform)!.setContentSize(r * 2 + 18, r * 2 + 18);
+    const g = n.addComponent(Graphics);
+    g.fillColor = new Color(0, 0, 0, 110); g.circle(0, -4, r + 8); g.fill();          // 底盘投影
+    g.fillColor = new Color(22, 18, 24, 240); g.circle(0, 0, r + 7); g.fill();        // 外环深底
+    g.fillColor = new Color(Math.round(base[0] * 0.55), Math.round(base[1] * 0.55), Math.round(base[2] * 0.55), 255);
+    g.circle(0, 0, r); g.fill();                                                       // 主体深层
+    g.fillColor = new Color(base[0], base[1], base[2], 255);
+    g.ellipse(0, r * 0.12, r * 0.94, r * 0.86); g.fill();                              // 主体亮层
+    g.fillColor = new Color(255, 255, 255, 34);
+    g.ellipse(0, r * 0.42, r * 0.74, r * 0.4); g.fill();                               // 顶部高光
+    g.strokeColor = new Color(255, 214, 130, 210); g.lineWidth = 3; g.circle(0, 0, r + 7); g.stroke();   // 金描边
+    g.strokeColor = new Color(0, 0, 0, 110); g.lineWidth = 2; g.circle(0, 0, r + 1); g.stroke();
+    icon(g, r);
+    return n;
   }
 
   private btnBase(text: string, x: number, y: number, w: number, h: number, bg: Color): Node {
