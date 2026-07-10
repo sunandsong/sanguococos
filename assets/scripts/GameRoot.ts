@@ -20,6 +20,7 @@ import { Meteors } from './Meteors';
 import { BottomMenu } from './BottomMenu';
 import { BattleScene } from './BattleScene';
 import { HUD } from './HUD';
+import { TitleScreen } from './TitleScreen';
 const { ccclass } = _decorator;
 
 // 一键引导：挂在 Canvas 下的一个空节点上，运行时自动创建并配好整页。
@@ -77,5 +78,7 @@ export class GameRoot extends Component {
     hud.setPosition(-DESIGN_W / 2 + 16, DESIGN_H / 2 - 12, 0);
 
     make('Battle', BattleScene);       // 出征战场覆盖层（最上层，默认隐藏）
+
+    make('Title', TitleScreen);        // 标题画面《我要上天》（开机最上层，点击进入）
   }
 }
