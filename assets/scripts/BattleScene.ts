@@ -6,6 +6,7 @@ import {
 } from 'cc';
 import { DESIGN_W, DESIGN_H } from './Constants';
 import { AudioMgr } from './AudioMgr';
+import { AssetHub } from './AssetHub';
 import { hLine, hArc } from './HandDraw';
 const { ccclass, property } = _decorator;
 
@@ -155,6 +156,7 @@ export class BattleScene extends Component {
   private bossGlowG!: Graphics;  // 道具垫底层：接地影 + 火盆暖光晕（在道具贴图之下）
   private readonly PROPS_ARENA_ZONE = 9;   // 道具所在关：Boss 关（第 10 关）
   private layers: { tiles: Node[]; w: number; par: number; baseY: number; dispH: number }[] = [];   // 视差背景层（远→近）
+  private bgTintKey = '';   // 背景层当前界色（变了才重刷）
   private bgCache: Record<string, SpriteFrame> = {};   // 背景图缓存（换关不重复加载）
   private curBiome = -1;   // 当前已应用的背景组，-1=未设
   private fgLayerIdx = -1;   // 图片前景层在 this.layers 里的真实索引（石头层在它之前）
@@ -306,6 +308,19 @@ export class BattleScene extends Component {
 
   // 天气系统：每关一种天气（晴/雨/雪/落叶/余烬），雨天带雷电
   private readonly ZONE_WEATHER = ['落叶', '晴', '雨', '晴', '晴', '雨', '晴', '雪', '晴', '余烬'];
+
+  // ── 三界（《碧落黄泉》）：一套底图靠染色变出三种氛围，省掉 2/3 的背景美术 ──
+  // bg=背景层染色  char=角色/敌人染色  grade=全屏色调罩(RGBA)
+  private readonly REALMS: Record<string, { name: string; bg: number[]; char: number[]; grade: number[] }> = {
+    human:      { name: '人间', bg: [255, 255, 255], char: [255, 255, 255], grade: [0, 0, 0, 0] },
+    underworld: { name: '地府', bg: [128, 156, 168], char: [176, 196, 202], grade: [26, 46, 58, 54] },   // 青灰、幽冥
+    heaven:     { name: '天庭', bg: [255, 238, 190], char: [255, 246, 214], grade: [255, 214, 120, 40] }, // 鎏金、云光
+  };
+  // 每关所属界。【第一章：十关全在人间，不染色，画面与现在完全一致】
+  // 第二章(地府)、第三章(天庭) 再把对应关卡改成 'underworld' / 'heaven' 即可。
+  private readonly ZONE_REALM = ['human', 'human', 'human', 'human', 'human',
+                                 'human', 'human', 'human', 'human', 'human'];
+  private realmOf(zone: number) { return this.REALMS[this.ZONE_REALM[Math.min(zone, this.ZONE_REALM.length - 1)]]; }
   private weather = '晴';
   private snowAcc = 0;   // 地面积雪厚度 0→1（下雪时间越久越厚，换天气后消融）
   private stormK = 0;    // 乌云浓度 0→1（雨天聚拢，雨停消散）
@@ -375,8 +390,8 @@ export class BattleScene extends Component {
     }
     for (const res of ['decor-mushroom', 'decor-fern', 'decor-stump', 'decor-log',
                        'decor-stone', 'decor-flower', 'decor-root', 'decor-grass']) {
-      resources.load(res + '/spriteFrame', SpriteFrame, (e, sf) => {
-        if (!e && sf) { (sf.texture as Texture2D).setFilters(Texture2D.Filter.NEAREST, Texture2D.Filter.NEAREST); this.decorFrames.push(sf); }
+      AssetHub.loadSF(res, (sf) => {
+        if (sf) { (sf.texture as Texture2D).setFilters(Texture2D.Filter.NEAREST, Texture2D.Filter.NEAREST); this.decorFrames.push(sf); }
       });
     }
 
@@ -394,7 +409,7 @@ export class BattleScene extends Component {
         const sp = n.addComponent(Sprite); sp.sizeMode = Sprite.SizeMode.CUSTOM;
         n.getComponent(UITransform)!.setContentSize(w, h);
         if (flip) n.setScale(-1, 1, 1);
-        resources.load(res + '/spriteFrame', SpriteFrame, (e, sf) => { if (!e && sf) sp.spriteFrame = sf; });
+        AssetHub.loadSF(res, (sf) => { if (sf) sp.spriteFrame = sf; });
         this.bossProps.push({ node: n, wx, dy, res });
       };
       // 旗/枪/盾/拒马放大一倍增强存在感；火盆保持
@@ -404,8 +419,8 @@ export class BattleScene extends Component {
         const nu = n.addComponent(UITransform); nu.setAnchorPoint(0.5, 0); nu.setContentSize(116, 226);
         n.setScale(-1, 1, 1);   // 镜像（与原版一致）
         this.bossProps.push({ node: n, wx: arenaX + 245, dy: 0, res: 'boss-flag' });
-        resources.load('boss-flag/spriteFrame', SpriteFrame, (e, base) => {
-          if (e || !base) return;
+        AssetHub.loadSF('boss-flag', (base) => {
+          if (!base) return;
           const tex = base.texture as Texture2D;
           const TW = tex.width, TH = tex.height;
           const sx = 116 / TW, sy = 226 / TH;
@@ -454,8 +469,8 @@ export class BattleScene extends Component {
         return sp;
       };
       const loadSF = (res: string, cb: (sf: SpriteFrame) => void) => {
-        resources.load(res + '/spriteFrame', SpriteFrame, (e, sf) => {
-          if (e || !sf) return;
+        AssetHub.loadSF(res, (sf) => {
+          if (!sf) return;
           (sf.texture as Texture2D).setFilters(Texture2D.Filter.NEAREST, Texture2D.Filter.NEAREST);
           cb(sf);
         });
@@ -484,12 +499,12 @@ export class BattleScene extends Component {
     };
     const r0 = mkFx('fxrune0'), r1 = mkFx('fxrune1'), sh = mkFx('fxshock');
     this.fxRune = [r0, r1]; this.fxShock = sh;
-    resources.load('fx-rune-circle/spriteFrame', SpriteFrame, (e, sf) => {
-      if (e || !sf) { console.warn('法阵贴图加载失败：', e); return; }
+    AssetHub.loadSF('fx-rune-circle', (sf) => {
+      if (!sf) { console.warn('法阵贴图加载失败'); return; }
       r0.sp.spriteFrame = sf; r1.sp.spriteFrame = sf; this.fxReady = true;
     });
-    resources.load('fx-shockwave/spriteFrame', SpriteFrame, (e, sf) => {
-      if (e || !sf) return; sh.sp.spriteFrame = sf;
+    AssetHub.loadSF('fx-shockwave', (sf) => {
+      if (!sf) return; sh.sp.spriteFrame = sf;
     });
 
     // 敌人精灵池（轻步兵）：预建若干精灵节点，逐帧分配给活着的小怪
@@ -505,8 +520,8 @@ export class BattleScene extends Component {
     // 各兵种精灵表（同一素材规范：4×4 图集，行 1=侧面行走）
     // foot/archer=48×64 小图格；shield/elite=64×64 大图格
     const loadKind = (kind: string, res: string, cellW: number, pad: [number, number, number, number], disp: [number, number]) => {
-      resources.load(res + '/spriteFrame', SpriteFrame, (e, base) => {
-        if (e || !base) { console.warn(kind + ' 贴图加载失败：', e); return; }
+      AssetHub.loadSF(res, (base) => {
+        if (!base) { console.warn(kind + ' 贴图加载失败'); return; }
         const tex = base.texture as Texture2D; tex.setFilters(Texture2D.Filter.NEAREST, Texture2D.Filter.NEAREST);
         const ROW = 1;   // 侧面行走行
         const arr: SpriteFrame[] = [];
@@ -541,8 +556,8 @@ export class BattleScene extends Component {
     this.bossSp.sizeMode = Sprite.SizeMode.CUSTOM;
     this.bossOp = this.bossNode.addComponent(UIOpacity);
     this.bossNode.active = false;
-    resources.load('enemy-xuchu/spriteFrame', SpriteFrame, (e, base) => {
-      if (e || !base) { console.warn('许褚贴图加载失败：', e); return; }
+    AssetHub.loadSF('enemy-xuchu', (base) => {
+      if (!base) { console.warn('许褚贴图加载失败'); return; }
       const tex = base.texture as Texture2D;
       tex.setFilters(Texture2D.Filter.NEAREST, Texture2D.Filter.NEAREST);
       for (let c = 0; c < 4; c++) {
@@ -599,8 +614,8 @@ export class BattleScene extends Component {
     this.footSp = this.footNode.addComponent(Sprite); this.footSp.sizeMode = Sprite.SizeMode.CUSTOM;
     this.footNode.setPosition(1, 0, 0);
     // 骑马赵云上半身帧（第1行，去马；x22~54,y0~34）
-    resources.load('zhaoyun-horse/spriteFrame', SpriteFrame, (err, base) => {
-      if (err || !base) { console.warn('骑马赵云加载失败：', err); return; }
+    AssetHub.loadSF('zhaoyun-horse', (base) => {
+      if (!base) { console.warn('骑马赵云加载失败'); return; }
       const tex = base.texture as Texture2D; tex.setFilters(Texture2D.Filter.NEAREST, Texture2D.Filter.NEAREST);
       for (let c = 0; c < 4; c++) {
         const sf = new SpriteFrame(); sf.texture = tex;
@@ -610,8 +625,8 @@ export class BattleScene extends Component {
       this.heroSp.spriteFrame = this.upperFrames[3];
     });
     // 步战赵云腿（第1行下半身；x8~40,y30~58）
-    resources.load('zhaoyun-foot/spriteFrame', SpriteFrame, (err, base) => {
-      if (err || !base) { console.warn('步战赵云加载失败：', err); return; }
+    AssetHub.loadSF('zhaoyun-foot', (base) => {
+      if (!base) { console.warn('步战赵云加载失败'); return; }
       const tex = base.texture as Texture2D; tex.setFilters(Texture2D.Filter.NEAREST, Texture2D.Filter.NEAREST);
       for (let c = 0; c < 2; c++) {
         const sf = new SpriteFrame(); sf.texture = tex;
@@ -653,8 +668,8 @@ export class BattleScene extends Component {
         n.setScale(sc, Math.abs(sc), 1);
         n.active = false;
         const kk = kind;
-        resources.load(`fg-leaf-${kk}/spriteFrame`, SpriteFrame, (e, sf) => {
-          if (e || !sf) return; sp.spriteFrame = sf; n.active = true;
+        AssetHub.loadSF(`fg-leaf-${kk}`, (sf) => {
+          if (!sf) return; sp.spriteFrame = sf; n.active = true;
         });
         this.fgLeaves.push({
           n, lx: i * 70 + ((i * 53) % 46),            // 间距收紧 → 连成一条前景带
@@ -697,8 +712,8 @@ export class BattleScene extends Component {
       const au = avN.addComponent(UITransform); au.setAnchorPoint(0.5, 0.5); au.setContentSize(52, 52);
       const asp = avN.addComponent(Sprite); asp.sizeMode = Sprite.SizeMode.CUSTOM;
       avN.setPosition(-267, H / 2 - 69, 0);
-      resources.load('avatar-zhaoyun/spriteFrame', SpriteFrame, (e, sf) => {
-        if (e || !sf) return;
+      AssetHub.loadSF('avatar-zhaoyun', (sf) => {
+        if (!sf) return;
         (sf.texture as Texture2D).setFilters(Texture2D.Filter.NEAREST, Texture2D.Filter.NEAREST);
         asp.spriteFrame = sf;
       });
@@ -880,10 +895,23 @@ export class BattleScene extends Component {
 
   // 角色环境光色：清晨偏暖金、黄昏偏橙（夜晚保持原色，不压暗角色）
   private charTint(): Color {
+    let r = 255, g = 255, b = 255;
     switch (this.timeOfDay().name) {
-      case '清晨': return new Color(255, 246, 226, 255);
-      case '黄昏': return new Color(255, 226, 200, 255);
-      default: return new Color(255, 255, 255, 255);
+      case '清晨': r = 255; g = 246; b = 226; break;
+      case '黄昏': r = 255; g = 226; b = 200; break;
+    }
+    const rc = this.realmOf(this.zone).char;   // 叠加界色（地府发青 / 天庭鎏金）
+    return new Color(Math.round(r * rc[0] / 255), Math.round(g * rc[1] / 255), Math.round(b * rc[2] / 255), 255);
+  }
+
+  /** 背景视差层的界染色（每帧套到 4 层瓦片上；人间=纯白不改色） */
+  private applyRealmBgTint() {
+    const rb = this.realmOf(this.zone).bg;
+    if (this.bgTintKey === rb.join(',')) return;   // 未变则跳过（避免每帧写 color）
+    this.bgTintKey = rb.join(',');
+    const c = new Color(rb[0], rb[1], rb[2], 255);
+    for (const L of this.layers) for (const n of L.tiles) {
+      const sp = n.getComponent(Sprite); if (sp) sp.color = c;
     }
   }
 
@@ -2814,8 +2842,8 @@ export class BattleScene extends Component {
       n.setScale(sc, Math.abs(sc), 1);
       const op = n.addComponent(UIOpacity);
       n.active = false;
-      resources.load(`grass-${kind}/spriteFrame`, SpriteFrame, (e, sf) => {
-        if (e || !sf) return; sp.spriteFrame = sf; n.active = true;
+      AssetHub.loadSF(`grass-${kind}`, (sf) => {
+        if (!sf) return; sp.spriteFrame = sf; n.active = true;
       });
       this.nearGrass.push({
         n, op, lx: i * (DESIGN_W + 260) / count + ((i * 53) % 60),
@@ -3525,7 +3553,14 @@ export class BattleScene extends Component {
   // 全屏色调滤镜：由时段驱动（真背景叠上它 → 清晨/黄昏/夜的氛围）
   private gradeColor(t: Theme): Color {
     const gr = this.timeOfDay().grade;
-    return new Color(gr[0], gr[1], gr[2], gr[3]);
+    const rg = this.realmOf(this.zone).grade;   // 叠加界色罩（地府幽冥青 / 天庭鎏金）
+    if (rg[3] <= 0) return new Color(gr[0], gr[1], gr[2], gr[3]);
+    // 两层罩按 alpha 加权混合成一层，避免多画一遍全屏
+    const a1 = gr[3] / 255, a2 = rg[3] / 255;
+    const a = a1 + a2 * (1 - a1);
+    if (a <= 0) return new Color(0, 0, 0, 0);
+    const mix = (c1: number, c2: number) => Math.round((c1 * a1 + c2 * a2 * (1 - a1)) / a);
+    return new Color(mix(gr[0], rg[0]), mix(gr[1], rg[1]), mix(gr[2], rg[2]), Math.round(a * 255));
   }
 
   private drawBg() {
@@ -3646,8 +3681,8 @@ export class BattleScene extends Component {
       }
     };
     if (this.bgCache[res]) { apply(this.bgCache[res]); return; }
-    resources.load(res + '/spriteFrame', SpriteFrame, (e, sf) => {
-      if (e || !sf) return;   // 缺图静默：保持上一张背景
+    AssetHub.loadSF(res, (sf) => {
+      if (!sf) return;   // 缺图静默：保持上一张背景
       this.bgCache[res] = sf;
       apply(sf);
     });
@@ -3662,13 +3697,15 @@ export class BattleScene extends Component {
     const b = this.BIOMES[bi];
     return li === 0 ? b.far : li === 1 ? b.mid : li === 2 ? b.near : b.fg;   // 3=最前景层
   }
-  // 预加载所有背景组到缓存（换景要用；缺图静默跳过）
+  // 预加载「当前关会用到的」背景组（只载需要的，避免整套背景常驻显存）
+  // 以前是全量预载 3 组 ≈ 多占 10MB 显存，且其中两组根本没用上。
   private preloadAllBiomes() {
-    for (let bi = 0; bi < this.BIOMES.length; bi++) {
+    const need = new Set<number>([this.biomeIndexFor(this.zone), this.biomeIndexFor(this.zone + 1)]);
+    for (const bi of need) {
       for (let li = 0; li < 4; li++) {
         const res = this.layerRes(li, bi);
         if (this.bgCache[res]) continue;
-        resources.load(res + '/spriteFrame', SpriteFrame, (e, sf) => { if (!e && sf) this.bgCache[res] = sf; });
+        AssetHub.loadSF(res, (sf) => { if (sf) this.bgCache[res] = sf; });
       }
     }
   }
@@ -3687,6 +3724,7 @@ export class BattleScene extends Component {
   // 所有视差层：各自速度无缝横向滚动；卷屏换景时走"老左滑出/新右滑入"
   private updateScrollLayers() {
     const W = DESIGN_W;
+    this.applyRealmBgTint();
     if (this.transActive) { this.renderTransition(); return; }
     for (const L of this.layers) {
       if (!L.w) continue;
