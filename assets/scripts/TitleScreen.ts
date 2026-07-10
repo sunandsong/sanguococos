@@ -4,6 +4,7 @@ import {
   Sprite, SpriteFrame, Texture2D, resources,
 } from 'cc';
 import { DESIGN_W, DESIGN_H } from './Constants';
+import { BattleScene } from './BattleScene';
 const { ccclass } = _decorator;
 
 // 标题画面《我要上天》：夜空星光 + 天光光柱 + 金字标题 + 点击开始。
@@ -99,6 +100,7 @@ export class TitleScreen extends Component {
   private dismiss() {
     if (this.leaving) return;
     this.leaving = true;
+    BattleScene.instance?.open();   // 主城已去掉：点击标题直接出征
     const op = this.node.getComponent(UIOpacity) || this.node.addComponent(UIOpacity);
     tween(op).to(0.45, { opacity: 0 })
       .call(() => this.node.destroy())

@@ -53,32 +53,31 @@ export class GameRoot extends Component {
       return n;
     };
 
-    make('Background', Background);     // 背景图（最底）
-    make('SideDecor', SideDecor);      // 两侧石头 + 草点（垫在所有元素下面）
-    make('Sun', SunSprite);            // 太阳（在山后面）
-    make('Ninja', Ninja);              // 山上忍者（在山后面，下沉时被山挡住；夜里才现身）
-    make('Mountains', Mountains);      // 山（挡住太阳 + 忍者下沉部分）
-    make('Clouds', Clouds);            // 云（在山前飘）
-    make('Geese', Geese);              // 小鸟（横飞）
-    // make('City', City);                // 城墙（已去掉城池）
-    make('House', House);              // 主公府（4 档，随等级切）
-    make('Farms', Farms);              // 农田（城前菱形田）
-    make('Hoppers', Hoppers);          // 蚂蚱（地面跳）
-    make('Soldiers', Soldiers);        // 城外脸谱兵（先黑脸）
-    // make('CityEnterers', CityEnterers); // 进城门小人（随城池一并去掉）
-    make('SkyOverlay', DayNightController); // 昼夜遮罩（盖在场景上）
-    make('Stars', Stars);              // 星星（在遮罩之上，夜空发亮）
-    make('Moon', Moon);                // 月亮（在遮罩之上，夜空发亮）
-    make('Meteors', Meteors);          // 流星（夜里偶尔划过）
-    make('BottomMenu', BottomMenu);    // 底部四个菜单按钮
+    // ── 主城场景已整体去掉（背景/山云/太阳月亮/农田/士兵/昼夜/底部菜单/HUD）──
+    //    开机 = 标题画面 → 点击直接出征。需要恢复主城时把下面这段解注即可。
+    // make('Background', Background);
+    // make('SideDecor', SideDecor);
+    // make('Sun', SunSprite);
+    // make('Ninja', Ninja);
+    // make('Mountains', Mountains);
+    // make('Clouds', Clouds);
+    // make('Geese', Geese);
+    // make('City', City);
+    // make('House', House);
+    // make('Farms', Farms);
+    // make('Hoppers', Hoppers);
+    // make('Soldiers', Soldiers);
+    // make('CityEnterers', CityEnterers);
+    // make('SkyOverlay', DayNightController);
+    // make('Stars', Stars);
+    // make('Moon', Moon);
+    // make('Meteors', Meteors);
+    // make('BottomMenu', BottomMenu);
+    // const hud = make('HUD', HUD);
+    // hud.getComponent(UITransform)!.setAnchorPoint(0, 1);
+    // hud.setPosition(-DESIGN_W / 2 + 16, DESIGN_H / 2 - 12, 0);
 
-    // HUD 顶部状态条
-    const hud = make('HUD', HUD);
-    hud.getComponent(UITransform)!.setAnchorPoint(0, 1);
-    hud.setPosition(-DESIGN_W / 2 + 16, DESIGN_H / 2 - 12, 0);
-
-    make('Battle', BattleScene);       // 出征战场覆盖层（最上层，默认隐藏）
-
+    make('Battle', BattleScene);       // 战场（标题点击后开启）
     make('Title', TitleScreen);        // 标题画面《我要上天》（开机最上层，点击进入）
   }
 }

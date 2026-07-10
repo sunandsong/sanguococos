@@ -1110,7 +1110,7 @@ export class BattleScene extends Component {
         this.spawnMonster();
         this.waveRemaining--;
       }
-      if (this.waveRemaining === 0 && alive === 0) { this.zoneState = 'cleared'; AudioMgr.inst.play('clear'); }
+      if (this.waveRemaining === 0 && alive === 0) this.zoneState = 'cleared';   // 过关音效已去掉
     }
     // cleared：推进判定在 stepHero 里
   }
