@@ -91,12 +91,11 @@ export class BattleScene extends Component {
   private readonly BOSS_SLAM_DMG = 34;       // 重击伤害
 
   // 背景组：每 5 关一个场景，Boss 单独一个场景（缺图会自动沿用上一组，不报错）。
-  // near 没有专属图就复用 bg-near-grass。最后一组固定给 Boss 关。
+  // 背景组：far/mid/near/fg 四层视差贴图。
   // 第 1-5 关=青原，第 6-9 关=密林，第 10 关(Boss)=焦土。
   private readonly BIOMES = [
-    { name: '密林', far: 'bg-far-forest', mid: 'bg-mid-forest', near: 'bg-near-forest', fg: 'bg-fg-forest' },   // 第 1-5 关
-    { name: '青原', far: 'bg-far-mtn',    mid: 'bg-mid-hills',  near: 'bg-near-grass',  fg: 'bg-fg-grass' },    // 第 6-9 关
-    { name: '焦土', far: 'bg-far-ruins',  mid: 'bg-mid-ruins',  near: 'bg-near-ruins',  fg: 'bg-fg-ruins' },    // 第 10 关 Boss 专属
+    { name: '密林', far: 'bg-far-forest', mid: 'bg-mid-forest', near: 'bg-near-forest', fg: 'bg-fg-forest' },   // 第一章全部关卡
+    // 青原/焦土组已删（图早已清理，biomeIndexFor 恒 0 从未用到）；第二章地府/天庭走 REALMS 染色方案
   ];
 
   // 场景只两种（一套素材通用）；主要靠时段变化出氛围
@@ -498,9 +497,10 @@ export class BattleScene extends Component {
 
     // 视差背景层（真图，无缝滚动）：远→近，在天空之上、角色之下
     // 远山画高些（峰顶自然高过中景）、底边压回地平线藏住 → 无空隙
-    this.makeScrollLayer('bg-far-mtn', 380, 0.25, 0);     // 远山（高）
-    this.makeScrollLayer('bg-mid-hills', 300, 0.5, 0);    // 中景丘陵 + 山河牌坊
-    this.makeScrollLayer('bg-near-grass', 180, 0.7, -30); // 近景草坡（角色身后）
+    // 前三层贴图由 applyBiome 统一设置（不预载初始图 → 避免开局两图竞速闪现）
+    this.makeScrollLayer('far', 380, 0.25, 0, false);     // 远景层
+    this.makeScrollLayer('mid', 300, 0.5, 0, false);      // 中景层
+    this.makeScrollLayer('near', 180, 0.7, -30, false);   // 近景层（角色身后）
     // 地面石块切面：草皮唇边对齐地面线（原尺寸 1:1），主角就站在唇边上 → 与草地融为一体
     this.makeScrollLayer('bg-fg-stone', 524, 1.0, -494);
 
@@ -4048,7 +4048,7 @@ export class BattleScene extends Component {
   }
 
   // 创建一层无缝滚动视差背景（2 块瓦片，镜像图已保证左右无缝）
-  private makeScrollLayer(res: string, dispH: number, par: number, baseY: number) {
+  private makeScrollLayer(res: string, dispH: number, par: number, baseY: number, preload = true) {
     const L = { tiles: [] as Node[], w: 0, par, baseY, dispH };
     for (let i = 0; i < 2; i++) {
       const n = new Node('bglayer-' + res + i);
@@ -4058,7 +4058,8 @@ export class BattleScene extends Component {
       L.tiles.push(n);
     }
     this.layers.push(L);
-    this.setLayerImage(this.layers.length - 1, res);
+    // preload=false：贴图交给 applyBiome 统一设置（否则初始图和 biome 图竞速加载，开局会闪一下）
+    if (preload) this.setLayerImage(this.layers.length - 1, res);
   }
 
   // 换某一视差层的贴图（带缓存；缺图静默跳过，保留当前图）
@@ -4068,9 +4069,13 @@ export class BattleScene extends Component {
     const apply = (sf: SpriteFrame) => {
       (sf.texture as Texture2D).setFilters(Texture2D.Filter.NEAREST, Texture2D.Filter.NEAREST);
       L.w = sf.rect.width * (L.dispH / sf.rect.height);
-      for (const n of L.tiles) {
+      // 设图的同时立即按当前镜头摆位——否则贴图就绪的那一帧会以节点默认位置闪现一下
+      const off = (((this.camX * L.par) % L.w) + L.w) % L.w;
+      for (let i = 0; i < L.tiles.length; i++) {
+        const n = L.tiles[i];
         n.getComponent(Sprite)!.spriteFrame = sf;
         n.getComponent(UITransform)!.setContentSize(L.w, L.dispH);
+        n.setPosition(-DESIGN_W / 2 - off + i * L.w, this.groundY + L.baseY, 0);
       }
     };
     if (this.bgCache[res]) { apply(this.bgCache[res]); return; }
