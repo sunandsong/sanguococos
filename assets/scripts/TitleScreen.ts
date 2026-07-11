@@ -55,6 +55,7 @@ export class TitleScreen extends Component {
     beamN.setPosition(0, 120, 0);
     beamN.setScale(1.15, 3.2, 1);
     resources.load('fx-light-beam/spriteFrame', SpriteFrame, (e, sf) => {
+      if (!beamN.isValid) return;   // 标题已被点击销毁，迟到的加载回调直接丢弃（防 _uiProps null 崩溃）
       if (e || !sf) { beamN.active = false; return; }
       (sf.texture as Texture2D).setFilters(Texture2D.Filter.NEAREST, Texture2D.Filter.NEAREST);
       beamSp.spriteFrame = sf;

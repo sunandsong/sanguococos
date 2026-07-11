@@ -355,6 +355,10 @@ export class BattleScene extends Component {
   private waveLayer!: Node;
   private slashN: Node | null = null;
   private slashSp: Sprite | null = null;
+  // 主角序列帧（AI 生成）：跳劈 + 地面攻击；跳跃/受击/死亡保持原始程序动画
+  private slamFrames: SpriteFrame[] = [];     // 跳劈 4 帧
+  private atkFrames: SpriteFrame[] = [];      // 地面攻击 4 帧
+  private jumpFrames: SpriteFrame[] = [];     // 跳跃 3 帧（只用 0=蹲 和 2=屈腿；上升用站立帧+程序拉伸）
   // 跳劈落地冲击波（AI 生成 4 帧序列：爆点→炸开→光环→消散）
   private readonly SLAM_FX_DUR = 0.34;
   private slamFxFrames: SpriteFrame[] = [];
@@ -772,6 +776,36 @@ export class BattleScene extends Component {
         this.upperFrames.push(sf);
       }
       this.heroSp.spriteFrame = this.upperFrames[3];
+    });
+    // 跳跃序列帧（AI 生成 3 帧，只用 0=蹲、2=屈腿下落；192×56，每帧 64×56）
+    AssetHub.loadSF('zhaoyun-jump', (base) => {
+      if (!base) return;
+      const tex = base.texture as Texture2D; tex.setFilters(Texture2D.Filter.NEAREST, Texture2D.Filter.NEAREST);
+      for (let c = 0; c < 3; c++) {
+        const sf = new SpriteFrame(); sf.texture = tex;
+        sf.rect = new Rect(c * 64, 0, 64, 56);
+        this.jumpFrames.push(sf);
+      }
+    });
+    // 攻击序列帧（AI 生成 4 帧：举刀预备→横斩拖影→前刺→收势；256×56，每帧 64×56）
+    AssetHub.loadSF('zhaoyun-attack', (base) => {
+      if (!base) return;
+      const tex = base.texture as Texture2D; tex.setFilters(Texture2D.Filter.NEAREST, Texture2D.Filter.NEAREST);
+      for (let c = 0; c < 4; c++) {
+        const sf = new SpriteFrame(); sf.texture = tex;
+        sf.rect = new Rect(c * 64, 0, 64, 56);
+        this.atkFrames.push(sf);
+      }
+    });
+    // 跳劈序列帧（AI 生成 4 帧：腾空举枪→俯冲下刺→砸地扬尘→蹲姿收势；288×72，每帧 72×72）
+    AssetHub.loadSF('zhaoyun-slam', (base) => {
+      if (!base) return;
+      const tex = base.texture as Texture2D; tex.setFilters(Texture2D.Filter.NEAREST, Texture2D.Filter.NEAREST);
+      for (let c = 0; c < 4; c++) {
+        const sf = new SpriteFrame(); sf.texture = tex;
+        sf.rect = new Rect(c * 72, 0, 72, 72);
+        this.slamFrames.push(sf);
+      }
     });
     // 步战赵云腿（第1行下半身；x8~40,y30~58）
     AssetHub.loadSF('zhaoyun-foot', (base) => {
@@ -1439,7 +1473,8 @@ export class BattleScene extends Component {
     if (h.specialCd > 0) h.specialCd -= dt;
     if (Math.abs(h.kx) > 1) { h.x += h.kx * dt; h.kx *= 0.84; }
 
-    const mv = (this.rightHeld ? 1 : 0) + (this.leftHeld ? -1 : 0);
+    // 落地缓冲期间锁移动（蹲帧不滑步）
+    const mv = h.jmpLand > 0 ? 0 : (this.rightHeld ? 1 : 0) + (this.leftHeld ? -1 : 0);
     if (mv !== 0) {
       h.dir = mv;
       h.x += mv * this.heroSpeed * dt;
@@ -1613,11 +1648,13 @@ export class BattleScene extends Component {
       h.crouch = Math.max(-0.3, Math.min(1.0, jc));
     }
 
-    // 跳劈：随跳跃高度整体放大，最高点约 1.5 倍，落地后恢复
-    const maxJumpH = this.JUMP_VY * this.JUMP_VY / (2 * this.GRAVITY_J);
-    h.scaleBoost = (h.atkType === 2 && h.jumpY > 0)
-      ? 1 + 0.5 * Math.min(1, h.jumpY / maxJumpH)
-      : 1;
+    // 跳劈/普通跳跃：随跳跃高度整体放大，最高点约 1.5 倍，落地后恢复（按各自最大高度归一）
+    if (h.jumpY > 0 && (h.jumping || h.atkType === 2)) {
+      const maxH = h.jumping
+        ? this.JUMP_MOVE_VY * this.JUMP_MOVE_VY / (2 * this.GRAVITY_MOVE)
+        : this.JUMP_VY * this.JUMP_VY / (2 * this.GRAVITY_J);
+      h.scaleBoost = 1 + 0.5 * Math.min(1, h.jumpY / maxH);
+    } else h.scaleBoost = 1;
   }
 
   // 跳劈落地冲击：以主角为中心两侧 AoE + 冲击波火花
@@ -1698,7 +1735,9 @@ export class BattleScene extends Component {
       if (g.life <= 0) g.n.active = false;
     }
     const h = this.hero;
-    const active = h.state !== 'dead' && (h.attacking || (h.atkType === 2 && (h.jumpY > 2 || h.landT > this.LAND_DUR * 0.6)));
+    const active = h.state !== 'dead' && (h.attacking
+      || (h.jumping && h.jumpY > 2)                                                             // 普通跳跃腾空残影
+      || (h.atkType === 2 && !h.jumping && (h.jumpY > 2 || h.landT > this.LAND_DUR * 0.6)));    // 跳劈残影
     if (!active || !this.heroNode.active) { this.ghostCd = 0; return; }
     this.ghostCd -= dt;
     if (this.ghostCd > 0) return;
@@ -2603,6 +2642,9 @@ export class BattleScene extends Component {
       const overshoot = l < 0.45 ? Math.sin((0.45 - l) / 0.45 * Math.PI) * 0.13 : 0;
       cy *= 1 + overshoot; cx *= 1 - overshoot * 0.5;
     }
+    // 跳跃帧方案：蓄力/落地用蹲帧(0)、上升用伸展帧(1)、下落用屈腿帧(2)
+    const useJumpSheet = h.jumping && h.state !== 'attack' && this.jumpFrames.length >= 3;
+    if (useJumpSheet) { cy = 1 + (cy - 1) * 0.4; cx = 1 + (cx - 1) * 0.4; }   // 蹲姿画在帧里，程序挤压只留40%
     cy = Math.max(0.6, Math.min(1.45, cy)); cx = Math.max(0.7, cx);
     this.heroNode.setScale((h.dir >= 0 ? -S : S) * cx, S * cy, 1);   // 默认朝左，朝右翻转
 
@@ -2610,17 +2652,41 @@ export class BattleScene extends Component {
     const tint = this.charTint();
     this.footSp.color = tint; this.heroSp.color = tint; this.legsSp.color = tint;
 
-    // 攻击 → 拼接(骑马上半身+步战腿)；走路/待机 → 步战赵云完整身体
+    // 地面攻击/跳劈 → AI 序列帧（缺图时兜底拼接）；走路/待机 → 步战全身
     const attacking = h.state === 'attack';
-    this.heroSp.node.active = attacking;
-    this.legsSp.node.active = attacking;
-    this.footNode.active = !attacking && this.footFullFrames.length >= 4;
-    if (attacking) {
+    const useAtkSheet = attacking && h.atkType !== 2 && this.atkFrames.length >= 4;
+    const useSlamSheet = attacking && h.atkType === 2 && this.slamFrames.length >= 4;
+    const useSheet = useAtkSheet || useSlamSheet;
+    this.heroSp.node.active = attacking && !useSheet;
+    this.legsSp.node.active = attacking && !useSheet;
+    this.footNode.active = (!attacking || useSheet) && this.footFullFrames.length >= 4;
+    const fu2 = this.footNode.getComponent(UITransform)!;
+    if (useAtkSheet) {
+      fu2.setContentSize(64, 56); fu2.setAnchorPoint(0.5, 4 / 56);
+      // 非均匀节奏：预备慢(0~0.32) → 斩击快(0.32~0.5) → 前刺(0.5~0.75) → 收势
+      const p = h.swing;
+      const idx = p < 0.32 ? 0 : p < 0.5 ? 1 : p < 0.75 ? 2 : 3;
+      this.footSp.spriteFrame = this.atkFrames[idx];
+    } else if (useSlamSheet) {
+      fu2.setContentSize(72, 72); fu2.setAnchorPoint(0.5, 4 / 72);
+      // 按跳劈物理选帧：上升举枪 → 下落俯冲 → 砸地(与冲击波同步) → 收势
+      const p = h.slamProg;
+      const idx = p <= 0.15 ? 0 : p < 0.9 ? 1 : (this.slamFxT > this.SLAM_FX_DUR * 0.45 ? 2 : 3);
+      this.footSp.spriteFrame = this.slamFrames[idx];
+    } else if (attacking) {
       const p = h.atkType === 2 ? h.slamProg : h.swing;
       const idx = Math.max(0, Math.min(3, Math.floor(p * 4)));
       this.heroSp.spriteFrame = this.upperFrames[idx];
       if (this.legsFrames.length >= 2) this.legsSp.spriteFrame = this.legsFrames[0];
+    } else if (useJumpSheet) {
+      // 蓄力/落地 → 蹲帧(0)；上升到顶点 → 伸展帧(1)；过顶点稍落一点(降到78%高度) → 屈腿帧(2)
+      fu2.setContentSize(64, 56); fu2.setAnchorPoint(0.5, 4 / 56);
+      const airborne = h.jumpY > 0 && h.jmpLand <= 0 && h.jmpPre <= 0;
+      const maxJH = this.JUMP_MOVE_VY * this.JUMP_MOVE_VY / (2 * this.GRAVITY_MOVE);
+      const idx = !airborne ? 0 : (h.jumpVy > 0 || h.jumpY > maxJH * 0.78 ? 1 : 2);
+      this.footSp.spriteFrame = this.jumpFrames[idx];
     } else if (this.footFullFrames.length >= 4) {
+      fu2.setContentSize(40, 44); fu2.setAnchorPoint(0.5, 0);
       // 走路循环 4 帧，待机固定帧0
       const fi = h.state === 'walk' ? Math.floor(this.animT * 8) % 4 : 0;
       this.footSp.spriteFrame = this.footFullFrames[fi];
