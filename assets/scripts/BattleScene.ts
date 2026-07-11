@@ -1,8 +1,8 @@
 import {
   _decorator, Component, Node, Graphics, Label, LabelOutline,
-  UITransform, UIOpacity, Color, tween, Vec3,
+  UITransform, UIOpacity, Color, tween, Vec3, Vec2, EventTouch,
   input, Input, EventKeyboard, KeyCode,
-  Sprite, SpriteFrame, Texture2D, Rect, resources, gfx,
+  Sprite, SpriteFrame, Texture2D, Rect, resources, gfx, director, profiler, Mask,
 } from 'cc';
 import { DESIGN_W, DESIGN_H } from './Constants';
 import { AudioMgr } from './AudioMgr';
@@ -146,7 +146,17 @@ export class BattleScene extends Component {
   private bossOp!: UIOpacity;
   private zyFrames: SpriteFrame[] = [];    // 赵云侧面 4 帧
 
-  private bgG!: Graphics;
+  private bgG!: Graphics;         // 天空/地面（静态，缓存：只在镜头移动或换时段时重画）
+  private cloudG!: Graphics;      // 云（每帧重画，云要飘）
+  private bgKey = '';             // bgG 当前内容的标识（时段），相同则跳过重画
+  private cloudKey = -1;          // 云层脏标记（吸附位置+时段的数字哈希）：云挪过一格才重画
+  private hudG!: Graphics;        // HUD 层（血条/Boss条/图标底座）：血量变了才重画
+  private hudKey = -1;            // HUD 脏标记（血量/残影/Boss血的数字哈希）
+  private groundFxG!: Graphics;   // 地面残留层（雪面/血渍/脚印/插地箭）：低频重画
+  private groundFxT = 0;
+  private groundFxCam = -99999;
+  private spcCdKey = -1;          // 技能冷却环脏标记（48 级量化）
+  private ambiOdd = false;        // 氛围动画隔帧开关（叶/草/小动物 30Hz 更新）
   private stageG!: Graphics;
   private fgG!: Graphics;   // 前景层（主角之上、暗角之下）
   private glowG!: Graphics;   // 辉光层（加法混合，亮元素发光）
@@ -156,7 +166,13 @@ export class BattleScene extends Component {
   private bossGlowG!: Graphics;  // 道具垫底层：接地影 + 火盆暖光晕（在道具贴图之下）
   private readonly PROPS_ARENA_ZONE = 9;   // 道具所在关：Boss 关（第 10 关）
   private layers: { tiles: Node[]; w: number; par: number; baseY: number; dispH: number }[] = [];   // 视差背景层（远→近）
-  private bgTintKey = '';   // 背景层当前界色（变了才重刷）
+  private bgTintRef: readonly number[] | null = null;   // 背景层当前界色数组引用（变了才重刷）
+  private readonly _drawnScratch: Monster[] = [];        // 每帧绘制排序复用数组
+  private readonly _cloudBxs: number[] = [];             // 云位置计算复用数组
+  private static readonly _drawOrder = (a: Monster, b: Monster) =>
+    (a.state === 'dead' ? -1 : 1) - (b.state === 'dead' ? -1 : 1) || b.lane - a.lane;
+  private readonly _charTintC = new Color(255, 255, 255, 255);   // charTint 缓存（按关）
+  private _charTintZone = -1;
   private bgCache: Record<string, SpriteFrame> = {};   // 背景图缓存（换关不重复加载）
   private curBiome = -1;   // 当前已应用的背景组，-1=未设
   private fgLayerIdx = -1;   // 图片前景层在 this.layers 里的真实索引（石头层在它之前）
@@ -181,7 +197,7 @@ export class BattleScene extends Component {
   // 草屑（跳劈落地掀飞的碎草叶）
   private grassBits: { x: number; y: number; vx: number; vy: number; ang: number; va: number; life: number; max: number }[] = [];
   // 近景草丛（独立草株：风摆 + 主角走过拨开回弹；前后两排夹住角色）
-  private nearGrass: { n: Node; op: UIOpacity; lx: number; by: number; ph: number; ang: number; vel: number; par: number; fly: number; fx: number; fy: number; fvx: number; fvy: number; spin: number; regrow: number; sc: number }[] = [];
+  private nearGrass: { n: Node; op: UIOpacity; sp: Sprite; loaded: boolean; lx: number; by: number; ph: number; ang: number; vel: number; par: number; fly: number; fx: number; fy: number; fvx: number; fvy: number; spin: number; regrow: number; sc: number }[] = [];
   // 前景叶片（独立元件，绕叶柄弹簧摆；雨天被雨滴敲击 → 下压回弹 + 水花）
   private fgLeaves: { n: Node; lx: number; by: number; ph: number; ang: number; vel: number; hitCd: number }[] = [];
   private leafFxG!: Graphics;   // 叶面水花层（在叶片之上）
@@ -324,6 +340,103 @@ export class BattleScene extends Component {
   private weather = '晴';
   private snowAcc = 0;   // 地面积雪厚度 0→1（下雪时间越久越厚，换天气后消融）
   private stormK = 0;    // 乌云浓度 0→1（雨天聚拢，雨停消散）
+  // 天气贴图层：雨/雪/落叶/浮尘全部用无缝平铺贴图斜向滚动（每层每帧只改 1 个坐标，成本与粒子数无关）
+  private rainNodes: { n: Node; sp: Sprite; op: UIOpacity | null; kind: string; vx: number; vy: number; sway: number; ph: number; ox: number; oy: number; tw: number; th: number; by: number }[] = [];
+  private rainSplashT = 0;             // 地面溅落定时器（雨水花/雪堆/叶片，原来由每滴落地触发，现在定时随机补）
+
+  // ── 特效精灵化：血滴/尘土用同一张圆点贴图的精灵池；刀气/剑气波用新月贴图 ──
+  // 同贴图的精灵自动合批 → 全部粒子 1 个 draw call；每帧只是挪节点，不再重建几何
+  private fxDotSF: SpriteFrame | null = null;
+  private fxCreSF: SpriteFrame | null = null;
+  private dotLayer!: Node;
+  private dotPool: { n: Node; sp: Sprite }[] = [];
+  private dotUsed = 0;
+  private wavePool: { n: Node; sp: Sprite }[] = [];
+  private waveLayer!: Node;
+  private slashN: Node | null = null;
+  private slashSp: Sprite | null = null;
+  // 跳劈落地冲击波（AI 生成 4 帧序列：爆点→炸开→光环→消散）
+  private readonly SLAM_FX_DUR = 0.34;
+  private slamFxFrames: SpriteFrame[] = [];
+  private slamFxN: Node | null = null;
+  private slamFxSp: Sprite | null = null;
+  private slamFxT = 0;
+  private slamFxX = 0;
+
+  private dotBegin() { this.dotUsed = 0; }
+  /** 画一个圆点粒子（精灵池版 circle+fill）：r=半径，颜色+alpha 直接染到精灵上 */
+  private dotDraw(x: number, y: number, r: number, cr: number, cg: number, cb: number, a: number) {
+    if (a <= 1 || !this.fxDotSF) return;
+    let d = this.dotPool[this.dotUsed];
+    if (!d) {
+      if (this.dotPool.length >= 140) return;   // 池上限（血 90 + 尘土余量）
+      const n = new Node('dot' + this.dotPool.length);
+      n.layer = this.node.layer; n.parent = this.dotLayer;
+      n.addComponent(UITransform).setContentSize(14, 14);
+      const sp = n.addComponent(Sprite);
+      sp.sizeMode = Sprite.SizeMode.CUSTOM;
+      sp.spriteFrame = this.fxDotSF;
+      d = { n, sp }; this.dotPool.push(d);
+    }
+    d.n.active = true;
+    d.n.setPosition(x, y, 0);
+    const s = (r * 2) / 14;
+    d.n.setScale(s, s, 1);
+    this._scratchC.set(cr, cg, cb, a);
+    d.sp.color = this._scratchC;
+    this.dotUsed++;
+  }
+  private dotEnd() {
+    for (let i = this.dotUsed; i < this.dotPool.length; i++) {
+      if (this.dotPool[i].n.active) this.dotPool[i].n.active = false;
+    }
+  }
+  /** 取第 i 个剑气波精灵（懒建，上限 4） */
+  private waveFx(i: number): { n: Node; sp: Sprite } | null {
+    if (this.wavePool[i]) return this.wavePool[i];
+    if (!this.fxCreSF || i >= 4) return null;
+    const n = new Node('wavefx' + i);
+    n.layer = this.node.layer; n.parent = this.waveLayer;
+    n.addComponent(UITransform).setContentSize(128, 128);
+    const sp = n.addComponent(Sprite);
+    sp.sizeMode = Sprite.SizeMode.CUSTOM;
+    sp.spriteFrame = this.fxCreSF;
+    const rec = { n, sp }; this.wavePool.push(rec);
+    return rec;
+  }
+
+  /** 当前天气对应的贴图层 kind（'' = 无贴图层天气） */
+  private weatherKind(): string {
+    return this.weather === '雨' ? 'rain' : this.weather === '雪' ? 'snow' : this.weather === '落叶' ? 'leaf' : '';
+  }
+
+  /** 浮尘层按时段染色（夜=萤火青、黄昏=暮光橙、白天=柳絮白） */
+  private tintMoteLayers() {
+    const tod = this.timeOfDay().name;
+    const c = tod === '夜晚' ? [225, 240, 200] : tod === '黄昏' ? [255, 205, 140] : [240, 246, 232];
+    for (const r of this.rainNodes) if (r.kind === 'mote') r.sp.color = new Color(c[0], c[1], c[2], 255);
+  }
+
+  /** 天气贴图层滚动 + 横摆 + 浮尘呼吸（每帧每层 1 次 setPosition，晴天只有浮尘层在动） */
+  private updateWeatherLayers(dt: number) {
+    for (const r of this.rainNodes) {
+      if (!r.n.active) continue;
+      r.ox = (((r.ox + r.vx * dt) % r.tw) + r.tw) % r.tw;
+      r.oy = (((r.oy + r.vy * dt) % r.th) + r.th) % r.th;
+      const sx = r.sway ? Math.sin(this.animT * 0.85 + r.ph) * r.sway : 0;
+      r.n.setPosition(r.ox - r.tw / 2 + sx, r.by + r.oy - r.th / 2, 0);
+      if (r.op) r.op.opacity = Math.round(150 + 70 * Math.sin(this.animT * 0.9 + r.ph));
+    }
+  }
+  private readonly CTRL_ALPHA = 0.5;   // 操控按钮透明度 0~1（UIOpacity 对 Graphics 无效，直接乘进颜色）
+  private readonly RENDER_SCALE = 0.6; // 渲染分辨率缩放 0~1（省填充率救掉帧；1=原生，像素风建议 0.5~0.7）
+  private readonly _scratchC = new Color(255, 255, 255, 255);   // 复用色对象（热循环里避免 new Color 触发 GC）
+  private readonly SHOW_FPS = true;    // 屏上显示实时 FPS + 敌人数（性能调试用，发布前改 false）
+  private fpsLbl: Label | null = null;
+  private fpsAcc = 0;                   // 半秒采样累计
+  private fpsFrames = 0;
+  private lastRealDt = 0.016;           // 真实帧间隔（未 clamp/未慢动作缩放）
+  private readonly RAIN_PX = 3;
   private wparts: { x: number; y: number; vx: number; vy: number; ph: number; len: number; sz: number; c: number; d: number }[] = [];
   private wimpacts: { x: number; y: number; life: number; max: number; t: string; sz: number; c: number; d: number }[] = [];   // 落地溅落
   private lightT = 0;    // 闪电亮度 0..1
@@ -356,6 +469,14 @@ export class BattleScene extends Component {
 
   onLoad() {
     BattleScene.instance = this;
+    // 降渲染分辨率：手机视网膜(2~3倍)下大量半透明叠加把 GPU 填充率打满 → 掉帧。
+    // 像素风降到 0.6 分辨率几乎看不出，填充率省 ~64%。发布前可微调 RENDER_SCALE。
+    try {
+      const pipe = director.root?.pipeline as unknown as { shadingScale?: number };
+      if (pipe && 'shadingScale' in pipe) pipe.shadingScale = this.RENDER_SCALE;
+    } catch (e) { console.warn('[Perf] shadingScale 设置失败', e); }
+    // 引擎自带性能面板：显示 Draw call / 逻辑(CPU)ms / 渲染ms / GFX —— 一眼看出 CPU 还是 GPU 瓶颈
+    if (this.SHOW_FPS) { try { profiler.showStats(); } catch (e) { /* ignore */ } }
     const W = DESIGN_W, H = DESIGN_H;
     this.groundY = (0.5 - this.groundFy) * H;
     this.baseAtk = this.attackDmg; this.baseSpeed = this.heroSpeed; this.specialCdCur = this.SPECIAL_CD;
@@ -368,7 +489,8 @@ export class BattleScene extends Component {
     input.on(Input.EventType.KEY_DOWN, this.onKeyDown, this);
     input.on(Input.EventType.KEY_UP, this.onKeyUp, this);
 
-    this.bgG = this.child('bg').addComponent(Graphics);      // 天空/地面每帧重画
+    this.bgG = this.child('bg').addComponent(Graphics);      // 天空/地面（缓存，静态时不重画）
+    this.cloudG = this.child('bgcloud').addComponent(Graphics);   // 云（单独层，每帧画）——建在 bg 之后=盖在天空上、山之下
 
     // 视差背景层（真图，无缝滚动）：远→近，在天空之上、角色之下
     // 远山画高些（峰顶自然高过中景）、底边压回地平线藏住 → 无空隙
@@ -456,7 +578,34 @@ export class BattleScene extends Component {
       this.bossPropRoot.active = false;
     }
 
+    this.groundFxG = this.child('groundfx').addComponent(Graphics);   // 地面残留缓存层（雪面/血渍/脚印/箭，低频重画，垫在 stage 下）
     this.stageG = this.child('stage').addComponent(Graphics);
+    // 粒子精灵池图层（血滴/尘土）+ 剑气波精灵图层：紧跟 stage → 与原 Graphics 绘制层级一致
+    this.dotLayer = this.child('fxdots');
+    this.waveLayer = this.child('fxwaves');
+    this.hudG = this.child('hud').addComponent(Graphics);             // HUD 缓存层（血量变了才重画）
+    AssetHub.loadSF('fx-dot', (sf) => {
+      if (!sf) return;
+      (sf.texture as Texture2D).setFilters(Texture2D.Filter.NEAREST, Texture2D.Filter.NEAREST);
+      this.fxDotSF = sf;
+    });
+    AssetHub.loadSF('fx-crescent', (sf) => {
+      if (!sf) return;
+      (sf.texture as Texture2D).setFilters(Texture2D.Filter.NEAREST, Texture2D.Filter.NEAREST);
+      this.fxCreSF = sf;
+      if (this.slashSp) this.slashSp.spriteFrame = sf;
+    });
+    // 跳劈落地冲击波：640×136 横排 4 帧，切成 160×136 的帧序列
+    AssetHub.loadSF('fx-slam-impact', (base) => {
+      if (!base) return;
+      const tex = base.texture as Texture2D;
+      tex.setFilters(Texture2D.Filter.NEAREST, Texture2D.Filter.NEAREST);
+      for (let i = 0; i < 4; i++) {
+        const sf = new SpriteFrame(); sf.texture = tex;
+        sf.rect = new Rect(i * 160, 0, 160, 136);
+        this.slamFxFrames.push(sf);
+      }
+    });
 
     // 小动物节点（3蝴蝶+1鸟+1兔）
     {
@@ -645,9 +794,76 @@ export class BattleScene extends Component {
 
     // 前景层（主角之上、暗角之下）：每帧重画
     // 地面小草株（脚面高，角色同平面，可拨动）
-    this.makeGrassRow(this.node, 40, 0.07, 0.14, -8, 6, 1.0);
+    this.makeGrassRow(this.node, 28, 0.07, 0.14, -8, 6, 1.0);   // 40→28：草更省 draw call/overdraw，密度基本不变
 
     this.fgG = this.child('foreground').addComponent(Graphics);
+    // 刀气精灵（新月贴图，随挥砍旋转/淡出）：替代每帧 hArc 描边
+    {
+      const n = this.child('fxslash');
+      n.getComponent(UITransform)!.setContentSize(128, 128);
+      const sp = n.addComponent(Sprite);
+      sp.sizeMode = Sprite.SizeMode.CUSTOM;
+      if (this.fxCreSF) sp.spriteFrame = this.fxCreSF;
+      n.active = false;
+      this.slashN = n; this.slashSp = sp;
+    }
+    // 跳劈落地冲击波节点（锚点 0.34 ≈ 画面里的地面线：光环沉在地上、光柱向上喷）
+    {
+      const n = this.child('fxslamimpact');
+      const ui = n.getComponent(UITransform)!;
+      ui.setContentSize(160, 136);
+      ui.setAnchorPoint(0.5, 0.34);
+      const sp = n.addComponent(Sprite);
+      sp.sizeMode = Sprite.SizeMode.CUSTOM;
+      n.active = false;
+      this.slamFxN = n; this.slamFxSp = sp;
+    }
+    // 天气粒子贴图化：雨/雪/落叶/浮尘全部用无缝平铺贴图层斜向滚动（每层每帧只改 1 个坐标）。
+    // 外面套一层 Mask 裁切：粒子只落到地面线为止，不穿透地面。
+    {
+      const topH = H / 2 - this.groundY;            // 地面线以上的可见区域高
+      const clip = this.child('rainclip');
+      const cui = clip.getComponent(UITransform)!;
+      cui.setContentSize(W, topH);
+      cui.setAnchorPoint(0.5, 0.5);
+      clip.setPosition(0, this.groundY + topH / 2, 0);
+      clip.addComponent(Graphics);                  // Mask 的 stencil 载体
+      const mask = clip.addComponent(Mask);
+      mask.type = Mask.Type.GRAPHICS_RECT;
+      const baseY = -(this.groundY + topH / 2);     // 世界(0,0) 在 clip 坐标系中的 y
+      // kind: rain/snow/leaf 跟天气开关；mote(氛围浮尘) 全天常开、按时段染色
+      // tw/th = 贴图周期：越大重复越不明显（雪/叶/尘用 384×512 大周期，避免排成行）
+      const defs = [
+        { kind: 'rain', res: 'fx-rain-far', vx: -267, vy: -930, sway: 0, tw: 192, th: 384 },
+        { kind: 'rain', res: 'fx-rain-near', vx: -452, vy: -1575, sway: 0, tw: 192, th: 384 },
+        { kind: 'snow', res: 'fx-snow-far', vx: -10, vy: -70, sway: 22, tw: 384, th: 512 },
+        { kind: 'snow', res: 'fx-snow-near', vx: -20, vy: -130, sway: 34, tw: 384, th: 512 },
+        { kind: 'leaf', res: 'fx-leaf-fall-far', vx: -30, vy: -48, sway: 26, tw: 384, th: 512 },
+        { kind: 'leaf', res: 'fx-leaf-fall-near', vx: -55, vy: -85, sway: 34, tw: 384, th: 512 },
+        { kind: 'mote', res: 'fx-mote', vx: -7, vy: -5, sway: 18, tw: 384, th: 512 },
+      ];
+      let ph = 0;
+      for (const d of defs) {
+        const n = new Node('wx-' + d.res);
+        n.layer = this.node.layer; n.parent = clip;
+        const ui = n.addComponent(UITransform);
+        const sp = n.addComponent(Sprite);
+        sp.sizeMode = Sprite.SizeMode.CUSTOM;
+        sp.type = Sprite.Type.TILED;
+        const op = d.kind === 'mote' ? n.addComponent(UIOpacity) : null;   // 浮尘全局呼吸
+        n.active = false;
+        const rec = { n, sp, op, kind: d.kind, vx: d.vx, vy: d.vy, sway: d.sway, ph: (ph += 2.1), ox: 0, oy: 0, tw: d.tw, th: d.th, by: baseY };
+        AssetHub.loadSF(d.res, (sf) => {
+          if (!sf) return;
+          (sf.texture as Texture2D).setFilters(Texture2D.Filter.NEAREST, Texture2D.Filter.NEAREST);
+          sp.spriteFrame = sf;
+          ui.setContentSize(DESIGN_W + rec.tw * 2, DESIGN_H + rec.th * 2);   // 比屏大一圈，滚动取模不露边
+          if (rec.kind === 'mote') { n.active = true; this.tintMoteLayers(); }
+          else if (this.weatherKind() === rec.kind) n.active = true;
+        });
+        this.rainNodes.push(rec);
+      }
+    }
     // 辉光层：加法混合，让亮元素(刀气/剑气/金币/火)真正发光
     this.glowG = this.child('glow').addComponent(Graphics);
     (this.glowG as any).srcBlendFactor = gfx.BlendFactor.SRC_ALPHA;
@@ -657,7 +873,9 @@ export class BattleScene extends Component {
     // 底部前景带 = 会动的叶片元件（替代静态前景图）：密排成带、绕叶柄摆、雨天被雨滴敲击
     {
       const leafSizes: [number, number][] = [[223, 340], [349, 340], [291, 340]];
-      for (let i = 0; i < 15; i++) {
+      const LEAF_N = 9;                          // 叶片数（原 15→9）：大贴图 overdraw，减到 9
+      const leafSpan = DESIGN_W + 320;           // 与 updateFgLeaves 的 span 一致
+      for (let i = 0; i < LEAF_N; i++) {
         const n = new Node('fgleaf' + i); n.layer = this.node.layer; n.parent = this.node;
         const kind = i % 3;
         const u = n.addComponent(UITransform);
@@ -672,7 +890,7 @@ export class BattleScene extends Component {
           if (!sf) return; sp.spriteFrame = sf; n.active = true;
         });
         this.fgLeaves.push({
-          n, lx: i * 70 + ((i * 53) % 46),            // 间距收紧 → 连成一条前景带
+          n, lx: i * (leafSpan / LEAF_N) + ((i * 53) % 46),   // 间距随数量自适应 → 少了也铺满整条
           by: -DESIGN_H / 2 - 30 - ((i * 41) % 46),   // 贴屏幕底边，叶冠向上探出
           ph: i * 1.7, ang: 0, vel: 0, hitCd: Math.random() * 2,
         });
@@ -699,6 +917,11 @@ export class BattleScene extends Component {
 
     // 伤害数字容器（在角色之上）
     this.dmgLayer = this.child('dmglayer');
+
+    // 性能调试：屏上实时 FPS + 存活敌人数（发布前把 SHOW_FPS 改回 false）
+    if (this.SHOW_FPS) {
+      this.fpsLbl = this.makeLabel('FPS --', -W / 2 + 90, H / 2 - 150, 28, new Color(120, 255, 140));
+    }
 
     this.zoneLbl = this.makeLabel('', 0, H / 2 - 130, 30, new Color(255, 235, 190));
     this.zoneLbl.node.active = false;   // 关数提示已隐藏（换关横幅仍会报关数）
@@ -765,37 +988,28 @@ export class BattleScene extends Component {
       n.on(Node.EventType.TOUCH_END, () => { up(); cb(); }, this);
       n.on(Node.EventType.TOUCH_CANCEL, up, this);
     };
-    // —— 左手：方向键组（◀ ▶ 等大并排）——
-    const mkDir = (name: string, x: number, flip: number, hold: (h: boolean) => void) => {
-      const n = this.makeCircleBtn(name, x, by, 50, [66, 80, 112], (g, r) => {
-        g.fillColor = new Color(240, 245, 252, 240);
-        g.moveTo(-flip * r * 0.26, r * 0.4); g.lineTo(flip * r * 0.46, 0); g.lineTo(-flip * r * 0.26, -r * 0.4); g.close(); g.fill();
-      });
-      n.on(Node.EventType.TOUCH_START, () => { hold(true); n.setScale(0.9, 0.9, 1); }, this);
-      const up = () => { hold(false); n.setScale(1, 1, 1); };
-      n.on(Node.EventType.TOUCH_END, up, this);
-      n.on(Node.EventType.TOUCH_CANCEL, up, this);
-      return n;
-    };
-    mkDir('back', -290, -1, h => (this.leftHeld = h));
-    mkDir('fwd', -160, 1, h => (this.rightHeld = h));
+    // 图标透明度：与按钮主体同步（乘进颜色 alpha）
+    const ia = (v: number) => Math.round(v * this.CTRL_ALPHA);
+
+    // —— 左手：虚拟摇杆（手机常用：按住左侧任意处拖动，左右滑动控制前进/后退）——
+    this.setupJoystick(-236, by + 18);
 
     // —— 右手：攻击大钮 + 技能扇形（剑气/跳环绕）——
-    const atk = this.makeCircleBtn('atk', 262, by, 66, [152, 58, 52], (g, r) => {
+    const atk = this.makeCircleBtn('atk', 268, by, 82, [152, 58, 52], (g, r) => {
       g.lineCap = Graphics.LineCap.ROUND;
-      g.strokeColor = new Color(238, 243, 250, 250); g.lineWidth = 9;     // 刀刃
+      g.strokeColor = new Color(238, 243, 250, ia(250)); g.lineWidth = 9;     // 刀刃
       g.moveTo(-r * 0.14, -r * 0.14); g.lineTo(r * 0.44, r * 0.44); g.stroke();
-      g.strokeColor = new Color(255, 214, 120, 250); g.lineWidth = 5;     // 护手
+      g.strokeColor = new Color(255, 214, 120, ia(250)); g.lineWidth = 5;     // 护手
       g.moveTo(-r * 0.02, -r * 0.32); g.lineTo(-r * 0.32, -r * 0.02); g.stroke();
-      g.strokeColor = new Color(96, 62, 40, 255); g.lineWidth = 7;        // 刀柄
+      g.strokeColor = new Color(96, 62, 40, ia(255)); g.lineWidth = 7;        // 刀柄
       g.moveTo(-r * 0.2, -r * 0.2); g.lineTo(-r * 0.42, -r * 0.42); g.stroke();
     });
     tapFx(atk, () => this.heroSwing());
     // 剑气（攻击左侧偏上）：青白新月波
-    const spc = this.makeCircleBtn('spc', 145, by + 43, 44, [54, 102, 138], (g, r) => {
-      g.strokeColor = new Color(160, 238, 255, 255); g.lineWidth = 6;
+    const spc = this.makeCircleBtn('spc', 132, by + 52, 56, [54, 102, 138], (g, r) => {
+      g.strokeColor = new Color(160, 238, 255, ia(255)); g.lineWidth = 6;
       hArc(g, -r * 0.1, 0, r * 0.42, -1.15, 1.15, 12); g.stroke();
-      g.strokeColor = new Color(240, 252, 255, 255); g.lineWidth = 3;
+      g.strokeColor = new Color(240, 252, 255, ia(255)); g.lineWidth = 3;
       hArc(g, -r * 0.1, 0, r * 0.26, -0.95, 0.95, 10); g.stroke();
     });
     tapFx(spc, () => this.heroSpecial());
@@ -805,13 +1019,7 @@ export class BattleScene extends Component {
       cdN.addComponent(UITransform);
       this.spcCdG = cdN.addComponent(Graphics);
     }
-    // 跳（攻击正上方）：白色 ↑ 箭头
-    const jmp = this.makeCircleBtn('jump', 240, by + 123, 44, [72, 112, 76], (g, r) => {
-      g.fillColor = new Color(240, 248, 240, 240);
-      g.moveTo(0, r * 0.52); g.lineTo(r * 0.4, r * 0.04); g.lineTo(-r * 0.4, r * 0.04); g.close(); g.fill();
-      g.roundRect(-r * 0.13, -r * 0.48, r * 0.26, r * 0.52, 4); g.fill();
-    });
-    tapFx(jmp, () => this.heroJump());
+    // 跳：不再单独设键 —— 摇杆上推即起跳（见 setupJoystick）
 
     // 「重来」：超链接式文字（下划线），点击重开
     {
@@ -894,21 +1102,25 @@ export class BattleScene extends Component {
   private sX(wx: number): number { return wx - this.camX; }   // 世界→屏幕
 
   // 角色环境光色：清晨偏暖金、黄昏偏橙（夜晚保持原色，不压暗角色）
+  // 按关缓存：时段/界色都由 zone 决定，同一关内直接返回缓存对象（每帧零分配）
   private charTint(): Color {
+    if (this._charTintZone === this.zone) return this._charTintC;
+    this._charTintZone = this.zone;
     let r = 255, g = 255, b = 255;
     switch (this.timeOfDay().name) {
       case '清晨': r = 255; g = 246; b = 226; break;
       case '黄昏': r = 255; g = 226; b = 200; break;
     }
     const rc = this.realmOf(this.zone).char;   // 叠加界色（地府发青 / 天庭鎏金）
-    return new Color(Math.round(r * rc[0] / 255), Math.round(g * rc[1] / 255), Math.round(b * rc[2] / 255), 255);
+    this._charTintC.set(Math.round(r * rc[0] / 255), Math.round(g * rc[1] / 255), Math.round(b * rc[2] / 255), 255);
+    return this._charTintC;
   }
 
   /** 背景视差层的界染色（每帧套到 4 层瓦片上；人间=纯白不改色） */
   private applyRealmBgTint() {
     const rb = this.realmOf(this.zone).bg;
-    if (this.bgTintKey === rb.join(',')) return;   // 未变则跳过（避免每帧写 color）
-    this.bgTintKey = rb.join(',');
+    if (this.bgTintRef === rb) return;   // 引用比较（数组来自 REALMS 常量，不再每帧 join 字符串）
+    this.bgTintRef = rb;
     const c = new Color(rb[0], rb[1], rb[2], 255);
     for (const L of this.layers) for (const n of L.tiles) {
       const sp = n.getComponent(Sprite); if (sp) sp.color = c;
@@ -1001,11 +1213,24 @@ export class BattleScene extends Component {
   // ---------- 主循环 ----------
   update(dt: number) {
     if (!this.node.active) return;
+    this.lastRealDt = dt;   // 真实帧间隔（未 clamp/未慢动作缩放）——给 FPS 统计用
     dt = Math.min(dt, 0.05);
     if (this.deadRedT > 0) this.deadRedT -= dt;
     if (this.over && this.hero.state === 'dead') this.deadT2 += dt;
     if (this.slowMoT > 0) { this.slowMoT -= dt; dt *= 0.35; }   // 慢动作(胜利/坠落)
     this.animT += dt;
+
+    // 性能显示：每 0.5s 刷新一次 FPS + 存活敌人数（用真实帧间隔，未受慢动作缩放）
+    if (this.fpsLbl) {
+      this.fpsAcc += this.lastRealDt; this.fpsFrames++;
+      if (this.fpsAcc >= 0.5) {
+        const fps = Math.round(this.fpsFrames / this.fpsAcc);
+        let alive = 0; for (const m of this.monsters) if (m.state !== 'dead') alive++;
+        this.fpsLbl.string = `FPS ${fps}  敌 ${alive}`;
+        this.fpsLbl.color = new Color(fps >= 50 ? 120 : 255, fps >= 50 ? 255 : fps >= 30 ? 200 : 90, fps >= 50 ? 140 : 90, 255);
+        this.fpsAcc = 0; this.fpsFrames = 0;
+      }
+    }
 
     // 关卡开场大字：0.22s 从 1.5 倍拍到 1 倍，尾段 0.35s 淡出
     if (this.zoneIntroT > 0) {
@@ -1019,13 +1244,20 @@ export class BattleScene extends Component {
       if (this.zoneIntroT <= 0) this.zoneIntroLbl.node.active = false;
     }
     this.lastDt = dt;
-    this.stepMotes(dt);
+    // stepMotes 已停用：浮尘改为 fx-mote 贴图层（updateWeatherLayers 里滚动+呼吸）
     this.stepWeather(dt);
-    this.updateFgLeaves(dt);      // 前景叶片（摇曳/雨打）
-    this.updateNearGrass(dt);     // 地面小草株（风摆/拨草）
-    this.stepCritters(dt);        // 小动物（蝴蝶/小鸟/兔子）
-    this.drawLeafSplashes(dt);    // 叶面大水花（画在叶片之上）
+    this.updateWeatherLayers(dt);   // 天气贴图层滚动（雨移动快，保持满帧才顺滑；本身只有几次赋值）
+    // 降频更新：纯氛围动画隔帧跑（30Hz，dt×2 补偿时间步长）——视觉无感，这一组 CPU 直接砍半
+    this.ambiOdd = !this.ambiOdd;
+    if (this.ambiOdd) {
+      const dt2 = dt * 2;
+      this.updateFgLeaves(dt2);     // 前景叶片（摇曳/雨打）
+      this.updateNearGrass(dt2);    // 地面小草株（风摆/拨草）
+      this.stepCritters(dt2);       // 小动物（蝴蝶/小鸟/兔子）
+      this.drawLeafSplashes(dt2);   // 叶面大水花（自带图层，跳帧时保留上一帧画面）
+    }
     if (this.slamBoltT > 0) this.slamBoltT -= dt;   // 跳劈闪电衰减
+    if (this.slamFxT > 0) this.slamFxT -= dt;       // 落地冲击波序列帧计时
     if (this.shockT > 0) this.shockT -= dt;         // Boss 冲击波衰减
     // 掉血残影缓慢追上当前血量
     const hpN = Math.max(0, this.hero ? this.hero.hp : 0);
@@ -1396,6 +1628,7 @@ export class BattleScene extends Component {
     this.addShake(18); this.addHitStop(0.06);   // 跳劈落地：大震 + 顿帧
     this.spawnDust(this.hero.x, this.groundY + 4, 10, 300);   // 跳劈落地大尘圈
     this.genSlamBolt(this.sX(h.x), this.groundY + 6);   // 天降一道闪电劈在落点
+    this.slamFxT = this.SLAM_FX_DUR; this.slamFxX = h.x;   // 落地冲击波序列帧开播
     // 冲击波掀草：范围内草株向外猛压（弹簧会自己甩回震荡），并溅起草屑
     {
       const hx = this.sX(h.x);
@@ -1531,7 +1764,7 @@ export class BattleScene extends Component {
       const p = f.life / f.max, a = 1 - p;
       const sx = this.sX(f.x), sy = f.y;
       // 白色迸裂星
-      g.strokeColor = new Color(255, 255, 255, Math.round(255 * a));
+      g.strokeColor = this._scratchC.set(255, 255, 255, Math.round(255 * a));
       g.lineWidth = 5 * (1 - p * 0.5);
       const r = 20 + p * 46;
       for (let k = 0; k < 6; k++) {
@@ -1541,7 +1774,7 @@ export class BattleScene extends Component {
       }
       g.stroke();
       // 中心亮核
-      g.fillColor = new Color(255, 255, 255, Math.round(230 * a));
+      g.fillColor = this._scratchC.set(255, 255, 255, Math.round(230 * a));
       g.circle(sx, sy, 9 * (1 - p)); g.fill();
     }
   }
@@ -1711,7 +1944,7 @@ export class BattleScene extends Component {
       d.life += dt; d.y += 66 * dt;
       d.n.setPosition(this.sX(d.x), d.y, 0);
       const lbl = d.n.getComponent(Label)!, col = lbl.color;
-      lbl.color = new Color(col.r, col.g, col.b, Math.round(255 * Math.max(0, 1 - d.life / d.max)));
+      lbl.color = this._scratchC.set(col.r, col.g, col.b, Math.round(255 * Math.max(0, 1 - d.life / d.max)));
       if (d.life >= d.max) { d.n.active = false; this.dmgPoolFree.push(d.n); this.dmgNums.splice(i, 1); }
     }
   }
@@ -1722,22 +1955,22 @@ export class BattleScene extends Component {
       const ux = a.vx / L, uy = a.vy / L, px = -uy, py = ux;   // 方向 + 垂直
       const len = 32, bx = sx - ux * len, by = sy - uy * len;  // 箭尾
       // 运动拖尾（暖黄亮streak）
-      g.strokeColor = new Color(255, 205, 110, 95); g.lineWidth = 8;
+      g.strokeColor = this._scratchC.set(255, 205, 110, 95); g.lineWidth = 8;
       g.moveTo(sx - ux * 66, sy - uy * 66); g.lineTo(sx, sy); g.stroke();
       // 深色描边（衬托，任何背景都清楚）
-      g.strokeColor = new Color(38, 28, 18, 255); g.lineWidth = 6;
+      g.strokeColor = this._scratchC.set(38, 28, 18, 255); g.lineWidth = 6;
       g.moveTo(bx, by); g.lineTo(sx, sy); g.stroke();
       // 亮木色杆
-      g.strokeColor = new Color(228, 192, 122, 255); g.lineWidth = 3;
+      g.strokeColor = this._scratchC.set(228, 192, 122, 255); g.lineWidth = 3;
       g.moveTo(bx, by); g.lineTo(sx, sy); g.stroke();
       // 银白箭头三角
-      g.fillColor = new Color(236, 242, 252, 255);
+      g.fillColor = this._scratchC.set(236, 242, 252, 255);
       g.moveTo(sx, sy);
       g.lineTo(sx - ux * 13 + px * 6.5, sy - uy * 13 + py * 6.5);
       g.lineTo(sx - ux * 13 - px * 6.5, sy - uy * 13 - py * 6.5);
       g.close(); g.fill();
       // 红色尾羽
-      g.strokeColor = new Color(214, 62, 50, 255); g.lineWidth = 3;
+      g.strokeColor = this._scratchC.set(214, 62, 50, 255); g.lineWidth = 3;
       g.moveTo(bx, by); g.lineTo(bx + ux * 9 + px * 7, by + uy * 9 + py * 7);
       g.moveTo(bx, by); g.lineTo(bx + ux * 9 - px * 7, by + uy * 9 - py * 7);
       g.stroke();
@@ -1749,11 +1982,11 @@ export class BattleScene extends Component {
       let sx: number, sy: number, r = 13;
       if (d.flying) { sx = d.sx; sy = d.sy; r = 11; }
       else { sx = this.sX(d.x); sy = d.y + Math.sin(d.life * 7) * 3 + 15; }
-      g.fillColor = new Color(90, 62, 16, 255); g.circle(sx, sy, r + 2); g.fill();        // 暗边
-      g.fillColor = new Color(255, 200, 55, 255); g.circle(sx, sy, r); g.fill();          // 金
-      g.strokeColor = new Color(160, 108, 20, 255); g.lineWidth = 2;                       // ¥ 竖纹
+      g.fillColor = this._scratchC.set(90, 62, 16, 255); g.circle(sx, sy, r + 2); g.fill();        // 暗边
+      g.fillColor = this._scratchC.set(255, 200, 55, 255); g.circle(sx, sy, r); g.fill();          // 金
+      g.strokeColor = this._scratchC.set(160, 108, 20, 255); g.lineWidth = 2;                       // ¥ 竖纹
       g.moveTo(sx, sy - r * 0.5); g.lineTo(sx, sy + r * 0.5); g.stroke();
-      g.fillColor = new Color(255, 240, 160, 255); g.circle(sx - r * 0.32, sy - r * 0.32, r * 0.34); g.fill(); // 高光
+      g.fillColor = this._scratchC.set(255, 240, 160, 255); g.circle(sx - r * 0.32, sy - r * 0.32, r * 0.34); g.fill(); // 高光
     }
   }
 
@@ -1968,26 +2201,26 @@ export class BattleScene extends Component {
       const p = 1 - (b.slamT || 0) / this.BOSS_SLAM_WINDUP;   // 0→1 充能
       if (this.fxReady) {
         // 贴图法阵接管视觉（updateBossFx）；这里只垫一层淡淡的危险红底，保证可读性
-        g.fillColor = new Color(90, 12, 8, Math.round(36 + 30 * p)); ell(R); g.fill();
+        g.fillColor = this._scratchC.set(90, 12, 8, Math.round(36 + 30 * p)); ell(R); g.fill();
         return;
       }
       const pulse = 0.5 + 0.5 * Math.sin(p * 26);             // 呼吸闪
       // ① 分层暗红危险底（外淡→内浓，做出"渐变/凹陷"质感）
-      g.fillColor = new Color(60, 8, 6, 60); ell(R); g.fill();
-      g.fillColor = new Color(120, 18, 12, 70); ell(R * 0.82); g.fill();
-      g.fillColor = new Color(180, 34, 22, 80); ell(R * 0.6); g.fill();
+      g.fillColor = this._scratchC.set(60, 8, 6, 60); ell(R); g.fill();
+      g.fillColor = this._scratchC.set(120, 18, 12, 70); ell(R * 0.82); g.fill();
+      g.fillColor = this._scratchC.set(180, 34, 22, 80); ell(R * 0.6); g.fill();
       // ② 内芯蓄能辉光（随充能变亮变大）
-      g.fillColor = new Color(255, 110, 60, Math.round((70 + 120 * p) * (0.7 + 0.3 * pulse)));
+      g.fillColor = this._scratchC.set(255, 110, 60, Math.round((70 + 120 * p) * (0.7 + 0.3 * pulse)));
       ell(R * (0.18 + 0.42 * p)); g.fill();
       // ③ 立体亮边：先粗暗底边，再细亮边压上 → 有厚度
-      g.strokeColor = new Color(70, 10, 8, 200); g.lineWidth = 7; ell(R); g.stroke();
-      g.strokeColor = new Color(255, 90, 66, Math.round(180 + 60 * pulse)); g.lineWidth = 3; ell(R * 0.985); g.stroke();
+      g.strokeColor = this._scratchC.set(70, 10, 8, 200); g.lineWidth = 7; ell(R); g.stroke();
+      g.strokeColor = this._scratchC.set(255, 90, 66, Math.round(180 + 60 * pulse)); g.lineWidth = 3; ell(R * 0.985); g.stroke();
       // ④ 向心瞄准环：从外向中心收拢（读秒感），越收越亮
       const rc = R * (1 - 0.86 * p);
-      g.strokeColor = new Color(255, 226, 150, Math.round(120 + 130 * p)); g.lineWidth = 3; ell(rc); g.stroke();
+      g.strokeColor = this._scratchC.set(255, 226, 150, Math.round(120 + 130 * p)); g.lineWidth = 3; ell(rc); g.stroke();
       // ⑤ 边缘警示刻度（随充能缓慢旋转）
       const N = 18, rot = p * 1.4;
-      g.strokeColor = new Color(255, 150, 90, 210); g.lineWidth = 3;
+      g.strokeColor = this._scratchC.set(255, 150, 90, 210); g.lineWidth = 3;
       for (let i = 0; i < N; i++) {
         const a = rot + i / N * Math.PI * 2;
         const r0 = R * 1.0, r1 = R * 1.09;
@@ -1999,12 +2232,12 @@ export class BattleScene extends Component {
       const p = 1 - (b.slamT || 0) / 0.45;   // 0→1 冲击扩散
       const a = 1 - p;
       // 焦痕（砸点残留暗红）
-      g.fillColor = new Color(40, 6, 4, Math.round(150 * a)); ell(R * 0.7); g.fill();
+      g.fillColor = this._scratchC.set(40, 6, 4, Math.round(150 * a)); ell(R * 0.7); g.fill();
       // 冲击环（双环，向外扩散渐隐）
-      g.strokeColor = new Color(255, 240, 205, Math.round(235 * a)); g.lineWidth = 8; ell(R * (0.45 + p * 0.95)); g.stroke();
-      g.strokeColor = new Color(255, 150, 90, Math.round(200 * a)); g.lineWidth = 4; ell(R * (0.2 + p * 1.25)); g.stroke();
+      g.strokeColor = this._scratchC.set(255, 240, 205, Math.round(235 * a)); g.lineWidth = 8; ell(R * (0.45 + p * 0.95)); g.stroke();
+      g.strokeColor = this._scratchC.set(255, 150, 90, Math.round(200 * a)); g.lineWidth = 4; ell(R * (0.2 + p * 1.25)); g.stroke();
       // 放射裂纹
-      g.strokeColor = new Color(30, 8, 6, Math.round(220 * a)); g.lineWidth = 4;
+      g.strokeColor = this._scratchC.set(30, 8, 6, Math.round(220 * a)); g.lineWidth = 4;
       const cr = R * (0.4 + p * 0.9);
       for (let i = 0; i < 8; i++) {
         const ang = i / 8 * Math.PI * 2 + 0.2;
@@ -2028,8 +2261,12 @@ export class BattleScene extends Component {
     }
   }
 
+  private readonly BLOOD_MAX = 90;        // 血滴总量上限（防暴血时几百滴一起画卡帧）
   private spawnBlood(x: number, y: number, dir: number, amount: number) {
-    const n = Math.round(amount * 4);     // 小而密
+    const n = Math.round(amount * 1.8);   // 小而密（原 ×4 → ×1.8：视觉仍够，量再少一截省 CPU）
+    // 超上限就丢最老的血滴腾位置（先进先出），保证同屏血滴总数封顶
+    const over = this.bloods.length + n - this.BLOOD_MAX;
+    if (over > 0) this.bloods.splice(0, over);
     for (let i = 0; i < n; i++) {
       const ang = Math.random() * Math.PI * 2;      // 从身体向四周放射飞溅
       const sp = 130 + Math.random() * 430;         // 喷得慢一点
@@ -2087,6 +2324,34 @@ export class BattleScene extends Component {
   }
 
   // 地面贴花：血渍暗红、雪脚印压痕（画在角色/影子之下）
+  // 地面残留缓存层：站立时最多 ~8Hz 重画；卷屏时按 6px 步进跟进（血渍/箭要跟世界坐标滚）
+  private drawGroundFx() {
+    this.groundFxT -= this.lastDt;
+    const camStep = Math.floor(this.camX / 6);
+    if (this.groundFxT > 0 && camStep === this.groundFxCam) return;
+    this.groundFxT = 0.12; this.groundFxCam = camStep;
+    const g = this.groundFxG;
+    g.clear();
+    if (this.stains.length === 0 && this.stuckArrows.length === 0 && this.snowAcc <= 0.02) return;
+    this.drawSnowGround(g);
+    this.drawStains(g);
+  }
+
+  // HUD 缓存层：血量/残影/Boss血按 1px 量化，变了才重画（平时零开销）
+  private drawHud() {
+    const p = Math.max(0, this.hero.hp / this.hero.hpMax);
+    const lag = Math.max(p, this.hpLag / this.hero.hpMax);
+    const boss = this.monsters.find(m => m.kind === 'boss' && m.state !== 'dead');
+    // 数字哈希（血量/残影 337 级 + Boss血 517 级），不拼字符串 → 每帧零分配
+    const key = (Math.round(p * 336) * 337 + Math.round(lag * 336)) * 520 + (boss ? Math.round(boss.hp / boss.hpMax * 516) : -1) + 2;
+    if (key === this.hudKey) return;
+    this.hudKey = key;
+    const g = this.hudG;
+    g.clear();
+    this.drawHeroHp(g);
+    this.drawBossHp(g);
+  }
+
   private drawStains(g: Graphics) {
     for (const s of this.stains) {
       const fade = Math.min(1, (s.max - s.life) / (s.max * 0.35));   // 末段渐隐
@@ -2200,15 +2465,13 @@ export class BattleScene extends Component {
     g.clear();
     this.drawSceneTint(g);   // 色调/夜晚压暗：在角色之下，只暗背景
     this.drawBossProps(g);   // Boss 关专属近景道具（大旗/火盆/残骸，角色之下）
-    for (const d of this.dusts) {   // 尘土（角色之下）
+    this.dotBegin();   // 圆点粒子精灵池开帧（尘土+血滴共用，帧末 dotEnd 关掉多余节点）
+    for (const d of this.dusts) {   // 尘土（精灵池粒子）
       const a = 1 - d.life / d.max;
-      g.fillColor = new Color(168, 152, 128, Math.round(120 * a));
-      g.circle(this.sX(d.x), d.y, d.r * (0.7 + 0.9 * (d.life / d.max)));
-      g.fill();
+      this.dotDraw(this.sX(d.x), d.y, d.r * (0.7 + 0.9 * (d.life / d.max)), 168, 152, 128, Math.round(120 * a));
     }
 
-    this.drawSnowGround(g);   // 地面积雪层（先画，脚印/血渍盖在雪上）
-    this.drawStains(g);       // 战场残留：血渍/脚印/插地箭（贴地，最底）
+    this.drawGroundFx();      // 地面残留缓存层：雪面/血渍/脚印/插地箭（低频重画，垫在 stage 下）
     this.drawNightLight(g);   // 夜晚：角色脚下暖光地面光斑（在角色之下）
     this.drawBacklight(g);    // 低日时段：角色背光描边（在角色之下、边缘露出）
 
@@ -2219,7 +2482,11 @@ export class BattleScene extends Component {
 
     this.drawBossWarning(g);   // Boss 重击预警红圈（画在地面、角色之下）
     this.drawDrops(g);   // 掉落物（垫在角色后）
-    const drawn = [...this.monsters].sort((a, b) => (a.state === 'dead' ? -1 : 1) - (b.state === 'dead' ? -1 : 1) || b.lane - a.lane);
+    // 绘制排序：复用同一个数组 + 常驻比较器（不再每帧展开新数组/新建闭包）
+    const drawn = this._drawnScratch;
+    drawn.length = 0;
+    for (const m of this.monsters) drawn.push(m);
+    drawn.sort(BattleScene._drawOrder);
     this.updateEnemySprites(drawn);   // 小怪 = 轻步兵精灵（Boss 单独用精灵）
     this.updateBossSprite();
     this.updateBossFx();              // Boss 法术贴图特效（法阵/冲击波）
@@ -2228,50 +2495,42 @@ export class BattleScene extends Component {
     this.updateHeroSprite(blink);
     this.drawArrows(g);  // 敌箭（在角色前）
 
-    for (const s of this.sparks) {
-      const a = 1 - s.life / s.max;
-      g.strokeColor = new Color(255, 230, 120, Math.round(255 * a));
-      g.lineWidth = 4;
-      const r = 10 + s.life * 90, sx = this.sX(s.x);
-      for (let k = 0; k < 5; k++) {
-        const ang = k * 1.257 + s.life * 8;
-        g.moveTo(sx, s.y);
-        g.lineTo(sx + Math.cos(ang) * r, s.y + Math.sin(ang) * r);
-      }
-      g.stroke();
-    }
+    // 命中火花已去掉（生成处照旧 push，但不再绘制；stepSparks 仍会清理，不会堆积）
 
-    for (const b of this.bloods) {
+    for (const b of this.bloods) {   // 血滴（精灵池粒子，同贴图合批 = 1 个 draw call）
       const a = Math.max(0, 1 - b.life / b.max);
       const cr = 150 + Math.round(b.shade * 90);
-      g.fillColor = new Color(cr, 18 + Math.round(b.shade * 22), 24, Math.round(235 * a));
-      g.circle(this.sX(b.x), b.y, b.r * (0.5 + 0.5 * a));
-      g.fill();
+      this.dotDraw(this.sX(b.x), b.y, b.r * (0.5 + 0.5 * a), cr, 18 + Math.round(b.shade * 22), 24, Math.round(235 * a));
     }
+    this.dotEnd();   // 关掉本帧没用到的池节点
 
-    // 剑气波（青白新月）
+    // 剑气波（新月贴图精灵：颜色烘进贴图，白色 tint 只控 alpha 淡出）
+    let wi = 0;
     for (const w of this.waves) {
+      const fx = this.waveFx(wi);
+      if (!fx) break;
+      wi++;
       const a = Math.max(0, 1 - w.life / w.max);
-      const cx = this.sX(w.x), cy = w.y, c = w.dir > 0 ? 0 : Math.PI;
-      g.strokeColor = new Color(160, 235, 255, Math.round(230 * a));
-      g.lineWidth = 7;
-      hArc(g, cx, cy, 36, c - 1.25, c + 1.25, 14); g.stroke();
-      g.strokeColor = new Color(230, 250, 255, Math.round(200 * a));
-      g.lineWidth = 3;
-      hArc(g, cx, cy, 24, c - 1.05, c + 1.05, 12); g.stroke();
+      fx.n.active = true;
+      fx.n.setPosition(this.sX(w.x), w.y, 0);
+      fx.n.angle = w.dir > 0 ? 0 : 180;
+      fx.n.setScale(0.85, 0.85, 1);
+      this._scratchC.set(255, 255, 255, Math.round(240 * a));
+      fx.sp.color = this._scratchC;
     }
+    for (; wi < this.wavePool.length; wi++) this.wavePool[wi].n.active = false;
 
     this.drawFlashes(g);   // 冲击白光（角色之上）
-    this.drawMotes(g);   // 氛围浮尘（在角色之上飘）
-    this.drawHeroHp(g);
-    this.drawBossHp(g);
-    for (const m of this.monsters) if (m.state !== 'dead' && m.hp < m.hpMax && m.kind !== 'boss') this.drawMonsterHp(g, m);
+    // 氛围浮尘已改为 fx-mote 贴图层（常开、随时段染色），不再逐粒画
+    this.drawHud();   // HUD 缓存层：血量/Boss血变了才重画（原每帧 ~25 图元 + ~25 new Color）
+    // 敌人头顶血条已去掉（省每帧每敌 2 个 rect + 视觉更干净）
 
     this.drawFg();       // 前景遮挡 + 统一色调（独立图层）
     this.stepGrassBits(this.lastDt, this.fgG);   // 草屑（跳劈掀飞）
     this.drawSunSide(this.fgG);   // 太阳侧入光（清晨/黄昏的镜头感）
     this.drawWeather(this.fgG);   // 天气（雨/雪/落叶/余烬/闪电）叠在最前
     this.drawSlamBolt(this.fgG);  // 跳劈落地闪电
+    this.updateSlamFx();          // 落地冲击波序列帧（贴图精灵，4 帧 0.34s 播完）
     this.drawGlow();              // Bloom 辉光（加法层，亮元素发光）
   }
 
@@ -2578,7 +2837,7 @@ export class BattleScene extends Component {
     const k = Math.min(1, dk / 0.4);               // 越黑越亮
     const pool = (sx: number, sy: number, R: number, col: number[], boost: number) => {
       for (let i = 4; i >= 1; i--) {
-        g.fillColor = new Color(col[0], col[1], col[2], Math.round(9 * (5 - i) * k * boost));
+        g.fillColor = this._scratchC.set(col[0], col[1], col[2], Math.round(9 * (5 - i) * k * boost));
         g.ellipse(sx, sy, R * (i / 4), R * (i / 4) * 0.42); g.fill();
       }
     };
@@ -2618,16 +2877,15 @@ export class BattleScene extends Component {
   // 角色背光描边(rim)：低日时段角色受光侧透出一圈暖光，把人从背景里"立"出来（画在角色之下、边缘露出）
   private drawBacklight(g: Graphics) {
     const tod = this.timeOfDay().name;
-    if (tod === '夜晚') return;   // 夜晚用月光斑
-    const strong = tod === '清晨' || tod === '黄昏';
-    const a0 = strong ? 1 : 0.4;
-    const sun = tod === '黄昏' ? -1 : tod === '清晨' ? 1 : 0.6;   // 光来向
-    const col = tod === '黄昏' ? [255, 180, 110] : tod === '清晨' ? [255, 232, 175] : [242, 240, 232];
+    // 只在清晨/黄昏画背光轮廓：正午/白天这层几乎不可见，却要给每个敌人叠圆 → 人多时白白吃填充率
+    if (tod !== '清晨' && tod !== '黄昏') return;
+    const sun = tod === '黄昏' ? -1 : 1;   // 光来向
+    const col = tod === '黄昏' ? [255, 180, 110] : [255, 232, 175];
     const gy = this.groundY;
     const glow = (sx: number, sy: number, r: number, boost: number) => {
-      for (let i = 3; i >= 1; i--) {
-        g.fillColor = new Color(col[0], col[1], col[2], Math.round(11 * (4 - i) * a0 * boost));
-        g.circle(sx, sy, r * (i / 3)); g.fill();
+      for (let i = 2; i >= 1; i--) {   // 2 层柔边（原 3 层）：单个角色圆填充数 -1/3
+        g.fillColor = this._scratchC.set(col[0], col[1], col[2], Math.round(15 * (3 - i) * boost));
+        g.circle(sx, sy, r * (i / 2)); g.fill();
       }
     };
     const h = this.hero;
@@ -2648,7 +2906,7 @@ export class BattleScene extends Component {
     const W = DESIGN_W, H = DESIGN_H, bands = 6, bw = 46;
     for (let i = 0; i < bands; i++) {
       const a = Math.round(11 * (bands - i) / bands) + 2;   // 越靠光源侧越亮
-      g.fillColor = new Color(col[0], col[1], col[2], a);
+      g.fillColor = this._scratchC.set(col[0], col[1], col[2], a);
       const x = fromLeft ? -W / 2 + i * bw : W / 2 - (i + 1) * bw;
       g.rect(x, -H / 2, bw, H); g.fill();
     }
@@ -2656,7 +2914,7 @@ export class BattleScene extends Component {
     const sx = fromLeft ? -W / 2 + 76 : W / 2 - 76;
     const br = 1 + 0.06 * Math.sin(this.animT * 0.9);
     for (let i = 3; i >= 1; i--) {
-      g.fillColor = new Color(col[0], col[1], col[2], 8 * (4 - i));
+      g.fillColor = this._scratchC.set(col[0], col[1], col[2], 8 * (4 - i));
       g.circle(sx, H / 2 - 170, (44 + i * 46) * br); g.fill();
     }
   }
@@ -2669,19 +2927,23 @@ export class BattleScene extends Component {
     const halfLen = w * c.sx * shrink;
     const cx = sx + c.ox * (halfLen - w * shrink);   // 一端锚在脚下、朝背光方向拉长
     // 外层软影（方向拉长）
-    g.fillColor = new Color(0, 0, 0, Math.min(255, Math.round(c.a * 150 * shrink * boost)));
+    this._scratchC.set(0, 0, 0, Math.min(255, Math.round(c.a * 150 * shrink * boost)));
+    g.fillColor = this._scratchC;
     g.ellipse(cx, sy - 2, halfLen, 7 * shrink); g.fill();
     // 内层接触影核（脚下小而浓 → 踩得更实）
-    g.fillColor = new Color(0, 0, 0, Math.min(255, Math.round(c.a * 235 * shrink * boost)));
+    this._scratchC.set(0, 0, 0, Math.min(255, Math.round(c.a * 235 * shrink * boost)));
+    g.fillColor = this._scratchC;
     g.ellipse(sx, sy - 2, w * 0.45 * shrink, 3.6 * shrink); g.fill();
   }
 
   // Bloom 辉光（加法混合层）：给亮元素叠柔和外发光
   private drawGlow() {
     const g = this.glowG; g.clear();
+    const sc = this._scratchC;   // 复用色对象，杀掉这层每帧几十次 new Color 的 GC
     const glow = (x: number, y: number, r: number, col: number[], inten: number) => {
       for (let i = 3; i >= 1; i--) {
-        g.fillColor = new Color(col[0], col[1], col[2], Math.round(inten * 24 * (4 - i) / 3));
+        sc.set(col[0], col[1], col[2], Math.round(inten * 24 * (4 - i) / 3));
+        g.fillColor = sc;
         g.circle(x, y, r * (i / 3)); g.fill();
       }
     };
@@ -2701,8 +2963,16 @@ export class BattleScene extends Component {
     }
     // 天气：余烬 / 闪电
     if (this.weather === '余烬') for (const p of this.wparts) glow(p.x, p.y, p.sz * 3, [255, 150, 50], 0.5 + 0.5 * Math.sin(p.ph * 3));
-    if (this.lightT > 0.02 && this.bolt.length > 1) for (const pt of this.bolt) glow(pt[0], pt[1], 26, [170, 205, 255], this.lightT * 0.8);
-    if (this.slamBoltT > 0) for (const pt of this.slamBolt) glow(pt[0], pt[1], 22, [170, 210, 255], (this.slamBoltT / 0.26) * 0.9);   // 跳劈闪电辉光
+    // 闪电辉光：沿路径画一条粗加法描边（1 次 stroke 代替几十个圆填充，省填充率）
+    const boltGlow = (pts: number[][], inten: number, col: number[]) => {
+      if (pts.length < 2) return;
+      g.strokeColor = this._scratchC.set(col[0], col[1], col[2], Math.round(Math.min(1, inten) * 70));
+      g.lineWidth = 26;
+      g.moveTo(pts[0][0], pts[0][1]); for (let i = 1; i < pts.length; i++) g.lineTo(pts[i][0], pts[i][1]);
+      g.stroke();
+    };
+    if (this.lightT > 0.02) { boltGlow(this.bolt, this.lightT * 0.8, [170, 205, 255]); for (const b of this.boltBranches) boltGlow(b, this.lightT * 0.6, [170, 205, 255]); }
+    if (this.slamBoltT > 0) boltGlow(this.slamBolt, (this.slamBoltT / 0.26) * 0.9, [170, 210, 255]);   // 跳劈闪电辉光
     // 敌人受击白闪：加法白光罩在身体上（乘法着色变不了白，加法能"打亮"精灵）
     for (const m of this.monsters) {
       if (m.state === 'dead' || m.hitT <= 0) continue;
@@ -2711,7 +2981,8 @@ export class BattleScene extends Component {
       const isBoss = m.kind === 'boss';
       const bw = isBoss ? 58 : 22 * m.scale, bh = isBoss ? 105 : 36 * m.scale, byc = isBoss ? 105 : 36 * m.scale;
       for (let i = 2; i >= 1; i--) {
-        g.fillColor = new Color(255, 255, 255, Math.round(52 * hk * (3 - i) / 2));
+        sc.set(255, 255, 255, Math.round(52 * hk * (3 - i) / 2));
+        g.fillColor = sc;
         g.ellipse(cx, cy + byc, bw * (i / 2), bh * (i / 2)); g.fill();
       }
     }
@@ -2802,6 +3073,12 @@ export class BattleScene extends Component {
   // 切换天气 + 铺满粒子
   private setWeather(type: string) {
     this.weather = type;
+    this.bgKey = '';   // 换关/换天气：强制重画一次背景（时段可能变）
+    // 天气贴图层开关：rain/snow/leaf 跟天气走，mote 常开（贴图未加载完时由加载回调再开）
+    const wk = this.weatherKind();
+    for (const r of this.rainNodes) r.n.active = !!r.sp.spriteFrame && (r.kind === 'mote' || r.kind === wk);
+    this.tintMoteLayers();   // 浮尘随时段换色
+    this.rainSplashT = 0;
     if (type === '雨') AudioMgr.inst.playAmb('rain', 0.45);   // 雨声循环
     else AudioMgr.inst.stopAmb();
     this.wparts = [];
@@ -2812,12 +3089,8 @@ export class BattleScene extends Component {
     const ry = () => gy + Math.random() * (H / 2 + 40 - gy);   // 只在地面线以上铺
     // d=景深 0远(小/慢/淡) → 1近(大/快/浓)；sp=速度比例、sc=尺寸比例
     let n = 0; let make = (): typeof this.wparts[0] => ({ x: rx(), y: ry(), vx: 0, vy: 0, ph: Math.random() * 6.28, len: 0, sz: 0, c: 0, d: 1 });
-    if (type === '雨') {
-      n = 150; make = () => { const d = Math.random(), sp = 0.55 + d * 0.65; return { x: rx(), y: ry(), vx: -430 * sp, vy: -1500 * sp, ph: 0, len: (26 + Math.random() * 18) * (0.5 + d * 0.8), sz: 0, c: 0, d }; };
-    } else if (type === '雪') {
-      n = 120; make = () => { const d = Math.random(), sp = 0.55 + d * 0.65; return { x: rx(), y: ry(), vx: -18 * sp, vy: (-95 - Math.random() * 55) * sp, ph: Math.random() * 6.28, len: 0, sz: (2 + Math.random() * 2.6) * (0.5 + d * 0.9), c: 0, d }; };
-    } else if (type === '落叶') {
-      n = 48; make = () => { const d = Math.random(), sp = 0.55 + d * 0.6; return { x: rx(), y: ry(), vx: -55 * sp, vy: (-70 - Math.random() * 45) * sp, ph: Math.random() * 6.28, len: 0, sz: (3.5 + Math.random() * 3) * (0.5 + d * 0.85), c: Math.floor(Math.random() * 3), d }; };
+    if (type === '雨' || type === '雪' || type === '落叶') {
+      n = 0;   // 雨/雪/落叶已改为平铺贴图层滚动（rainNodes），不再逐粒画 → CPU 固定成本
     } else if (type === '余烬') {
       n = 60; make = () => { const d = Math.random(); return { x: rx(), y: ry(), vx: 12, vy: 60 + Math.random() * 70, ph: Math.random() * 6.28, len: 0, sz: (1.6 + Math.random() * 2.4) * (0.6 + d * 0.7), c: 0, d }; };
     } else if (type === '雾') {
@@ -2842,15 +3115,16 @@ export class BattleScene extends Component {
       n.setScale(sc, Math.abs(sc), 1);
       const op = n.addComponent(UIOpacity);
       n.active = false;
-      AssetHub.loadSF(`grass-${kind}`, (sf) => {
-        if (!sf) return; sp.spriteFrame = sf; n.active = true;
-      });
-      this.nearGrass.push({
-        n, op, lx: i * (DESIGN_W + 260) / count + ((i * 53) % 60),
+      const rec = {
+        n, op, sp, loaded: false, lx: i * (DESIGN_W + 260) / count + ((i * 53) % 60),
         by: this.groundY + baseOff + ((i * 41) % (jit * 2)) - jit,
         ph: i * 1.31 + par * 5, ang: 0, vel: 0, par,
         fly: 0, fx: 0, fy: 0, fvx: 0, fvy: 0, spin: 0, regrow: 0, sc,
+      };
+      AssetHub.loadSF(`grass-${kind}`, (sf) => {
+        if (!sf) return; sp.spriteFrame = sf; rec.loaded = true;
       });
+      this.nearGrass.push(rec);
     }
   }
 
@@ -2860,8 +3134,13 @@ export class BattleScene extends Component {
     const span = DESIGN_W + 260;
     const heroSx = this.hero && this.hero.state !== 'dead' ? this.sX(this.hero.x) : -99999;
     const gust = 1 + 0.4 * Math.sin(this.animT * 0.6) * Math.sin(this.animT * 1.3);
+    const cullX = DESIGN_W / 2 + 80;   // 屏外剔除边界：出了这个范围就不渲染（省 draw call）
     for (const G of this.nearGrass) {
       const sx = (((G.lx - this.camX * G.par) % span) + span) % span - span / 2;
+      // 视口剔除：草加载好了才可见；出屏就关掉节点（不进渲染），回屏再开
+      const onScreen = G.loaded && Math.abs(sx) < cullX;
+      if (G.n.active !== onScreen) G.n.active = onScreen;
+      if (!onScreen) continue;
       // 被掀飞：抛物线 + 自旋 + 渐隐 → 消失，几秒后原地长回
       if (G.fly === 1) {
         G.fvy -= 1700 * dt;
@@ -2977,7 +3256,7 @@ export class BattleScene extends Component {
       if (b.y < this.groundY - 4) { this.grassBits.splice(i, 1); continue; }
       const a = 1 - b.life / b.max;
       const sx = this.sX(b.x), L = 7;
-      g.strokeColor = new Color(112, 124, 58, Math.round(235 * a)); g.lineWidth = 2.5;
+      g.strokeColor = this._scratchC.set(112, 124, 58, Math.round(235 * a)); g.lineWidth = 2.5;
       g.moveTo(sx - Math.cos(b.ang) * L, b.y - Math.sin(b.ang) * L);
       g.lineTo(sx + Math.cos(b.ang) * L, b.y + Math.sin(b.ang) * L);
       g.stroke();
@@ -3104,9 +3383,19 @@ export class BattleScene extends Component {
       const s = this.wimpacts[i]; s.life += dt;
       if (s.life >= s.max) this.wimpacts.splice(i, 1);
     }
-    if (this.weather === '晴' || this.wparts.length === 0) return;
+    if (this.weather === '晴') return;   // 注意：雨的粒子数为 0，但雨层滚动/溅花/闪电仍要跑，不能按 wparts 空来早退
     const W = DESIGN_W, H = DESIGN_H, top = H / 2 + 40, edge = W / 2 + 60, gy = this.groundY;
     const rain = this.weather === '雨', ember = this.weather === '余烬', fog = this.weather === '雾';
+    // 地面溅落：定时随机补（原来由每粒落地触发）。层滚动在 updateWeatherLayers（update 里无条件跑）
+    if (rain || this.weather === '雪' || this.weather === '落叶') {
+      this.rainSplashT -= dt;
+      if (this.rainSplashT <= 0 && this.wimpacts.length < 140) {
+        const d = 0.4 + Math.random() * 0.6, sx2 = (Math.random() - 0.5) * W;
+        if (rain) { this.rainSplashT = 0.05; this.spawnWImpact(sx2, gy, '雨', 0, 0, d); }
+        else if (this.weather === '雪') { this.rainSplashT = 0.09; this.spawnWImpact(sx2, gy, '雪', (2 + Math.random() * 2.6) * (0.5 + d * 0.9), 0, d); }
+        else { this.rainSplashT = 0.16; this.spawnWImpact(sx2, gy, '落叶', (3.5 + Math.random() * 3) * (0.5 + d * 0.85), Math.floor(Math.random() * 3), d); }
+      }
+    }
     const fedge = W / 2 + 260;
     const respawnX = () => (Math.random() - 0.5) * (W + 120);
     // 角色身体框：雨雪叶砸到人身上也溅落（余烬/雾不参与）
@@ -3142,7 +3431,8 @@ export class BattleScene extends Component {
       if (ember) {
         if (p.y > top) { p.y = gy - 10; p.x = respawnX(); }   // 余烬从地面升起、飘到顶重生
       } else {
-        const landY = gy + (1 - p.d) * 210;   // 远(d小)落山上、中景落树上、近(d大)落地上
+        // 雨：一律落到地面线（不再挂在半空的山/树上）；雪、叶保留景深落点
+        const landY = rain ? gy : gy + (1 - p.d) * 210;
         if (p.y <= landY) {
           if (this.wimpacts.length < 140) this.spawnWImpact(p.x, landY, this.weather, p.sz, p.c, p.d);
           p.y = top; p.x = respawnX();
@@ -3176,14 +3466,32 @@ export class BattleScene extends Component {
     if (this.slamBoltT <= 0 || this.slamBolt.length < 2) return;
     const a = (this.slamBoltT / 0.26) * (0.7 + 0.3 * Math.sin(this.animT * 60));   // 快速衰减 + 高频抖闪
     const path = () => { g.moveTo(this.slamBolt[0][0], this.slamBolt[0][1]); for (let i = 1; i < this.slamBolt.length; i++) g.lineTo(this.slamBolt[i][0], this.slamBolt[i][1]); };
-    g.strokeColor = new Color(150, 195, 255, Math.round(150 * a)); g.lineWidth = 12;   // 外发光
+    g.strokeColor = this._scratchC.set(150, 195, 255, Math.round(150 * a)); g.lineWidth = 12;   // 外发光
     path(); g.stroke();
-    g.strokeColor = new Color(250, 252, 255, Math.round(250 * a)); g.lineWidth = 4;    // 亮芯
+    g.strokeColor = this._scratchC.set(250, 252, 255, Math.round(250 * a)); g.lineWidth = 4;    // 亮芯
     path(); g.stroke();
     // 落点电光爆闪
     const tip = this.slamBolt[this.slamBolt.length - 1];
-    g.fillColor = new Color(210, 230, 255, Math.round(120 * a));
+    g.fillColor = this._scratchC.set(210, 230, 255, Math.round(120 * a));
     g.circle(tip[0], tip[1], 26 * (1.4 - a * 0.4)); g.fill();
+  }
+
+  // 落地冲击波：按剩余时间选帧（爆点→炸开→光环→消散），跟随落点世界坐标
+  private updateSlamFx() {
+    const n = this.slamFxN;
+    if (!n) return;
+    if (this.slamFxT <= 0 || this.slamFxFrames.length < 4) {
+      if (n.active) n.active = false;
+      return;
+    }
+    const p = 1 - this.slamFxT / this.SLAM_FX_DUR;          // 0→1 播放进度
+    const fi = Math.min(3, Math.floor(p * 4));
+    n.active = true;
+    n.setPosition(this.sX(this.slamFxX), this.groundY + 2, 0);
+    n.setScale(2.5, 1.2, 1);                                 // 横向拉宽、纵向压扁 → 光环贴地的透视感（宽约 400px）
+    this.slamFxSp!.spriteFrame = this.slamFxFrames[fi];
+    this._scratchC.set(255, 255, 255, fi === 3 ? 200 : 255); // 尾帧稍淡，收得更柔
+    this.slamFxSp!.color = this._scratchC;
   }
 
   // 跳劈落地闪电：从天顶劈到落点的锯齿电光（短暂显示后消失）
@@ -3232,18 +3540,22 @@ export class BattleScene extends Component {
     for (const s of this.wimpacts) {
       const p = s.life / s.max, a = (1 - p) * (0.5 + s.d * 0.5);   // 远(山上)溅落更淡
       if (s.t === '雨') {
-        // 水花：小水环 + 两滴上溅
-        g.strokeColor = new Color(190, 215, 245, Math.round(150 * a)); g.lineWidth = 1.6;
-        const rr = 2 + p * 9; g.ellipse(s.x, s.y, rr, rr * 0.4); g.stroke();
-        const hh = 9 * a; g.moveTo(s.x - 3, s.y); g.lineTo(s.x - 5, s.y + hh);
-        g.moveTo(s.x + 3, s.y); g.lineTo(s.x + 5, s.y + hh); g.stroke();
+        // 像素水花：左右两瓣「外扩+抬起」的方块，替代抗锯齿水环
+        const PX = this.RAIN_PX;
+        const snap = (v: number) => Math.round(v / PX) * PX;
+        const dx = snap(2 + p * 8), dy = snap(6 * (1 - p) * a);
+        g.fillColor = this._scratchC.set(170, 198, 228, Math.round(160 * a));
+        g.rect(snap(s.x - dx) - PX, snap(s.y + dy), PX, PX);
+        g.rect(snap(s.x + dx), snap(s.y + dy), PX, PX);
+        if (p < 0.5) g.rect(snap(s.x) - PX, snap(s.y), PX * 2, PX);   // 落点那一格，前半程可见
+        g.fill();
       } else if (s.t === '雪') {
-        g.fillColor = new Color(248, 250, 255, Math.round(170 * a));   // 堆雪淡出
+        g.fillColor = this._scratchC.set(248, 250, 255, Math.round(170 * a));   // 堆雪淡出
         g.circle(s.x, s.y, s.sz * (1 + p * 1.4)); g.fill();
       } else {
         const cols = [[196, 148, 52], [150, 120, 40], [120, 150, 60]];
         const c = cols[s.c] || cols[0];
-        g.fillColor = new Color(c[0], c[1], c[2], Math.round(210 * a));   // 落叶渐隐
+        g.fillColor = this._scratchC.set(c[0], c[1], c[2], Math.round(210 * a));   // 落叶渐隐
         g.circle(s.x, s.y + 2, s.sz * (0.9 - p * 0.3)); g.fill();
       }
     }
@@ -3257,44 +3569,29 @@ export class BattleScene extends Component {
     // 闪电全屏白闪 + 天空那道电
     if (this.lightT > 0) {
       const a = this.lightT;
-      g.fillColor = new Color(210, 224, 255, Math.round(120 * a * a));   // 全屏微闪（比之前淡，主体交给闪电线）
+      g.fillColor = this._scratchC.set(210, 224, 255, Math.round(120 * a * a));   // 全屏微闪（比之前淡，主体交给闪电线）
       g.rect(-W / 2, -H / 2, W, H); g.fill();
       if (this.bolt.length > 1) {
         const path = (pts: number[][]) => { g.moveTo(pts[0][0], pts[0][1]); for (let i = 1; i < pts.length; i++) g.lineTo(pts[i][0], pts[i][1]); };
-        g.strokeColor = new Color(150, 195, 255, Math.round(130 * a)); g.lineWidth = 13;  // 外发光
+        g.strokeColor = this._scratchC.set(150, 195, 255, Math.round(130 * a)); g.lineWidth = 13;  // 外发光
         path(this.bolt); for (const b of this.boltBranches) path(b); g.stroke();
-        g.strokeColor = new Color(248, 251, 255, Math.round(248 * a)); g.lineWidth = 4;   // 亮芯
+        g.strokeColor = this._scratchC.set(248, 251, 255, Math.round(248 * a)); g.lineWidth = 4;   // 亮芯
         path(this.bolt); for (const b of this.boltBranches) path(b); g.stroke();
       }
     }
-    if (this.weather === '雨') {
-      const sp = Math.hypot(-430, -1500), ux = -430 / sp, uy = -1500 / sp;
-      for (const p of this.wparts) {   // 逐条画：近的更粗更亮、远的细而淡
-        g.strokeColor = new Color(180, 205, 240, Math.round(70 + 130 * p.d)); g.lineWidth = 0.8 + p.d * 2;
-        g.moveTo(p.x, p.y); g.lineTo(p.x - ux * p.len, p.y - uy * p.len); g.stroke();
-      }
-    } else if (this.weather === '雪') {
-      for (const p of this.wparts) {
-        g.fillColor = new Color(248, 250, 255, Math.round(110 + 130 * p.d)); g.circle(p.x, p.y, p.sz); g.fill();
-      }
-    } else if (this.weather === '落叶') {
-      const cols = [[196, 148, 52], [150, 120, 40], [120, 150, 60]];   // 黄/褐/黄绿
-      for (const p of this.wparts) {
-        const c = cols[p.c]; const s = p.sz * (0.7 + 0.3 * Math.abs(Math.sin(p.ph)));   // 翻转变扁
-        g.fillColor = new Color(c[0], c[1], c[2], Math.round(130 + 110 * p.d)); g.circle(p.x, p.y, s); g.fill();
-      }
-    } else if (this.weather === '余烬') {
+    // 雨/雪/落叶的粒子已改为平铺贴图层滚动（rainNodes），这里不再逐粒画；溅落/闪电照旧
+    if (this.weather === '余烬') {
       for (const p of this.wparts) {
         const a = 0.5 + 0.5 * Math.sin(p.ph * 3);
-        g.fillColor = new Color(255, 150 + Math.round(60 * a), 40, Math.round(200 * a)); g.circle(p.x, p.y, p.sz); g.fill();
+        g.fillColor = this._scratchC.set(255, 150 + Math.round(60 * a), 40, Math.round(200 * a)); g.circle(p.x, p.y, p.sz); g.fill();
       }
     } else if (this.weather === '雾') {
       // 贴地团雾（每团两层做柔边），下方更浓
       for (const p of this.wparts) {
         const a = 0.09 + 0.05 * Math.sin(p.ph);
-        g.fillColor = new Color(234, 238, 242, Math.round(255 * a));
+        g.fillColor = this._scratchC.set(234, 238, 242, Math.round(255 * a));
         g.ellipse(p.x, p.y, p.sz, p.sz * 0.42); g.fill();
-        g.fillColor = new Color(240, 243, 246, Math.round(255 * a * 0.8));
+        g.fillColor = this._scratchC.set(240, 243, 246, Math.round(255 * a * 0.8));
         g.ellipse(p.x, p.y, p.sz * 0.6, p.sz * 0.28); g.fill();
       }
     }
@@ -3336,27 +3633,41 @@ export class BattleScene extends Component {
     }
   }
 
-  // 飘云（慢速视差，块状）
+  // 飘云（慢速视差，块状）—— 单独层 cloudG，每帧重画（云要飘）
   private drawClouds(t: Theme, PX: number) {
-    const g = this.bgG, W = DESIGN_W, gy = this.groundY;
+    const g = this.cloudG, W = DESIGN_W, gy = this.groundY;
     const k = 0;   // 乌云效果已关闭（想恢复改回 this.stormK）
+    const snap = (v: number) => Math.round(v / PX) * PX;
+    const span = W + 280;
+    const n = 5 + Math.round(k * 3);            // 雨天云更多（5 → 8）
+    // 脏标记：云位置吸附在 12px 网格，云飘过一格（约 1~2 秒）才真正重画。
+    // key 用数字哈希（格序号进制拼合），不拼字符串 → 每帧零分配
+    let key = this.TIMES.indexOf(this.timeOfDay()) + 1;
+    const bxs = this._cloudBxs;
+    bxs.length = 0;
+    for (let i = 0; i < n; i++) {
+      const speed = (5 + i * 2) * (1 + k * 0.6);   // 乌云滚得快一点
+      let bx = (-this.animT * speed - this.camX * 0.12 + i * 267) % span;
+      bx = ((bx % span) + span) % span - W / 2 - 140;
+      const sx = snap(bx);
+      bxs.push(sx);
+      key = key * 256 + (sx / PX + 128);   // sx 是 PX 的整数倍，格序号范围远小于 256
+    }
+    if (key === this.cloudKey) return;
+    this.cloudKey = key;
+    g.clear();
     // 云色：平时亮云 → 雨天渐变成深灰乌云
     const bright = this.sh(this.timeOfDay().sky, 1.16);
     const col = new Color(
       Math.round(bright.r + (86 - bright.r) * k),
       Math.round(bright.g + (92 - bright.g) * k),
       Math.round(bright.b + (106 - bright.b) * k), 255);
-    const snap = (v: number) => Math.round(v / PX) * PX;
-    const span = W + 280;
-    const n = 5 + Math.round(k * 3);            // 雨天云更多（5 → 8）
     for (let i = 0; i < n; i++) {
-      const speed = (5 + i * 2) * (1 + k * 0.6);   // 乌云滚得快一点
-      let bx = (-this.animT * speed - this.camX * 0.12 + i * 267) % span;
-      bx = ((bx % span) + span) % span - W / 2 - 140;
+      const bx = bxs[i];
       const by = gy + 420 + (i % 3) * 70 - (i >= 5 ? 36 : 0);   // 增补的云稍低，铺满天空
       const s = (0.85 + (i % 3) * 0.28) * (1 + k * 0.55);       // 乌云更大更厚
       g.fillColor = col;
-      g.rect(snap(bx), snap(by), snap(96 * s), snap(26 * s)); g.fill();
+      g.rect(bx, snap(by), snap(96 * s), snap(26 * s)); g.fill();
       g.rect(snap(bx + 22 * s), snap(by + 18 * s), snap(60 * s), snap(20 * s)); g.fill();
       g.rect(snap(bx - 16 * s), snap(by + 10 * s), snap(42 * s), snap(18 * s)); g.fill();
     }
@@ -3374,27 +3685,31 @@ export class BattleScene extends Component {
       g.rect(-DESIGN_W / 2, -DESIGN_H / 2, DESIGN_W, DESIGN_H); g.fill();
     }
 
-    // 赵云挥砍大刀气（罩在精灵前方，让"刀"更大更猛）
+    // 赵云挥砍大刀气（新月贴图精灵：随挥砍进度旋转 + 淡出，不再每帧 hArc 描边）
     const h = this.hero;
-    if (h.attacking && h.state !== 'dead') {
+    let slashOn = false;
+    if (h.attacking && h.state !== 'dead' && this.slashN && this.slashSp && this.slashSp.spriteFrame) {
       const s = h.atkType === 2 ? h.slamProg : h.swing;
       const a = 1 - Math.abs(s - 0.4) / 0.6;   // 中段最亮
       if (a > 0.05) {
-        const cx = this.sX(h.x) + h.dir * 22, cy = this.groundY + 74 + h.jumpY;
-        const R = 74, c0 = h.dir > 0 ? 0 : Math.PI;
+        const cx = this.sX(h.x) + h.dir * 34, cy = this.groundY + 74 + h.jumpY;   // 前移到刀上（原 22）
+        const c0 = h.dir > 0 ? 0 : Math.PI;
         // 顺刀方向：vert>0 朝下、<0 朝上；随挥砍进度 s 旋转，刀气跟着刀扫
         let vert: number;
         if (h.atkType === 1) vert = 0.9 - 1.9 * s;          // 上挑：由下往上扫
         else if (h.atkType === 2) vert = 0.15 + 0.5 * s;    // 跳劈前冲：斜向前下(不竖直)
         else vert = -0.9 + 1.9 * s;                          // 下劈：由上往下劈
         const ca = c0 - h.dir * vert;                        // 刀气中心角
-        const sp = 0.8;
-        g.strokeColor = new Color(150, 232, 255, Math.round(200 * a)); g.lineWidth = 13;
-        hArc(g, cx, cy, R, ca - sp, ca + sp, 16); g.stroke();
-        g.strokeColor = new Color(245, 255, 255, Math.round(235 * a)); g.lineWidth = 5;
-        hArc(g, cx, cy, R * 0.86, ca - sp * 0.82, ca + sp * 0.82, 14); g.stroke();
+        this.slashN.active = true;
+        this.slashN.setPosition(cx, cy, 0);
+        this.slashN.angle = ca * 57.29578;                   // 弧度→角度（贴图开口朝右=0°）
+        this.slashN.setScale(1.7, 1.7, 1);                   // 贴图内弧 r≈44 → 44*1.7 ≈ 原 R74
+        this._scratchC.set(255, 255, 255, Math.round(230 * a));
+        this.slashSp.color = this._scratchC;
+        slashOn = true;
       }
     }
+    if (!slashOn && this.slashN && this.slashN.active) this.slashN.active = false;
 
     // 密林落叶：几片叶子缓缓飘落（确定性动画，无状态）
     {
@@ -3464,7 +3779,7 @@ export class BattleScene extends Component {
     const gr = this.gradeColor(this.theme());
     g.fillColor = gr; g.rect(-W / 2, -H / 2, W, H); g.fill();
     const dk = this.timeOfDay().dark;
-    if (dk > 0) { g.fillColor = new Color(6, 12, 32, Math.round(dk * 255)); g.rect(-W / 2, -H / 2, W, H); g.fill(); }
+    if (dk > 0) { g.fillColor = this._scratchC.set(6, 12, 32, Math.round(dk * 255)); g.rect(-W / 2, -H / 2, W, H); g.fill(); }
   }
 
   // 地面装饰：世界坐标网格伪随机散布（近大远小、随机镜像、随镜头滚动）
@@ -3535,15 +3850,15 @@ export class BattleScene extends Component {
       if (x < -W / 2 - 60 || x > W / 2 + 60) return;
       const by = gy + rimY;   // 盆口高度
       const fl = Math.sin(t * 9 + wx) * 0.5 + 0.5, f2 = Math.sin(t * 13 + wx * 2) * 0.5 + 0.5;
-      g.fillColor = new Color(232, 116, 40, 205);
+      g.fillColor = this._scratchC.set(232, 116, 40, 205);
       g.circle(x, by + (10 + fl * 7) * s, (13 + f2 * 3) * s); g.fill();
-      g.fillColor = new Color(252, 204, 96, 225);
+      g.fillColor = this._scratchC.set(252, 204, 96, 225);
       g.circle(x, by + (8 + f2 * 6) * s, (7 + fl * 2.5) * s); g.fill();
       for (let i = 0; i < 3; i++) {                     // 火星（确定性伪随机，无状态）
         const ph = (t * (0.55 + i * 0.17) + i * 0.37 + wx * 0.001) % 1;
         const ex = x + Math.sin(t * 3 + i * 2.1 + wx) * 9 * s;
         const ey = by + 14 * s + ph * 95 * s;
-        g.fillColor = new Color(255, 170, 80, Math.round(200 * (1 - ph)));
+        g.fillColor = this._scratchC.set(255, 170, 80, Math.round(200 * (1 - ph)));
         g.circle(ex, ey, 2.2 * s * (1 - ph * 0.5)); g.fill();
       }
     };
@@ -3551,22 +3866,36 @@ export class BattleScene extends Component {
   }
 
   // 全屏色调滤镜：由时段驱动（真背景叠上它 → 清晨/黄昏/夜的氛围）
+  private readonly _gradeC = new Color(0, 0, 0, 0);   // gradeColor 缓存（按关，drawSceneTint 每帧调用）
+  private _gradeZone = -1;
   private gradeColor(t: Theme): Color {
+    if (this._gradeZone === this.zone) return this._gradeC;
+    this._gradeZone = this.zone;
     const gr = this.timeOfDay().grade;
     const rg = this.realmOf(this.zone).grade;   // 叠加界色罩（地府幽冥青 / 天庭鎏金）
-    if (rg[3] <= 0) return new Color(gr[0], gr[1], gr[2], gr[3]);
+    if (rg[3] <= 0) { this._gradeC.set(gr[0], gr[1], gr[2], gr[3]); return this._gradeC; }
     // 两层罩按 alpha 加权混合成一层，避免多画一遍全屏
     const a1 = gr[3] / 255, a2 = rg[3] / 255;
     const a = a1 + a2 * (1 - a1);
-    if (a <= 0) return new Color(0, 0, 0, 0);
+    if (a <= 0) { this._gradeC.set(0, 0, 0, 0); return this._gradeC; }
     const mix = (c1: number, c2: number) => Math.round((c1 * a1 + c2 * a2 * (1 - a1)) / a);
-    return new Color(mix(gr[0], rg[0]), mix(gr[1], rg[1]), mix(gr[2], rg[2]), Math.round(a * 255));
+    this._gradeC.set(mix(gr[0], rg[0]), mix(gr[1], rg[1]), mix(gr[2], rg[2]), Math.round(a * 255));
+    return this._gradeC;
   }
 
   private drawBg() {
-    const g = this.bgG, W = DESIGN_W, H = DESIGN_H, gy = this.groundY;
-    const t = this.theme();
+    const W = DESIGN_W, H = DESIGN_H, gy = this.groundY;
     const PX = 12;
+
+    // 云：单独层，每帧重画（云会飘）
+    this.drawClouds(this.theme(), PX);
+
+    // 天空+地面全部屏幕固定（不随镜头滚），所以只在换时段时重画一次 → 走路/战斗全程零开销。
+    // 这是本帧最肥的一块（~435 图元 + ~90 new Color），缓存后 Game Logic 从 ~20ms 降到 ~5ms。
+    const key = this.timeOfDay().name;
+    if (key === this.bgKey) return;
+    this.bgKey = key;
+    const g = this.bgG;
     g.clear();
 
     // 天空：平滑竖直渐变（地平线亮 → 天顶暗），无硬分割线
@@ -3580,9 +3909,7 @@ export class BattleScene extends Component {
       g.rect(-W / 2, gy + i * sbh, W, sbh + 1); g.fill();
     }
 
-    // 飘云
-    this.drawClouds(t, PX);
-
+    // 云已移到 cloudG 单独层（drawBg 顶部每帧画）
     // 远山改用真图层（updateFarLayer）；这里只保留天空
 
     // 地面：绿色阶梯渐变（色调贴近近景草，越往下越暗）+ 色阶交界棋盘抖动 → 像素感
@@ -3596,22 +3923,22 @@ export class BattleScene extends Component {
       const yTop = gy - i * stepH;
       g.fillColor = col;
       g.rect(-W / 2, yTop - stepH - 1, W, stepH + 1); g.fill();
-      // 抖动过渡：本阶颜色向上一行咬进上一阶（棋盘格，随镜头滚动不穿帮）
+      // 抖动过渡：棋盘格（屏幕固定，不随镜头滚 → 背景可长期缓存，走路/战斗都不重画）
       if (i > 0) {
         g.fillColor = col;
-        const shift = ((Math.floor(this.camX / PX) + i) % 2) * PX - (((this.camX % (PX * 2)) + PX * 2) % (PX * 2));
+        const shift = (i % 2) * PX;
         for (let x = -W / 2 - PX * 2; x < W / 2 + PX * 2; x += PX * 2) {
           g.rect(x + shift, yTop, PX, PX); g.fill();
         }
       }
     }
 
-    // 地面细节：撒草簇/石子/土斑/亮叶，打破大块纯色（世界坐标定点 → 随镜头滚动，近大远小）
+    // 地面细节：撒草簇/石子/土斑/亮叶，打破大块纯色（屏幕固定点位 → 不随镜头滚，背景可长期缓存）
     const rnd2 = (n: number, k: number) => { const v = Math.sin(n * 127.1 + k * 311.7) * 43758.5453; return v - Math.floor(v); };
     const gap = 46;
-    const startW = Math.floor((this.camX - W / 2 - gap) / gap) * gap;
-    for (let wxi = startW; wxi < this.camX + W / 2 + gap; wxi += gap) {
-      const sx = this.sX(wxi + rnd2(wxi, 1) * gap);
+    const startW = -W / 2 - gap;
+    for (let wxi = startW; wxi < W / 2 + gap; wxi += gap) {
+      const sx = wxi + rnd2(wxi, 1) * gap;
       const band = rnd2(wxi, 2);                       // 0..1 → 离地平线远近
       const y = gy - 14 - band * 112;   // 只撒在可见地面带（下方由暗灌木剪影接管）
       const near = 0.75 + band * 0.75;                 // 越靠屏下越大
@@ -3646,9 +3973,9 @@ export class BattleScene extends Component {
     const dkBush = new Color(13, 21, 16, 255);
     g.fillColor = dkBush;
     g.rect(-W / 2, -H / 2, W, bushTop + H / 2); g.fill();   // 底色块（灌木带主体）
-    for (let wxi = startW; wxi < this.camX + W / 2 + gap; wxi += 34) {   // 顶缘波浪丛形
+    for (let wxi = startW; wxi < W / 2 + gap; wxi += 34) {   // 顶缘波浪丛形（屏幕固定）
       const r = 14 + rnd2(wxi, 7) * 24;
-      const bx = this.sX(wxi + rnd2(wxi, 8) * 30);
+      const bx = wxi + rnd2(wxi, 8) * 30;
       g.fillColor = dkBush;
       g.circle(bx, bushTop + rnd2(wxi, 9) * 10, r); g.fill();
     }
@@ -3737,6 +4064,7 @@ export class BattleScene extends Component {
 
   // 走路换景：老场景随走路视差缓慢左移(近快远慢)，新场景从右滑入(远景先入、近景后入)
   private renderTransition() {
+    this.bgKey = '';   // 过场会占用/改写 bgG → 过场后强制重画一次背景
     const W = DESIGN_W, p = this.transP;
     const delay = [0.0, 0.10, 0.22];   // 远/中/近 入场延迟：走向新区域时远处先出现
     const set = (t: Node, sf: SpriteFrame, x: number, y: number, dispH: number) => {
@@ -3874,12 +4202,15 @@ export class BattleScene extends Component {
   private updateSkillCd() {
     const g = this.spcCdG;
     if (!g) return;
-    g.clear();
-    if (!this.hero) return;
-    const cd = this.hero.specialCd;
-    if (cd <= 0) return;
+    const cd = this.hero ? this.hero.specialCd : 0;
     const total = this.specialCdCur || this.SPECIAL_CD;
-    const f = Math.min(1, cd / total);
+    // 脏标记：冷却比例量化到 48 级，跨级才重画（冷却中 ~10Hz，就绪后零开销）
+    const step = cd <= 0 ? 0 : Math.max(1, Math.ceil(Math.min(1, cd / total) * 48));
+    if (step === this.spcCdKey) return;
+    this.spcCdKey = step;
+    g.clear();
+    if (step === 0) return;
+    const f = step / 48;
     const R = 53;
     g.fillColor = new Color(0, 0, 0, 145);
     g.moveTo(0, 0);
@@ -3913,9 +4244,10 @@ export class BattleScene extends Component {
 
   private drawMonsterHp(g: Graphics, m: Monster) {
     const w = 46 * m.scale, x = this.sX(m.x) - w / 2, y = this.groundY + m.lane + 155 * m.scale;
-    g.fillColor = new Color(0, 0, 0, 150); g.rect(x, y, w, 7); g.fill();
+    const sc = this._scratchC;
+    sc.set(0, 0, 0, 150); g.fillColor = sc; g.rect(x, y, w, 7); g.fill();
     const p = Math.max(0, m.hp / m.hpMax);
-    g.fillColor = new Color(230, 80, 80, 255); g.rect(x + 1, y + 1, (w - 2) * p, 5); g.fill();
+    sc.set(230, 80, 80, 255); g.fillColor = sc; g.rect(x + 1, y + 1, (w - 2) * p, 5); g.fill();
   }
 
   private drawStick(g: Graphics, o: Stick) {
@@ -4264,21 +4596,89 @@ export class BattleScene extends Component {
   }
 
   // 圆形技能钮：底盘投影 + 体积渐变 + 金描边 + 顶部高光 + 图标
+  // 虚拟摇杆：固定底盘 + 跟手滑块。左右滑动越过死区 → 前进/后退（手机横版常用手感）。
+  // 底盘的触控热区放大到整个左下角区域，手指落在附近就能拖，不必精准点中。
+  private setupJoystick(cx: number, cy: number) {
+    const R = 96;        // 底盘半径（滑块可移动范围）
+    const KR = 50;       // 滑块半径
+    const DEAD = 18;     // 死区：横向偏移小于它不触发移动
+    const HIT = 300;     // 触控热区边长（比底盘大很多，好按）
+
+    const a = (v: number) => Math.round(v * this.CTRL_ALPHA);   // 透明度乘进颜色（UIOpacity 对 Graphics 无效）
+
+    const base = this.child('joybase');
+    base.setPosition(cx, cy, 0);
+    base.getComponent(UITransform)!.setContentSize(HIT, HIT);
+    const bg = base.addComponent(Graphics);
+    bg.fillColor = new Color(0, 0, 0, a(120)); bg.circle(0, -4, R + 8); bg.fill();              // 投影
+    bg.fillColor = new Color(22, 18, 24, a(255)); bg.circle(0, 0, R + 6); bg.fill();            // 外环深底
+    bg.fillColor = new Color(38, 40, 54, a(255)); bg.circle(0, 0, R); bg.fill();                // 盘面
+    bg.fillColor = new Color(255, 255, 255, a(26)); bg.ellipse(0, R * 0.32, R * 0.8, R * 0.44); bg.fill();  // 顶部高光
+    bg.strokeColor = new Color(255, 214, 130, a(210)); bg.lineWidth = 3; bg.circle(0, 0, R + 6); bg.stroke();
+    bg.strokeColor = new Color(0, 0, 0, a(110)); bg.lineWidth = 2; bg.circle(0, 0, R); bg.stroke();
+    // 左右提示箭头
+    bg.fillColor = new Color(240, 245, 252, a(150));
+    for (const s of [-1, 1]) { bg.moveTo(s * (R - 20), 12); bg.lineTo(s * (R - 4), 0); bg.lineTo(s * (R - 20), -12); bg.close(); bg.fill(); }
+    // 上箭头提示（上推=跳）
+    bg.fillColor = new Color(200, 246, 205, a(170));
+    bg.moveTo(-12, R - 20); bg.lineTo(0, R - 4); bg.lineTo(12, R - 20); bg.close(); bg.fill();
+
+    // 滑块（子节点，跟手移动）
+    const knobN = new Node('joyknob'); knobN.layer = this.node.layer; knobN.parent = base;
+    knobN.addComponent(UITransform); knobN.setPosition(0, 0, 0);
+    const kg = knobN.addComponent(Graphics);
+    kg.fillColor = new Color(0, 0, 0, a(90)); kg.circle(0, -3, KR + 4); kg.fill();
+    kg.fillColor = new Color(96, 116, 158, a(255)); kg.circle(0, 0, KR); kg.fill();
+    kg.fillColor = new Color(140, 162, 205, a(255)); kg.ellipse(0, KR * 0.14, KR * 0.9, KR * 0.82); kg.fill();
+    kg.fillColor = new Color(255, 255, 255, a(46)); kg.ellipse(0, KR * 0.4, KR * 0.66, KR * 0.36); kg.fill();
+    kg.strokeColor = new Color(255, 214, 130, a(200)); kg.lineWidth = 3; kg.circle(0, 0, KR); kg.stroke();
+
+    const JUMP_UP = R * 0.55;   // 摇杆上推越过此值 → 起跳
+    let jumpArmed = true;       // 防连跳：回到中位才重新允许下一跳
+    const uiT = this.node.getComponent(UITransform)!;
+    const move = (e: EventTouch) => {
+      const loc = e.getUILocation();
+      const p = uiT.convertToNodeSpaceAR(new Vec3(loc.x, loc.y, 0));
+      let dx = p.x - cx, dy = p.y - cy;
+      const mag = Math.hypot(dx, dy);
+      if (mag > R) { dx = dx / mag * R; dy = dy / mag * R; }   // 限制在底盘内
+      knobN.setPosition(dx, dy, 0);
+      if (dx < -DEAD) { this.leftHeld = true; this.rightHeld = false; }
+      else if (dx > DEAD) { this.rightHeld = true; this.leftHeld = false; }
+      else { this.leftHeld = this.rightHeld = false; }
+      // 上推起跳：越过阈值触发一次，滑块回落到阈值一半以下再解锁
+      if (dy > JUMP_UP) { if (jumpArmed) { jumpArmed = false; this.heroJump(); } }
+      else if (dy < JUMP_UP * 0.5) { jumpArmed = true; }
+    };
+    const reset = () => {
+      this.leftHeld = this.rightHeld = false;
+      jumpArmed = true;
+      tween(knobN).to(0.08, { position: new Vec3(0, 0, 0) }, { easing: 'quadOut' }).start();
+    };
+    base.on(Node.EventType.TOUCH_START, move, this);
+    base.on(Node.EventType.TOUCH_MOVE, move, this);
+    base.on(Node.EventType.TOUCH_END, reset, this);
+    base.on(Node.EventType.TOUCH_CANCEL, reset, this);
+    return base;
+  }
+
   private makeCircleBtn(name: string, x: number, y: number, r: number, base: [number, number, number], icon: (g: Graphics, r: number) => void): Node {
     const n = this.child('cbtn-' + name);
     n.setPosition(x, y, 0);
     n.getComponent(UITransform)!.setContentSize(r * 2 + 18, r * 2 + 18);
     const g = n.addComponent(Graphics);
-    g.fillColor = new Color(0, 0, 0, 110); g.circle(0, -4, r + 8); g.fill();          // 底盘投影
-    g.fillColor = new Color(22, 18, 24, 240); g.circle(0, 0, r + 7); g.fill();        // 外环深底
-    g.fillColor = new Color(Math.round(base[0] * 0.55), Math.round(base[1] * 0.55), Math.round(base[2] * 0.55), 255);
+    const A = this.CTRL_ALPHA;   // 半透明系数(直接乘进每个颜色的 alpha，UIOpacity 对 Graphics 无效)
+    const a = (v: number) => Math.round(v * A);
+    g.fillColor = new Color(0, 0, 0, a(110)); g.circle(0, -4, r + 8); g.fill();       // 底盘投影
+    g.fillColor = new Color(22, 18, 24, a(240)); g.circle(0, 0, r + 7); g.fill();     // 外环深底
+    g.fillColor = new Color(Math.round(base[0] * 0.55), Math.round(base[1] * 0.55), Math.round(base[2] * 0.55), a(255));
     g.circle(0, 0, r); g.fill();                                                       // 主体深层
-    g.fillColor = new Color(base[0], base[1], base[2], 255);
+    g.fillColor = new Color(base[0], base[1], base[2], a(255));
     g.ellipse(0, r * 0.12, r * 0.94, r * 0.86); g.fill();                              // 主体亮层
-    g.fillColor = new Color(255, 255, 255, 34);
+    g.fillColor = new Color(255, 255, 255, a(34));
     g.ellipse(0, r * 0.42, r * 0.74, r * 0.4); g.fill();                               // 顶部高光
-    g.strokeColor = new Color(255, 214, 130, 210); g.lineWidth = 3; g.circle(0, 0, r + 7); g.stroke();   // 金描边
-    g.strokeColor = new Color(0, 0, 0, 110); g.lineWidth = 2; g.circle(0, 0, r + 1); g.stroke();
+    g.strokeColor = new Color(255, 214, 130, a(210)); g.lineWidth = 3; g.circle(0, 0, r + 7); g.stroke();   // 金描边
+    g.strokeColor = new Color(0, 0, 0, a(110)); g.lineWidth = 2; g.circle(0, 0, r + 1); g.stroke();
     icon(g, r);
     return n;
   }

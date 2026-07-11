@@ -19,6 +19,7 @@ export class AudioMgr {
   bgmVolume = 0.55;
 
   private constructor() {
+    AudioMgr.fixMiniGameAudio();
     const n = new Node('__audio__');
     director.getScene()!.addChild(n);
     director.addPersistRootNode(n);   // 跨场景常驻
@@ -30,11 +31,33 @@ export class AudioMgr {
     this.stingerSource = n.addComponent(AudioSource);
   }
 
+  /**
+   * 微信小游戏：默认 obeyMuteSwitch=true，iPhone 侧边静音拨杆一开就整个游戏没声音。
+   * 关掉它，让游戏声音不受系统静音键影响（做法与主流小游戏一致）。
+   * 非小游戏环境（浏览器/编辑器）自动跳过。
+   */
+  private static fixMiniGameAudio() {
+    const wx = (globalThis as unknown as { wx?: { setInnerAudioOption?: (o: object) => void } }).wx;
+    if (!wx || typeof wx.setInnerAudioOption !== 'function') return;
+    try {
+      wx.setInnerAudioOption({
+        obeyMuteSwitch: false,   // 系统静音键不静掉游戏
+        mixWithOther: true,      // 允许与其他 App 的音乐共存，不抢占
+        success: () => console.log('[Audio] setInnerAudioOption 生效：忽略系统静音键'),
+        fail: (e: unknown) => console.warn('[Audio] setInnerAudioOption 失败', e),
+      });
+    } catch (e) { console.warn('[Audio] setInnerAudioOption 异常', e); }
+  }
+
   private load(name: string, cb: (clip: AudioClip | null) => void) {
     if (this.cache[name]) { cb(this.cache[name]); return; }
     if (this.missing[name]) { cb(null); return; }
     resources.load('audio/' + name, AudioClip, (err, clip) => {
-      if (err || !clip) { this.missing[name] = true; cb(null); return; }
+      if (err || !clip) {
+        this.missing[name] = true;
+        console.warn(`[Audio] 加载失败 audio/${name}`, err);   // 真机调试里能看到到底缺谁
+        cb(null); return;
+      }
       this.cache[name] = clip;
       cb(clip);
     });
