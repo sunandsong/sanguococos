@@ -322,25 +322,31 @@ export class BattleScene extends Component {
   private zonePlan() { return this.ZONE_PLAN[Math.min(this.zone, this.ZONE_PLAN.length - 1)]; }
 
   // 固定布怪：怪站在路上的既定位置等你走过来，不是按关刷出来的
-  private roadSpawns: { x: number; kind: string; z: number }[] = [];   // 全路程布怪表（按 x 升序）
+  private roadSpawns: { x: number; kind: string; z: number }[] = [];   // 迎面怪布怪表（按 x 升序）
   private roadSpawnIdx = 0;   // 下一个待实例化的布怪
+  private rearSpawns: { x: number; kind: string; z: number }[] = [];   // 追兵埋伏点：路过 x 之后从身后冒出（按 x 升序）
+  private rearSpawnIdx = 0;
 
-  // 开局把整条路的怪一次性布好：每段路沿用原关卡配额/兵种，精英开场怪守段首，其余沿路铺开
+  // 开局把整条路的怪一次性布好：每段配额约 7 成站路上迎面、3 成埋伏在你身后追；总量固定，打光就没了
   private buildRoadSpawns() {
-    this.roadSpawns = [];
+    this.roadSpawns = []; this.rearSpawns = [];
     for (let z = 0; z < this.BOSS_ZONE; z++) {
       const plan = this.ZONE_PLAN[Math.min(z, this.ZONE_PLAN.length - 1)];
       const pool: string[] = [];
       for (const [k, w] of plan.pool) for (let i = 0; i < w; i++) pool.push(k);
       const start = z * this.ZONE_SPAN;
+      const rearN = Math.round(plan.count * 0.3);   // 三成当追兵
       for (let i = 0; i < plan.count; i++) {
         const kind = plan.openers && i < plan.openers.length ? plan.openers[i] : pool[Math.floor(Math.random() * pool.length)];
         const x = start + this.ZONE_SPAN * ((i + 0.35 + Math.random() * 0.4) / plan.count);
-        this.roadSpawns.push({ x, kind, z });
+        // 精英开场怪永远迎面守段首；每段最后 rearN 个改成追兵埋伏点
+        if (i >= plan.count - rearN && !(plan.openers && i < plan.openers.length)) this.rearSpawns.push({ x, kind, z });
+        else this.roadSpawns.push({ x, kind, z });
       }
     }
     this.roadSpawns.sort((a, b) => a.x - b.x);
-    this.roadSpawnIdx = 0;
+    this.rearSpawns.sort((a, b) => a.x - b.x);
+    this.roadSpawnIdx = 0; this.rearSpawnIdx = 0;
   }
 
   // 氛围浮尘粒子（柳絮/萤火/飘雪，随场景变）
@@ -350,7 +356,7 @@ export class BattleScene extends Component {
   private readonly WEATHER_PLAN = ['落叶', '晴', '雨', '晴', '雪', '晴'];   // 事件天气之间隔个晴天喘口气
   private weatherIdx = 0;
   private weatherT = 0;   // 当前天气剩余秒数，归零换下一个
-  private nextWeatherDur() { return 20 + Math.random() * 15; }
+  private nextWeatherDur() { return 12 + Math.random() * 8; }   // 每种天气 12~20 秒
 
   // ── 三界（《碧落黄泉》）：一套底图靠染色变出三种氛围，省掉 2/3 的背景美术 ──
   // bg=背景层染色  char=角色/敌人染色  grade=全屏色调罩(RGBA)
@@ -1179,7 +1185,7 @@ export class BattleScene extends Component {
   private theme(): Theme { return this.THEMES[this.zone % this.THEMES.length]; }
   // 昼夜时钟：清晨→正午→黄昏→夜晚随真实游戏时间流逝循环，与路段无关
   private dayT = 0;                  // 累计游戏时间（秒）
-  private readonly TOD_DUR = 45;     // 每个时段持续秒数（一整天 = 4 × 45s = 3 分钟）
+  private readonly TOD_DUR = 25;     // 每个时段持续秒数（一整天 = 4 × 25s ≈ 1 分半）
   private todIdx() { return Math.floor(this.dayT / this.TOD_DUR) % this.TIMES.length; }
   private timeOfDay() { return this.TIMES[this.todIdx()]; }
   private sX(wx: number): number { return wx - this.camX; }   // 世界→屏幕
@@ -1467,6 +1473,12 @@ export class BattleScene extends Component {
     while (this.roadSpawnIdx < this.roadSpawns.length && this.roadSpawns[this.roadSpawnIdx].x <= aheadX) {
       const e = this.roadSpawns[this.roadSpawnIdx++];
       this.spawnMonster(e.x, e.kind, e.z);
+    }
+    // 追兵：埋伏点被路过（滑出画面左缘）→ 从身后冒出来追；固定数量，打死就没了
+    const behindX = this.camX - DESIGN_W / 2 - 60;
+    while (this.rearSpawnIdx < this.rearSpawns.length && this.rearSpawns[this.rearSpawnIdx].x < behindX) {
+      const e = this.rearSpawns[this.rearSpawnIdx++];
+      this.spawnMonster(this.camX - DESIGN_W / 2 - 40, e.kind, e.z);
     }
   }
 
