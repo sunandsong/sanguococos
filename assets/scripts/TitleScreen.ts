@@ -124,14 +124,110 @@ export class TitleScreen extends Component {
     this.node.on(Node.EventType.TOUCH_END, () => this.dismiss(), this);
   }
 
+  // 三阶段：标题 → 绘本剧情（逐页点击）→ 出征
+  private phase = 0;   // 0=标题 1=剧情
   private dismiss() {
     if (this.leaving) return;
+    if (this.phase === 0) { this.phase = 1; this.showStory(); return; }
+    if (this.nextPage()) return;   // 还有下一页 → 翻页；翻完才出征
     this.leaving = true;
-    BattleScene.instance?.open();   // 点击标题直接出征
+    BattleScene.instance?.open();
     const op = this.node.getComponent(UIOpacity) || this.node.addComponent(UIOpacity);
     tween(op).to(0.45, { opacity: 0 })
       .call(() => this.node.destroy())
       .start();
+  }
+
+  // ── 开场剧情（单页海报 + 字幕）──
+  private readonly STORY: { res: string; text: string }[] = [
+    {
+      res: 'story-1',
+      text: '昭昭无病无灾，一夜魂散——\n她的名字，被天庭朱笔从生死簿上勾去了。\n云中不认这个命。\n「下黄泉，上碧落，我只问一句：凭什么。」',
+    },
+  ];
+  private storyIdx = -1;
+  private pageSp: Sprite | null = null;
+  private pageOp: UIOpacity | null = null;
+  private capLbl: Label | null = null;
+  private capOp: UIOpacity | null = null;
+  private pageNumLbl: Label | null = null;
+
+  /** 进入剧情模式：压暗标题层，翻第一页 */
+  private showStory() {
+    const W = DESIGN_W, H = DESIGN_H;
+    for (const name of ['logo', 'sub', 'sublines', 'start', 'ver']) {
+      const n = this.node.getChildByName(name);
+      if (!n) continue;
+      const op = n.getComponent(UIOpacity) || n.addComponent(UIOpacity);
+      tween(op).to(0.35, { opacity: 0 }).start();
+    }
+    // 黑底（图之间的换页底色，也是缺图时的兜底）
+    const dim = new Node('storydim');
+    dim.layer = this.node.layer; dim.parent = this.node;
+    dim.addComponent(UITransform);
+    const dg = dim.addComponent(Graphics);
+    dg.fillColor = new Color(6, 4, 16, 255);
+    dg.rect(-W / 2, -H / 2, W, H); dg.fill();
+    const dimOp = dim.addComponent(UIOpacity); dimOp.opacity = 0;
+    tween(dimOp).to(0.4, { opacity: 255 }).start();
+
+    // 插画页（全屏）
+    const page = new Node('storypage');
+    page.layer = this.node.layer; page.parent = this.node;
+    page.addComponent(UITransform).setContentSize(W, H);
+    this.pageSp = page.addComponent(Sprite);
+    this.pageSp.sizeMode = Sprite.SizeMode.CUSTOM;
+    this.pageOp = page.addComponent(UIOpacity); this.pageOp.opacity = 0;
+
+    // 底部字幕（描边白字，多行）
+    const cap = new Node('storycap');
+    cap.layer = this.node.layer; cap.parent = this.node;
+    cap.addComponent(UITransform);
+    this.capLbl = cap.addComponent(Label);
+    this.capLbl.fontSize = 30; this.capLbl.lineHeight = 46;
+    this.capLbl.color = new Color(244, 238, 248, 255);
+    this.capLbl.horizontalAlign = Label.HorizontalAlign.CENTER;
+    const col = cap.addComponent(LabelOutline); col.color = new Color(8, 6, 20, 255); col.width = 4;
+    cap.setPosition(0, -450, 0);   // 4 行文案沉到画面底部水面区，不压人物
+    this.capOp = cap.addComponent(UIOpacity); this.capOp.opacity = 0;
+
+    // 页码 + 翻页提示
+    const pn = new Node('storynum');
+    pn.layer = this.node.layer; pn.parent = this.node;
+    pn.addComponent(UITransform);
+    this.pageNumLbl = pn.addComponent(Label);
+    this.pageNumLbl.fontSize = 20; this.pageNumLbl.lineHeight = 24;
+    this.pageNumLbl.color = new Color(180, 160, 200, 210);
+    pn.setPosition(0, -590, 0);
+
+    this.scheduleOnce(() => this.nextPage(), 0.35);
+  }
+
+  /** 翻页；最后一页之后出征 */
+  private nextPage(): boolean {
+    this.storyIdx++;
+    if (this.storyIdx >= this.STORY.length) return false;   // 翻完了
+    const pg = this.STORY[this.storyIdx];
+    // 换图：旧图淡出 → 新图淡入（缺图时保持黑底，只上字幕）
+    if (this.pageOp) this.pageOp.opacity = 0;
+    resources.load(pg.res + '/spriteFrame', SpriteFrame, (e, sf) => {
+      if (!this.node.isValid || !this.pageSp || !this.pageOp) return;
+      if (e || !sf || this.STORY[this.storyIdx]?.res !== pg.res) return;   // 已翻走的旧回调丢弃
+      this.pageSp.spriteFrame = sf;
+      tween(this.pageOp).to(0.55, { opacity: 255 }).start();
+    });
+    // 字幕淡入
+    if (this.capLbl && this.capOp) {
+      this.capLbl.string = pg.text;
+      this.capOp.opacity = 0;
+      tween(this.capOp).delay(0.35).to(0.6, { opacity: 255 }).start();
+    }
+    if (this.pageNumLbl) {
+      this.pageNumLbl.string = this.STORY.length > 1
+        ? `${this.storyIdx + 1} / ${this.STORY.length}　·　点击继续 ▸`
+        : '点 击 启 程 ▸';
+    }
+    return true;
   }
 
   update(dt: number) {

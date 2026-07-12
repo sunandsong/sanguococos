@@ -81,6 +81,9 @@ export class BattleScene extends Component {
   private readonly JUMP_MOVE_VY = 900;    // 普通跳跃：起跳速度
   private readonly GRAVITY_MOVE = 2500;   // 普通跳跃：重力
   private readonly JUMP_LAND = 0.3;       // 普通跳跃：落地缓冲下蹲时长（长一点看得清弹性）
+  private readonly SLIDE_DUR = 0.35;      // 闪躲滑铲：滑行时长（全程无敌帧）
+  private readonly SLIDE_CD = 0.55;       // 闪躲滑铲：冷却
+  private readonly SLIDE_SPEED = 2.4;     // 闪躲滑铲：起始速度倍率（相对 heroSpeed，滑行中衰减）
   private readonly JUMP_VY = 980;         // 跳劈起跳速度
   private readonly GRAVITY_J = 2800;      // 跳劈重力
   private readonly LAND_DUR = 0.7;        // 落地深蹲→起身时长（越大起身越慢）
@@ -229,7 +232,7 @@ export class BattleScene extends Component {
 
   private groundY = 0;
 
-  private hero!: Stick & { hp: number; hpMax: number; invuln: number; atkTimer: number; attacking: boolean; hitApplied: boolean; kx: number; combo: number; specialCd: number; landT: number; preJump: number; jumping: boolean; jmpPre: number; jmpLand: number };
+  private hero!: Stick & { hp: number; hpMax: number; invuln: number; atkTimer: number; attacking: boolean; hitApplied: boolean; kx: number; combo: number; specialCd: number; landT: number; preJump: number; jumping: boolean; jmpPre: number; jmpLand: number; slideT: number; slideDir: number; slideCd: number };
   private monsters: Monster[] = [];
   private sparks: Spark[] = [];
   private bloods: Blood[] = [];
@@ -358,6 +361,7 @@ export class BattleScene extends Component {
   private slamFrames: SpriteFrame[] = [];     // 跳劈 4 帧
   private atkFrames: SpriteFrame[] = [];      // 地面攻击 4 帧
   private jumpFrames: SpriteFrame[] = [];     // 跳跃 3 帧（只用 0=蹲 和 2=屈腿；上升用站立帧+程序拉伸）
+  private slideFrames: SpriteFrame[] = [];    // 闪躲滑铲 3 帧（蹲下→低滑→起身）
   // 跳劈落地冲击波（AI 生成 4 帧序列：爆点→炸开→光环→消散）
   private readonly SLAM_FX_DUR = 0.34;
   private slamFxFrames: SpriteFrame[] = [];
@@ -410,7 +414,7 @@ export class BattleScene extends Component {
 
   /** 当前天气对应的贴图层 kind（'' = 无贴图层天气） */
   private weatherKind(): string {
-    return this.weather === '雨' ? 'rain' : this.weather === '雪' ? 'snow' : this.weather === '落叶' ? 'leaf' : '';
+    return this.weather === '雨' ? 'rain' : this.weather === '雪' ? 'snow' : this.weather === '落叶' ? 'leaf' : this.weather === '余烬' ? 'ember' : '';
   }
 
   /** 浮尘层按时段染色（夜=萤火青、黄昏=暮光橙、白天=柳絮白） */
@@ -453,6 +457,8 @@ export class BattleScene extends Component {
 
   private leftHeld = false;
   private rightHeld = false;
+  private kbTapDir = 0;    // 键盘双击方向 → 闪躲滑铲
+  private kbTapT = -9;
 
   private score = 0;
   private spawnT = 0;
@@ -787,6 +793,16 @@ export class BattleScene extends Component {
         this.jumpFrames.push(sf);
       }
     });
+    // 闪躲滑铲序列帧（AI 生成 3 帧：蹲下→低滑→起身；192×56，每帧 64×56）
+    AssetHub.loadSF('zhaoyun-slide', (base) => {
+      if (!base) return;
+      const tex = base.texture as Texture2D; tex.setFilters(Texture2D.Filter.NEAREST, Texture2D.Filter.NEAREST);
+      for (let c = 0; c < 3; c++) {
+        const sf = new SpriteFrame(); sf.texture = tex;
+        sf.rect = new Rect(c * 64, 0, 64, 56);
+        this.slideFrames.push(sf);
+      }
+    });
     // 攻击序列帧（AI 生成 4 帧：举刀预备→横斩拖影→前刺→收势；256×56，每帧 64×56）
     AssetHub.loadSF('zhaoyun-attack', (base) => {
       if (!base) return;
@@ -875,6 +891,8 @@ export class BattleScene extends Component {
         { kind: 'leaf', res: 'fx-leaf-fall-far', vx: -30, vy: -48, sway: 26, tw: 384, th: 512 },
         { kind: 'leaf', res: 'fx-leaf-fall-near', vx: -55, vy: -85, sway: 34, tw: 384, th: 512 },
         { kind: 'mote', res: 'fx-mote', vx: -7, vy: -5, sway: 18, tw: 384, th: 512 },
+        { kind: 'ember', res: 'fx-ember-far', vx: 10, vy: 55, sway: 14, tw: 384, th: 512 },    // 余烬：向上飘（光晕已烘进贴图）
+        { kind: 'ember', res: 'fx-ember-near', vx: 14, vy: 90, sway: 22, tw: 384, th: 512 },
       ];
       let ph = 0;
       for (const d of defs) {
@@ -884,7 +902,7 @@ export class BattleScene extends Component {
         const sp = n.addComponent(Sprite);
         sp.sizeMode = Sprite.SizeMode.CUSTOM;
         sp.type = Sprite.Type.TILED;
-        const op = d.kind === 'mote' ? n.addComponent(UIOpacity) : null;   // 浮尘全局呼吸
+        const op = d.kind === 'mote' || d.kind === 'ember' ? n.addComponent(UIOpacity) : null;   // 浮尘/余烬全局呼吸
         n.active = false;
         const rec = { n, sp, op, kind: d.kind, vx: d.vx, vy: d.vy, sway: d.sway, ph: (ph += 2.1), ox: 0, oy: 0, tw: d.tw, th: d.th, by: baseY };
         AssetHub.loadSF(d.res, (sf) => {
@@ -1107,6 +1125,7 @@ export class BattleScene extends Component {
       hp: 100, hpMax: 100, invuln: 0, atkTimer: 99, attacking: false, hitApplied: false, kx: 0,
       combo: 0, specialCd: 0, landT: 0, preJump: 0, scaleBoost: 1,
       jumping: false, jmpPre: 0, jmpLand: 0,
+      slideT: 0, slideDir: 1, slideCd: 0,
     };
     this.monsters = []; this.sparks = []; this.bloods = []; this.waves = [];
     this.stains = []; this.stuckArrows = []; this.stepT = 0;   // 清战场残留
@@ -1165,8 +1184,8 @@ export class BattleScene extends Component {
   private onKeyDown(e: EventKeyboard) {
     if (!this.node.active) return;
     switch (e.keyCode) {
-      case KeyCode.KEY_A: case KeyCode.ARROW_LEFT: this.leftHeld = true; break;
-      case KeyCode.KEY_D: case KeyCode.ARROW_RIGHT: this.rightHeld = true; break;
+      case KeyCode.KEY_A: case KeyCode.ARROW_LEFT: this.leftHeld = true; this.dirTap(-1); break;
+      case KeyCode.KEY_D: case KeyCode.ARROW_RIGHT: this.rightHeld = true; this.dirTap(1); break;
       case KeyCode.SPACE: case KeyCode.KEY_J: this.heroSwing(); break;
       case KeyCode.KEY_K: case KeyCode.KEY_L: this.heroSpecial(); break;
       case KeyCode.KEY_W: case KeyCode.ARROW_UP: this.heroJump(); break;
@@ -1190,12 +1209,31 @@ export class BattleScene extends Component {
     AudioMgr.inst.play('jump', 0.7);
     if (this.over || this.zoneState === 'scroll' || this.choosing) return;
     const h = this.hero;
-    if (h.jumping || h.attacking || h.preJump > 0 || h.landT > 0 || this.airborne()) return;
+    if (h.jumping || h.attacking || h.preJump > 0 || h.landT > 0 || h.slideT > 0 || this.airborne()) return;
     h.jumping = true; h.jmpPre = this.JUMP_PRE; h.jmpLand = 0;
+  }
+
+  // 双击方向检测（键盘）：0.28 秒内同方向按两次 → 滑铲
+  private dirTap(dir: number) {
+    if (dir === this.kbTapDir && this.animT - this.kbTapT < 0.28) { this.kbTapT = -9; this.heroSlide(dir); }
+    else { this.kbTapDir = dir; this.kbTapT = this.animT; }
+  }
+
+  // 闪躲滑铲：短促前冲低滑，全程无敌帧；双击方向触发
+  private heroSlide(dir: number) {
+    if (this.over || this.zoneState === 'scroll' || this.choosing) return;
+    const h = this.hero;
+    if (h.state === 'dead' || h.slideT > 0 || h.slideCd > 0 || h.jumping || h.attacking || h.preJump > 0 || this.airborne()) return;
+    h.slideT = this.SLIDE_DUR; h.slideCd = this.SLIDE_CD;
+    h.slideDir = dir; h.dir = dir;
+    h.invuln = Math.max(h.invuln, this.SLIDE_DUR + 0.05);   // 闪躲核心：滑行期免伤
+    AudioMgr.inst.play('jump', 0.4);
+    this.spawnDust(h.x - dir * 10, this.groundY + 4, 4, 140);
   }
 
   private heroSwing() {
     if (this.over || this.zoneState === 'scroll' || this.choosing) return;
+    if (this.hero.slideT > 0) return;   // 滑铲中不可出招
     if (this.airborne() && !this.hero.jumping) return;   // 跳劈滞空中不可再出招
     const h = this.hero;
     if (h.atkTimer < this.SWING_DUR + this.HERO_ATK_COOLDOWN) return;   // 还在挥
@@ -1413,7 +1451,7 @@ export class BattleScene extends Component {
   private isBossZone(): boolean { return this.zone >= this.BOSS_ZONE; }
 
   private spawnBoss(): void {
-    this.showZoneIntro('虎痴 · 许褚', new Color(255, 96, 84));
+    this.showZoneIntro('勾魂使 · 黑无常', new Color(255, 96, 84));   // 第一章Boss：勾走昭昭魂魄的地府执行者，把守黄泉入口
     AudioMgr.inst.play('roar');
     this.addShake(16); this.addHitStop(0.1);
     const W = DESIGN_W;
@@ -1471,10 +1509,24 @@ export class BattleScene extends Component {
     if (h.invuln > 0) h.invuln -= dt;
     if (h.hitT > 0) h.hitT -= dt;
     if (h.specialCd > 0) h.specialCd -= dt;
+    if (h.slideCd > 0) h.slideCd -= dt;
     if (Math.abs(h.kx) > 1) { h.x += h.kx * dt; h.kx *= 0.84; }
 
-    // 落地缓冲期间锁移动（蹲帧不滑步）
-    const mv = h.jmpLand > 0 ? 0 : (this.rightHeld ? 1 : 0) + (this.leftHeld ? -1 : 0);
+    // 闪躲滑铲：前快后慢的冲刺 + 持续扬尘（方向输入被锁，位移全在这里）
+    if (h.slideT > 0) {
+      h.slideT -= dt;
+      if (h.slideT < 0) h.slideT = 0;
+      const k = h.slideT / this.SLIDE_DUR;   // 1→0
+      h.x += h.slideDir * this.heroSpeed * (this.SLIDE_SPEED * (0.45 + 0.55 * k)) * dt;
+      this.walkDustT -= dt;
+      if (this.walkDustT <= 0) {
+        this.walkDustT = 0.05;
+        this.spawnDust(h.x - h.slideDir * 14, this.groundY + 4, 2, 90);
+      }
+    }
+
+    // 落地缓冲/滑铲期间锁移动（蹲帧不滑步）
+    const mv = h.jmpLand > 0 || h.slideT > 0 ? 0 : (this.rightHeld ? 1 : 0) + (this.leftHeld ? -1 : 0);
     if (mv !== 0) {
       h.dir = mv;
       h.x += mv * this.heroSpeed * dt;
@@ -1736,6 +1788,7 @@ export class BattleScene extends Component {
     }
     const h = this.hero;
     const active = h.state !== 'dead' && (h.attacking
+      || h.slideT > 0                                                                           // 闪躲滑铲残影
       || (h.jumping && h.jumpY > 2)                                                             // 普通跳跃腾空残影
       || (h.atkType === 2 && !h.jumping && (h.jumpY > 2 || h.landT > this.LAND_DUR * 0.6)));    // 跳劈残影
     if (!active || !this.heroNode.active) { this.ghostCd = 0; return; }
@@ -2457,8 +2510,8 @@ export class BattleScene extends Component {
     AudioMgr.inst.fadeOutBgm(1.4); AudioMgr.inst.stopAmb();   // 战斗乐淡出
     AudioMgr.inst.playStinger('win', 0.85, 0.8);   // 庆祝乐淡入
     this.bannerLbl.color = new Color(255, 224, 130);
-    this.bannerLbl.fontSize = 54; this.bannerLbl.lineHeight = 58;   // 恢复常规字号
-    this.bannerLbl.string = `通关！  击败 Boss · 得分 ${this.score}`;
+    this.bannerLbl.fontSize = 44; this.bannerLbl.lineHeight = 56;
+    this.bannerLbl.string = `勾魂使已诛 · 黄泉路开\n—— 第二章「地府」待续 ——`;
     this.banner.active = true;
     this.bannerOp.opacity = 255;
     this.restartBtn.active = true;
@@ -2678,6 +2731,12 @@ export class BattleScene extends Component {
       const idx = Math.max(0, Math.min(3, Math.floor(p * 4)));
       this.heroSp.spriteFrame = this.upperFrames[idx];
       if (this.legsFrames.length >= 2) this.legsSp.spriteFrame = this.legsFrames[0];
+    } else if (h.slideT > 0 && this.slideFrames.length >= 3) {
+      // 闪躲滑铲：进入蹲姿(0) → 低滑保持(1) → 起身收势(2)
+      fu2.setContentSize(64, 56); fu2.setAnchorPoint(0.5, 4 / 56);
+      const p = 1 - h.slideT / this.SLIDE_DUR;   // 0→1
+      const idx = p < 0.16 ? 0 : p < 0.74 ? 1 : 2;
+      this.footSp.spriteFrame = this.slideFrames[idx];
     } else if (useJumpSheet) {
       // 蓄力/落地 → 蹲帧(0)；上升到顶点 → 伸展帧(1)；过顶点稍落一点(降到78%高度) → 屈腿帧(2)
       fu2.setContentSize(64, 56); fu2.setAnchorPoint(0.5, 4 / 56);
@@ -3027,8 +3086,7 @@ export class BattleScene extends Component {
       const a = 1 - Math.abs(s - 0.4) / 0.6;
       if (a > 0.05) glow(this.sX(h.x) + h.dir * 40, this.groundY + 74 + h.jumpY, 52, [170, 240, 255], a * 1.3);
     }
-    // 天气：余烬 / 闪电
-    if (this.weather === '余烬') for (const p of this.wparts) glow(p.x, p.y, p.sz * 3, [255, 150, 50], 0.5 + 0.5 * Math.sin(p.ph * 3));
+    // 天气：闪电（余烬辉光已烘进 fx-ember 贴图，不再逐粒画加法圆）
     // 闪电辉光：沿路径画一条粗加法描边（1 次 stroke 代替几十个圆填充，省填充率）
     const boltGlow = (pts: number[][], inten: number, col: number[]) => {
       if (pts.length < 2) return;
@@ -3155,10 +3213,8 @@ export class BattleScene extends Component {
     const ry = () => gy + Math.random() * (H / 2 + 40 - gy);   // 只在地面线以上铺
     // d=景深 0远(小/慢/淡) → 1近(大/快/浓)；sp=速度比例、sc=尺寸比例
     let n = 0; let make = (): typeof this.wparts[0] => ({ x: rx(), y: ry(), vx: 0, vy: 0, ph: Math.random() * 6.28, len: 0, sz: 0, c: 0, d: 1 });
-    if (type === '雨' || type === '雪' || type === '落叶') {
-      n = 0;   // 雨/雪/落叶已改为平铺贴图层滚动（rainNodes），不再逐粒画 → CPU 固定成本
-    } else if (type === '余烬') {
-      n = 60; make = () => { const d = Math.random(); return { x: rx(), y: ry(), vx: 12, vy: 60 + Math.random() * 70, ph: Math.random() * 6.28, len: 0, sz: (1.6 + Math.random() * 2.4) * (0.6 + d * 0.7), c: 0, d }; };
+    if (type === '雨' || type === '雪' || type === '落叶' || type === '余烬') {
+      n = 0;   // 雨/雪/落叶/余烬已改为平铺贴图层滚动（rainNodes），不再逐粒画 → CPU 固定成本
     } else if (type === '雾') {
       n = 20; make = () => ({ x: (Math.random() - 0.5) * (W + 400), y: gy - 20 + Math.random() * (H * 0.42), vx: (Math.random() < 0.5 ? -1 : 1) * (8 + Math.random() * 20), vy: 0, ph: Math.random() * 6.28, len: 0, sz: 130 + Math.random() * 150, c: 0, d: 1 });
     }
@@ -3645,13 +3701,8 @@ export class BattleScene extends Component {
         path(this.bolt); for (const b of this.boltBranches) path(b); g.stroke();
       }
     }
-    // 雨/雪/落叶的粒子已改为平铺贴图层滚动（rainNodes），这里不再逐粒画；溅落/闪电照旧
-    if (this.weather === '余烬') {
-      for (const p of this.wparts) {
-        const a = 0.5 + 0.5 * Math.sin(p.ph * 3);
-        g.fillColor = this._scratchC.set(255, 150 + Math.round(60 * a), 40, Math.round(200 * a)); g.circle(p.x, p.y, p.sz); g.fill();
-      }
-    } else if (this.weather === '雾') {
+    // 雨/雪/落叶/余烬的粒子已改为平铺贴图层滚动（rainNodes），这里不再逐粒画；溅落/闪电照旧
+    if (this.weather === '雾') {
       // 贴地团雾（每团两层做柔边），下方更浓
       for (const p of this.wparts) {
         const a = 0.09 + 0.05 * Math.sin(p.ph);
@@ -3885,13 +3936,13 @@ export class BattleScene extends Component {
       if (x < -W / 2 - 80 || x > W / 2 + 80) continue;
       // 接地影：把道具从密叶里"压"出来，和背景拉开
       const w = p.node.getComponent(UITransform)!.width;
-      g.fillColor = new Color(0, 0, 0, 95);
+      g.fillColor = this._scratchC.set(0, 0, 0, 95);
       g.ellipse(x, gy + 3, w * 0.55, 5); g.fill();
       // 火盆暖光晕（随火苗闪动，照亮周围一小片）
       if (p.res === 'boss-brazier') {
         const fl = 0.85 + 0.15 * Math.sin(t * 8 + p.wx);
         for (let i = 3; i >= 1; i--) {
-          g.fillColor = new Color(255, 165, 75, Math.round(15 * (4 - i) * fl));
+          g.fillColor = this._scratchC.set(255, 165, 75, Math.round(15 * (4 - i) * fl));
           g.circle(x, gy + 26, (18 + i * 17) * fl); g.fill();
         }
       }
@@ -4726,7 +4777,17 @@ export class BattleScene extends Component {
       jumpArmed = true;
       tween(knobN).to(0.08, { position: new Vec3(0, 0, 0) }, { easing: 'quadOut' }).start();
     };
-    base.on(Node.EventType.TOUCH_START, move, this);
+    // 双击方向（点按-松开-再点按同方向）→ 闪躲滑铲
+    let tapDir = 0, tapT = -9;
+    const start = (e: EventTouch) => {
+      move(e);
+      const dir = this.leftHeld ? -1 : this.rightHeld ? 1 : 0;
+      if (dir !== 0) {
+        if (dir === tapDir && this.animT - tapT < 0.28) { tapT = -9; this.heroSlide(dir); }
+        else { tapDir = dir; tapT = this.animT; }
+      }
+    };
+    base.on(Node.EventType.TOUCH_START, start, this);
     base.on(Node.EventType.TOUCH_MOVE, move, this);
     base.on(Node.EventType.TOUCH_END, reset, this);
     base.on(Node.EventType.TOUCH_CANCEL, reset, this);
