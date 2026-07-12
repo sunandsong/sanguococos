@@ -321,11 +321,36 @@ export class BattleScene extends Component {
   ];
   private zonePlan() { return this.ZONE_PLAN[Math.min(this.zone, this.ZONE_PLAN.length - 1)]; }
 
+  // 固定布怪：怪站在路上的既定位置等你走过来，不是按关刷出来的
+  private roadSpawns: { x: number; kind: string; z: number }[] = [];   // 全路程布怪表（按 x 升序）
+  private roadSpawnIdx = 0;   // 下一个待实例化的布怪
+
+  // 开局把整条路的怪一次性布好：每段路沿用原关卡配额/兵种，精英开场怪守段首，其余沿路铺开
+  private buildRoadSpawns() {
+    this.roadSpawns = [];
+    for (let z = 0; z < this.BOSS_ZONE; z++) {
+      const plan = this.ZONE_PLAN[Math.min(z, this.ZONE_PLAN.length - 1)];
+      const pool: string[] = [];
+      for (const [k, w] of plan.pool) for (let i = 0; i < w; i++) pool.push(k);
+      const start = z * this.ZONE_SPAN;
+      for (let i = 0; i < plan.count; i++) {
+        const kind = plan.openers && i < plan.openers.length ? plan.openers[i] : pool[Math.floor(Math.random() * pool.length)];
+        const x = start + this.ZONE_SPAN * ((i + 0.35 + Math.random() * 0.4) / plan.count);
+        this.roadSpawns.push({ x, kind, z });
+      }
+    }
+    this.roadSpawns.sort((a, b) => a.x - b.x);
+    this.roadSpawnIdx = 0;
+  }
+
   // 氛围浮尘粒子（柳絮/萤火/飘雪，随场景变）
   private motes: { x: number; y: number; vx: number; vy: number; ph: number; r: number }[] = [];
 
-  // 天气系统：每关一种天气（晴/雨/雪/落叶/余烬），雨天带雷电
-  private readonly ZONE_WEATHER = ['落叶', '晴', '雨', '晴', '晴', '雨', '晴', '雪', '晴', '余烬'];
+  // 天气系统：按时间轮换（不随路段切），雨天带雷电；Boss 决战锁定余烬氛围
+  private readonly WEATHER_PLAN = ['落叶', '晴', '雨', '晴', '雪', '晴'];   // 事件天气之间隔个晴天喘口气
+  private weatherIdx = 0;
+  private weatherT = 0;   // 当前天气剩余秒数，归零换下一个
+  private nextWeatherDur() { return 20 + Math.random() * 15; }
 
   // ── 三界（《碧落黄泉》）：一套底图靠染色变出三种氛围，省掉 2/3 的背景美术 ──
   // bg=背景层染色  char=角色/敌人染色  grade=全屏色调罩(RGBA)
@@ -472,7 +497,7 @@ export class BattleScene extends Component {
   // 镜头 / 关卡
   private camX = 0;
   private zone = 0;
-  private zoneState: ZoneState = 'fight';
+  private zoneState: ZoneState = 'cleared';   // 连贯推进：全程自由行进（'fight' 锁场已不再使用）
   private targetCam = 0;
   private waveRemaining = 0;
 
@@ -1112,11 +1137,12 @@ export class BattleScene extends Component {
   private startGame() {
     AudioMgr.inst.playBgm('bgm-battle');
     // this.scheduleOnce(() => this.showZoneIntro('第 1 关', new Color(255, 224, 130)), 0.1);   // 关数大字已关闭
-    this.camX = 0; this.zone = 0; this.zoneState = 'fight'; this.targetCam = 0;
+    this.camX = 0; this.zone = 0; this.zoneState = 'cleared'; this.targetCam = 0;   // 一路连贯推进：开局即自由行进，小怪沿路刷
     this.curBiome = -1; this.transActive = false; this.applyBiome(0);   // 复位背景组到第一组
     this.preloadAllBiomes();   // 预载各组，走路换景才有得滑
-    this.setWeather(this.weatherFor(0));   // 开局天气
-    this.waveRemaining = this.waveCount(0);
+    this.weatherIdx = 0; this.weatherT = this.nextWeatherDur();
+    this.setWeather(this.WEATHER_PLAN[0]);   // 开局天气，此后按时间自然轮换
+    this.buildRoadSpawns();   // 整条路的怪固定布位
     this.hero = {
       x: -60, lane: 0, scale: 1.25, dir: 1,
       color: new Color(90, 210, 130), state: 'idle',
@@ -1142,7 +1168,7 @@ export class BattleScene extends Component {
     this.choosing = false; this.killHeal = 0; this.bossSpawned = false;
     this.attackDmg = this.baseAtk; this.heroSpeed = this.baseSpeed; this.specialCdCur = this.SPECIAL_CD;
     if (this.upgradePanel) this.upgradePanel.active = false;
-    this.score = 0; this.spawnT = 0; this.over = false;
+    this.score = 0; this.spawnT = 0; this.over = false; this.dayT = 0; this._charTintZone = -1;   // 重开回到清晨
     this.leftHeld = this.rightHeld = false;
     this.banner.active = false; this.restartBtn.active = false; this.arrow.active = false;
     this.deadOverlay.active = false;   // 撤掉阵亡灰化
@@ -1151,14 +1177,19 @@ export class BattleScene extends Component {
 
   private waveCount(zone: number): number { return this.ZONE_PLAN[Math.min(zone, this.ZONE_PLAN.length - 1)].count; }
   private theme(): Theme { return this.THEMES[this.zone % this.THEMES.length]; }
-  private timeOfDay() { return this.zonePlan().night ? this.TIMES[3] : this.TIMES[this.zone % this.TIMES.length]; }   // 夜战关强制夜晚
+  // 昼夜时钟：清晨→正午→黄昏→夜晚随真实游戏时间流逝循环，与路段无关
+  private dayT = 0;                  // 累计游戏时间（秒）
+  private readonly TOD_DUR = 45;     // 每个时段持续秒数（一整天 = 4 × 45s = 3 分钟）
+  private todIdx() { return Math.floor(this.dayT / this.TOD_DUR) % this.TIMES.length; }
+  private timeOfDay() { return this.TIMES[this.todIdx()]; }
   private sX(wx: number): number { return wx - this.camX; }   // 世界→屏幕
 
   // 角色环境光色：清晨偏暖金、黄昏偏橙（夜晚保持原色，不压暗角色）
   // 按关缓存：时段/界色都由 zone 决定，同一关内直接返回缓存对象（每帧零分配）
   private charTint(): Color {
-    if (this._charTintZone === this.zone) return this._charTintC;
-    this._charTintZone = this.zone;
+    const key = this.zone * 8 + this.todIdx();   // 缓存 key：路段 + 时段（昼夜时钟流动时也要正确失效）
+    if (this._charTintZone === key) return this._charTintC;
+    this._charTintZone = key;
     let r = 255, g = 255, b = 255;
     switch (this.timeOfDay().name) {
       case '清晨': r = 255; g = 246; b = 226; break;
@@ -1390,7 +1421,7 @@ export class BattleScene extends Component {
     this.draw();
 
     const t = this.theme();
-    this.zoneLbl.string = `第 ${this.zone + 1} 关 · ${t.name} · ${this.timeOfDay().name}`;
+    this.zoneLbl.string = `${t.name} · ${this.timeOfDay().name}`;   // 连贯推进：不再显示"第X关"
     this.scoreLbl.string = `得分 ${this.score}　❤ ${Math.max(0, Math.ceil(this.hero.hp))}`;
     this.coinLbl.string = `${this.coins}`;
     this.comboLbl.node.active = false;   // 连击提示已关闭
@@ -1421,34 +1452,25 @@ export class BattleScene extends Component {
         this.spawnT = 0;
         this.bossSpawned = false;
         this.applyBiome(this.zone);   // 落定新关背景组
-        this.setWeather(this.weatherFor(this.zone));   // 新关天气
         this.transActive = false;
         this.preloadAllBiomes();      // 确保后续关卡背景已就绪
       }
       return;
     }
-    if (this.zoneState === 'fight') {
-      if (this.isBossZone()) {
-        // Boss 关 = 终极 Boss：打死即通关胜利，游戏结束
-        if (!this.bossSpawned) { this.spawnBoss(); this.bossSpawned = true; }
-        else if (this.aliveCount() === 0) this.gameWin();
-        return;
-      }
-      this.spawnT += dt;
-      const alive = this.aliveCount();
-      const interval = this.zonePlan().interval ?? Math.max(0.5, 1.1 - this.zone * 0.05);
-      if (this.waveRemaining > 0 && this.spawnT >= interval && alive < this.maxMonsters) {
-        this.spawnT = 0;
-        this.spawnMonster();
-        this.waveRemaining--;
-      }
-      if (this.waveRemaining === 0 && alive === 0) this.zoneState = 'cleared';   // 过关音效已去掉
+    // Boss 已登场（不锁镜头，可退可逃）：勾魂使阵亡即通关，追兵不用清完
+    if (this.bossSpawned && !this.monsters.some(m => m.kind === 'boss' && m.state !== 'dead')) {
+      this.gameWin();
+      return;
     }
-    // cleared：推进判定在 stepHero 里
+    // 固定布怪：怪站在路上的既定位置，镜头快推到时才实例化（视野外零开销）；推进判定在 stepHero 里
+    const aheadX = this.camX + DESIGN_W / 2 + 60;
+    while (this.roadSpawnIdx < this.roadSpawns.length && this.roadSpawns[this.roadSpawnIdx].x <= aheadX) {
+      const e = this.roadSpawns[this.roadSpawnIdx++];
+      this.spawnMonster(e.x, e.kind, e.z);
+    }
   }
 
-  private readonly BOSS_ZONE = 9;   // 终极 Boss 在第 10 关（前 9 关小怪，之后见 Boss）
-  private isBossZone(): boolean { return this.zone >= this.BOSS_ZONE; }
+  private readonly BOSS_ZONE = 9;   // 终极 Boss 在第 10 段路的尽头（前 9 段小怪）
 
   private spawnBoss(): void {
     this.showZoneIntro('勾魂使 · 黑无常', new Color(255, 96, 84));   // 第一章Boss：勾走昭昭魂魄的地府执行者，把守黄泉入口
@@ -1471,35 +1493,22 @@ export class BattleScene extends Component {
     let n = 0; for (const m of this.monsters) if (m.state !== 'dead') n++; return n;
   }
 
-  private pickKind(): string {
-    const plan = this.zonePlan();
-    // 开场必刷（如第8/9关的双精英）：按本关已刷个数取 openers
-    const spawned = this.waveCount(this.zone) - this.waveRemaining;
-    if (plan.openers && spawned < plan.openers.length) return plan.openers[spawned];
-    const pool: string[] = [];
-    for (const [k, w] of plan.pool) for (let i = 0; i < w; i++) pool.push(k);
-    return pool[Math.floor(Math.random() * pool.length)];
-  }
-
-  private spawnMonster() {
-    const W = DESIGN_W;
-    const kind = this.pickKind();
+  private spawnMonster(x: number, kind: string, z: number) {
     const d = this.KINDS[kind];
-    const fromLeft = Math.random() < (this.zonePlan().bothSides ? 0.5 : 0.35);   // 夹击关左右对半，平时多数从右来
     const scale = (0.9 + Math.random() * 0.25) * d.scaleMul * 1.2;
-    // 步兵/弓手一刀秒；盾兵约 3 刀（耐打有"破盾"感）；精英最肉，随关卡涨
-    const hpMax = kind === 'elite' ? (220 + this.zone * 30)
-      : kind === 'shield' ? (95 + this.zone * 10)
+    // 步兵/弓手一刀秒；盾兵约 3 刀（耐打有"破盾"感）；精英最肉，随路段涨
+    const hpMax = kind === 'elite' ? (220 + z * 30)
+      : kind === 'shield' ? (95 + z * 10)
       : 34;
     this.monsters.push({
-      x: this.camX + (fromLeft ? -W / 2 - 30 : W / 2 + 30),
+      x,
       lane: (Math.random() - 0.5) * 12,   // 几乎同一条线（只留极小错位防重叠）
-      scale, dir: fromLeft ? 1 : -1,
+      scale, dir: -1,   // 守在路上，朝左迎着走来的主角
       color: new Color(d.color[0], d.color[1], d.color[2]), state: 'walk',
       phase: Math.random() * 6.28, swing: 0, deadT: 0, fallSign: 1,
       weapon: false, horns: true, hitT: 0, atkType: 0, jumpY: 0, jumpVy: 0, slamProg: 0, crouch: 0, scaleBoost: 1,
-      hp: hpMax, hpMax, atkCd: Math.random() * 0.6, vx: 0, attacking: false, struck: false,
-      kind, atk: d.dmg + this.zone, speed: d.speed, ranged: d.ranged, coin: d.coin,
+      hp: hpMax, hpMax, atkCd: 0.6 + Math.random() * 0.5, vx: 0, attacking: false, struck: false,   // 靠近先对峙一下再起手，不许贴脸就打
+      kind, atk: d.dmg + z, speed: d.speed, ranged: d.ranged, coin: d.coin,
     });
   }
 
@@ -1568,18 +1577,18 @@ export class BattleScene extends Component {
       this.camX = Math.max(0, Math.min(bound, this.camX));   // 左不出世界起点，右不越关口
       // 回走/前进时按镜头所在区域切背景组（applyBiome 同组时零开销）
       this.applyBiome(Math.max(0, Math.min(this.zone, Math.round(this.camX / this.ZONE_SPAN))));
-      // 镜头顶到关口后继续向右走 → 直接开下一关
-      if (this.camX >= bound - 0.5 && h.x > this.camX + 130) {
+      // 镜头顶到路段边界后继续向右走 → 无缝进入下一段路（Boss 段是路的尽头，不再延伸）
+      if (this.camX >= bound - 0.5 && h.x > this.camX + 130 && this.zone < this.BOSS_ZONE) {
         this.camX = bound;
         this.zone++;
-        this.zoneState = 'fight';
-        this.waveRemaining = this.waveCount(this.zone);
-        this.spawnT = 0;
-        this.bossSpawned = false;
         this.applyBiome(this.zone);
-        this.setWeather(this.weatherFor(this.zone));   // 新关天气
         this.preloadAllBiomes();
-        // 关数大字已关闭（Boss 关仍有登场演出）
+        // 走到路的尽头 → 勾魂使登场（不锁镜头：打不过可以往回跑，它会追）
+        if (this.zone >= this.BOSS_ZONE && !this.bossSpawned) {
+          this.bossSpawned = true;
+          this.spawnBoss();
+          this.setWeather('余烬');   // 决战氛围：余烬锁定（天气时钟随之暂停）
+        }
       }
     }
 
@@ -2128,7 +2137,7 @@ export class BattleScene extends Component {
         m.state = 'attack';
         if (!m.attacking && m.atkCd <= 0) { m.attacking = true; m.struck = false; m.swing = 0; m.atkCd = m.kind === 'boss' ? 1.4 : 1.0; }
         if (m.attacking) {
-          m.swing = Math.min(1, m.swing + dt * 2.6);   // 起手稍慢 → 预警感叹号看得清、来得及应对
+          m.swing = Math.min(1, m.swing + dt * 1.7);   // 抬手约 0.32 秒：后仰蓄力+感叹号，看得清、来得及应对
           if (!m.struck && m.swing >= 0.55) {
             m.struck = true;
             if (adx <= (m.kind === 'boss' ? 130 : 62)) this.hurtHero(m.atk, m.x);
@@ -2174,7 +2183,7 @@ export class BattleScene extends Component {
       this.addShake(14); this.addHitStop(0.08);
       AudioMgr.inst.play('roar');
       this.spawnHitFlash(this.sX(m.x), this.groundY + 80);
-      for (let i = 0; i < 2; i++) this.spawnMonster();   // 增援两个小兵
+      for (let i = 0; i < 2; i++) this.spawnMonster(this.camX + (i ? 1 : -1) * (DESIGN_W / 2 + 30), 'foot', this.zone);   // 增援两个小兵，左右各一夹击
     }
     const st = m.slamState || 'none';
 
@@ -2813,7 +2822,11 @@ export class BattleScene extends Component {
         e.node.active = true;
         e.sp.color = tint;
         const hk = m.hitT > 0 ? Math.min(1, m.hitT / this.HIT_DUR) : 0;
-        const lunge = m.state === 'attack' ? Math.sin(Math.min(1, m.swing) * Math.PI) * 14 : 0;   // 攻击前冲
+        // 攻击位移：抬手期微微后撤蓄力 → 挥出瞬间前扑（可读的前摇）
+        const w = Math.min(1, m.swing);
+        const lunge = m.state === 'attack'
+          ? (w < 0.55 ? -6 * (w / 0.55) : 16 * Math.sin((w - 0.55) / 0.45 * Math.PI))
+          : 0;
         e.node.setPosition(this.sX(m.x) + m.dir * lunge, this.groundY + m.lane + m.jumpY, 0);
         // 选帧：走路循环 / 攻击定帧 / 待机（按兵种取各自帧库，缺帧回退轻步兵）
         let f = 0;
@@ -2827,7 +2840,8 @@ export class BattleScene extends Component {
         e.node.setScale(m.dir >= 0 ? -S : S, S, 1);   // 精灵默认朝左 → 朝右翻转
         // 挨揍后仰 / 死亡倒地 / 攻击前倾
         let ang = m.dir * 30 * hk, op = 255;
-        if (m.state === 'attack') ang = -m.dir * 12 * Math.sin(Math.min(1, m.swing) * Math.PI);
+        // 抬手后仰蓄力 → 挥出前倾劈下
+        if (m.state === 'attack') ang = w < 0.55 ? m.dir * 16 * (w / 0.55) : -m.dir * 14 * Math.sin((w - 0.55) / 0.45 * Math.PI);
         if (m.state === 'dead') { ang = (m.dir >= 0 ? 1 : -1) * Math.min(85, m.deadT * 160); op = Math.max(0, Math.round(255 * (1 - m.deadT / 1.3))); }
         e.node.angle = ang;
         e.op.opacity = op;
@@ -3190,9 +3204,6 @@ export class BattleScene extends Component {
   }
 
   // ---------- 天气 ----------
-  private weatherFor(zone: number): string {
-    return this.ZONE_WEATHER[Math.min(zone, this.ZONE_WEATHER.length - 1)];
-  }
 
   // 切换天气 + 铺满粒子
   private setWeather(type: string) {
@@ -3494,6 +3505,21 @@ export class BattleScene extends Component {
   }
 
   private stepWeather(dt: number) {
+    // 昼夜时钟：时段随真实时间流逝（时段切换瞬间浮尘层换色；背景/角色色调的缓存 key 含时段，自动失效重画）
+    if (!this.over) {
+      const prevTod = this.todIdx();
+      this.dayT += dt;
+      if (this.todIdx() !== prevTod) this.tintMoteLayers();
+    }
+    // 天气时钟：按时间自然轮换，与路段无关（Boss 登场后锁定余烬，不轮换）
+    if (!this.over && !this.bossSpawned) {
+      this.weatherT -= dt;
+      if (this.weatherT <= 0) {
+        this.weatherT = this.nextWeatherDur();
+        this.weatherIdx = (this.weatherIdx + 1) % this.WEATHER_PLAN.length;
+        this.setWeather(this.WEATHER_PLAN[this.weatherIdx]);
+      }
+    }
     // 地面积雪：下雪时约 22 秒堆满，换天气后约 5 秒消融
     if (this.weather === '雪') this.snowAcc = Math.min(1, this.snowAcc + dt / 22);
     else if (this.snowAcc > 0) this.snowAcc = Math.max(0, this.snowAcc - dt / 5);
