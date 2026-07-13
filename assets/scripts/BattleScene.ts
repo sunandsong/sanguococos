@@ -141,7 +141,9 @@ export class BattleScene extends Component {
   // Boss 精灵（许褚）
   private readonly BOSS_ROW = 1;
   private readonly BOSS_SCALE = 3.4;
-  private bossFrames: SpriteFrame[] = [];
+  private bossFrames: SpriteFrame[] = [];      // 牛头走路 8 帧
+  private bossAtkFrames: SpriteFrame[] = [];   // 牛头挥锤 4 帧
+  private bossSlamFrames: SpriteFrame[] = [];  // 牛头重砸 4 帧
   private bossNode!: Node;
   private bossHeadNode!: Node;
   private bossSp!: Sprite;
@@ -256,6 +258,7 @@ export class BattleScene extends Component {
   private bossGhosts: { node: Node; sp: Sprite; op: UIOpacity }[] = [];   // Boss 冲刺残影池
   private ghostIdx = 0;
   private ghostT = 0;
+  private bossStepT = 0;   // Boss 脚步节拍(扬尘/微震)
   private decorFrames: SpriteFrame[] = [];   // 地面装饰贴图（找到几张用几张）
   private decorPool: { node: Node; sp: Sprite }[] = [];
   private coins = 0;
@@ -733,36 +736,49 @@ export class BattleScene extends Component {
     // Boss 精灵（许褚，大刀上劈）：在角色层，默认隐藏
     for (let i = 0; i < 6; i++) {   // Boss 冲刺残影池（先建=画在 Boss 身后）
       const n = this.child('bossghost' + i);
-      const u2 = n.getComponent(UITransform)!; u2.setContentSize(64, 64); u2.setAnchorPoint(0.5, 0.156);
+      const u2 = n.getComponent(UITransform)!; u2.setContentSize(76, 68); u2.setAnchorPoint(0.5, 10 / 68);
       const sp = n.addComponent(Sprite); sp.sizeMode = Sprite.SizeMode.CUSTOM;
       const op = n.addComponent(UIOpacity);
       n.active = false;
       this.bossGhosts.push({ node: n, sp, op });
     }
     this.bossNode = this.child('boss');
-    this.bossNode.getComponent(UITransform)!.setContentSize(64, 64);
-    this.bossNode.getComponent(UITransform)!.setAnchorPoint(0.5, 0.156);   // 锚点在脚（帧底上方10px）→ 对齐地平线
+    this.bossNode.getComponent(UITransform)!.setContentSize(76, 68);
+    this.bossNode.getComponent(UITransform)!.setAnchorPoint(0.5, 10 / 68);   // 锚点在脚（帧底上方逻辑10px）→ 对齐地平线
     this.bossSp = this.bossNode.addComponent(Sprite);
     this.bossSp.sizeMode = Sprite.SizeMode.CUSTOM;
     this.bossOp = this.bossNode.addComponent(UIOpacity);
     this.bossNode.active = false;
-    AssetHub.loadSF('enemy-xuchu', (base) => {
-      if (!base) { console.warn('许褚贴图加载失败'); return; }
+    // 牛头 Boss(2×高清):走路 8 帧(用户自制,152×136/帧) + 挥锤 4 帧(192×168) + 重砸 4 帧(192×192)
+    AssetHub.loadSF('boss-niutou', (base) => {
+      if (!base) { console.warn('牛头贴图加载失败'); return; }
+      const tex = base.texture as Texture2D;
+      tex.setFilters(Texture2D.Filter.NEAREST, Texture2D.Filter.NEAREST);
+      for (let c = 0; c < 8; c++) {
+        const sf = new SpriteFrame(); sf.texture = tex;
+        sf.rect = new Rect(c * 152, 0, 152, 136);
+        this.bossFrames.push(sf);
+      }
+    });
+    AssetHub.loadSF('boss-niutou-attack', (base) => {
+      if (!base) return;
       const tex = base.texture as Texture2D;
       tex.setFilters(Texture2D.Filter.NEAREST, Texture2D.Filter.NEAREST);
       for (let c = 0; c < 4; c++) {
         const sf = new SpriteFrame(); sf.texture = tex;
-        sf.rect = new Rect(c * 64, this.BOSS_ROW * 64, 64, 64);
-        this.bossFrames.push(sf);
+        sf.rect = new Rect(c * 192, 0, 192, 168);
+        this.bossAtkFrames.push(sf);
       }
-      // 切头做子节点 → 挨揍时单独放大
-      const hSf = new SpriteFrame(); hSf.texture = tex;
-      hSf.rect = new Rect(3 * 64 + 18, this.BOSS_ROW * 64 + 10, 27, 20);   // 待机帧内头部
-      this.bossHeadNode = new Node('bosshead');
-      this.bossHeadNode.layer = this.node.layer; this.bossHeadNode.parent = this.bossNode;
-      const bhu = this.bossHeadNode.addComponent(UITransform); bhu.setContentSize(27, 20); bhu.setAnchorPoint(0.5, 0.5);
-      const bhsp = this.bossHeadNode.addComponent(Sprite); bhsp.sizeMode = Sprite.SizeMode.CUSTOM; bhsp.spriteFrame = hSf;
-      this.bossHeadNode.setPosition(-1, 34, 0);
+    });
+    AssetHub.loadSF('boss-niutou-slam', (base) => {
+      if (!base) return;
+      const tex = base.texture as Texture2D;
+      tex.setFilters(Texture2D.Filter.NEAREST, Texture2D.Filter.NEAREST);
+      for (let c = 0; c < 4; c++) {
+        const sf = new SpriteFrame(); sf.texture = tex;
+        sf.rect = new Rect(c * 192, 0, 192, 192);
+        this.bossSlamFrames.push(sf);
+      }
     });
 
     // 攻击残影池：结构镜像主角(全身/上半身/腿)，建在主角之前=渲染在身后
@@ -1175,6 +1191,10 @@ export class BattleScene extends Component {
     this.attackDmg = this.baseAtk; this.heroSpeed = this.baseSpeed; this.specialCdCur = this.SPECIAL_CD;
     if (this.upgradePanel) this.upgradePanel.active = false;
     this.score = 0; this.spawnT = 0; this.over = false; this.dayT = 0; this._charTintZone = -1;   // 重开回到清晨
+    // ⚠️临时预览:开局即出牛头(看完效果删掉这三行,Boss 回到第10段路尽头)
+    this.bossSpawned = true;
+    this.spawnBoss();
+    this.setWeather('余烬');
     this.leftHeld = this.rightHeld = false;
     this.banner.active = false; this.restartBtn.active = false; this.arrow.active = false;
     this.deadOverlay.active = false;   // 撤掉阵亡灰化
@@ -1485,7 +1505,7 @@ export class BattleScene extends Component {
   private readonly BOSS_ZONE = 9;   // 终极 Boss 在第 10 段路的尽头（前 9 段小怪）
 
   private spawnBoss(): void {
-    this.showZoneIntro('勾魂使 · 黑无常', new Color(255, 96, 84));   // 第一章Boss：勾走昭昭魂魄的地府执行者，把守黄泉入口
+    this.showZoneIntro('鬼门关 · 牛头', new Color(255, 96, 84));   // Boss:地府门神牛头,把守黄泉入口
     AudioMgr.inst.play('roar');
     this.addShake(16); this.addHitStop(0.1);
     const W = DESIGN_W;
@@ -1496,7 +1516,7 @@ export class BattleScene extends Component {
       phase: 0, swing: 0, deadT: 0, fallSign: 1,
       weapon: false, horns: true, hitT: 0, atkType: 0, jumpY: 0, jumpVy: 0, slamProg: 0, crouch: 0, scaleBoost: 1,
       hp, hpMax: hp, atkCd: 1.2, vx: 0, attacking: false, struck: false,
-      kind: 'boss', atk: 18 + this.zone * 2, speed: 58, ranged: false, coin: 20,
+      kind: 'boss', atk: 18 + this.zone * 2, speed: 105, ranged: false, coin: 20,
       slamState: 'none', slamT: 0, slamCd: this.BOSS_SLAM_CD * 0.6, slamX: 0,
     });
   }
@@ -2256,6 +2276,13 @@ export class BattleScene extends Component {
       }
     } else {
       m.state = 'walk'; m.phase += dt * 8; m.x += m.dir * m.speed * dt; m.swing = 0; m.attacking = false;
+      // 铁塔迈步:脚下扬尘,走近了地面还会微微发震(贴画感克星之三)
+      this.bossStepT -= dt;
+      if (this.bossStepT <= 0) {
+        this.bossStepT = 0.42;
+        this.spawnDust(m.x - m.dir * 20, this.groundY + 4, 3, 130);
+        if (Math.abs(h.x - m.x) < 420) this.addShake(3);
+      }
     }
   }
 
@@ -2591,7 +2618,7 @@ export class BattleScene extends Component {
     // 阴影垫底
     const h = this.hero;
     if (h.state !== 'dead') this.drawShadow(g, h.x, h.lane, 14, h.jumpY);   // 主角影子（步战赵云，窄）
-    for (const m of this.monsters) if (m.state !== 'dead' && m.kind !== 'boss') this.drawShadow(g, m.x, m.lane, 14 * m.scale, m.jumpY);
+    for (const m of this.monsters) if (m.state !== 'dead') this.drawShadow(g, m.x, m.lane, (m.kind === 'boss' ? 68 : 14) * m.scale, m.jumpY, m.kind === 'boss' ? 2.6 : 1);   // Boss 影更宽更厚,不然像贴画
 
     this.drawBossWarning(g);   // Boss 重击预警红圈（画在地面、角色之下）
     this.drawDrops(g);   // 掉落物（垫在角色后）
@@ -2867,18 +2894,33 @@ export class BattleScene extends Component {
     const b = this.monsters.find(m => m.kind === 'boss');
     if (!b) { this.bossNode.active = false; return; }
     this.bossNode.active = true;
-    // 蓄力重击：先鼓力上抬(锚定)，砸下瞬间下沉 → 强化打击感
-    let lift = 0, popX = 0;
-    if (b.slamState === 'windup') { const p = 1 - (b.slamT || 0) / this.BOSS_SLAM_WINDUP; lift = 26 * p; popX = 1 + 0.12 * p; }
-    else if (b.slamState === 'strike') { const p = 1 - (b.slamT || 0) / 0.45; lift = -8 * (1 - p); popX = 1; }
-    this.bossNode.setPosition(this.sX(b.x), this.groundY + b.lane + b.jumpY + lift, 0);
+    // 蓄力重击：高举/砸地姿势都画在帧里，程序只留蓄力时的微微鼓胀(锚点在脚，放大不离地)
+    let popX = 0;
+    if (b.slamState === 'windup') { const p = 1 - (b.slamT || 0) / this.BOSS_SLAM_WINDUP; popX = 1 + 0.08 * p; }
+    // 走路重量感:重心随步伐起伏(贴画感克星之二)
+    const bob = b.state === 'walk' && (b.slamState || 'none') === 'none' ? Math.abs(Math.sin(b.phase * 0.6)) * 3 : 0;
+    this.bossNode.setPosition(this.sX(b.x), this.groundY + b.lane + b.jumpY + bob, 0);
 
     const hk = b.hitT > 0 ? Math.min(1, b.hitT / this.HIT_DUR) : 0;
-    let f = 3;   // 待机/收招
-    if (b.slamState === 'windup') f = 0;          // 举刀蓄力
-    else if (b.slamState === 'strike') f = 3;     // 劈下
-    else if (b.state === 'attack') f = Math.max(0, Math.min(3, Math.floor(b.swing * 4)));   // 举刀→劈下
-    this.bossSp.spriteFrame = this.bossFrames[f];
+    // 选表选帧：重砸 → slam 表(后拉→高举→砸地→拄锤)；普攻 → 挥锤表(拖锤→扛肩→高举→收势)；其余走路 8 帧循环
+    let frames = this.bossFrames, cw = 76, ch = 68, f = 0;
+    if (b.slamState === 'windup' && this.bossSlamFrames.length >= 4) {
+      frames = this.bossSlamFrames; cw = 96; ch = 96;
+      const p = 1 - (b.slamT || 0) / this.BOSS_SLAM_WINDUP;
+      f = p < 0.45 ? 0 : 1;                          // 后拉蓄力 → 高举顶点
+    } else if (b.slamState === 'strike' && this.bossSlamFrames.length >= 4) {
+      frames = this.bossSlamFrames; cw = 96; ch = 96;
+      const p = 1 - (b.slamT || 0) / 0.45;
+      f = p < 0.55 ? 2 : 3;                          // 砸地溅尘 → 拄锤收势
+    } else if (b.state === 'attack' && this.bossAtkFrames.length >= 4) {
+      frames = this.bossAtkFrames; cw = 96; ch = 84;
+      f = Math.max(0, Math.min(3, Math.floor(b.swing * 4)));   // 拖锤→扛肩→高举→收势
+    } else if (b.state === 'walk') {
+      f = Math.floor(b.phase * 1.2) % 8;             // 走路 8 帧循环
+    }
+    const bui = this.bossNode.getComponent(UITransform)!;
+    if (bui.height !== ch || bui.width !== cw) { bui.setContentSize(cw, ch); bui.setAnchorPoint(0.5, 10 / ch); }   // 各表格子不同,脚线都在底上逻辑10px
+    this.bossSp.spriteFrame = frames[f];
     this.bossSp.color = b.raged ? new Color(255, 118, 105, 255) : this.charTint();   // 狂暴泛红 > 时段环境光色
 
     const S = this.BOSS_SCALE * (1 + 0.06 * hk) * (popX || 1);   // 精灵默认朝左：朝右翻转
@@ -3070,21 +3112,21 @@ export class BattleScene extends Component {
     }
   }
 
-  private drawShadow(g: Graphics, wx: number, lane: number, w: number, jumpY: number) {
+  private drawShadow(g: Graphics, wx: number, lane: number, w: number, jumpY: number, hf = 1) {
     const sx = this.sX(wx), sy = this.groundY + lane;
     const shrink = 1 - Math.min(0.72, Math.max(0, jumpY) / 200);   // 跳得越高影子缩得越明显
     const c = this.shadowCfg();
     const boost = 1 + (this.weather === '雨' ? this.lightT * 0.9 : 0);   // 闪电瞬间影子变浓
     const halfLen = w * c.sx * shrink;
-    const cx = sx + c.ox * (halfLen - w * shrink);   // 一端锚在脚下、朝背光方向拉长
-    // 外层软影（方向拉长）
+    const cx = hf > 1 ? sx : sx + c.ox * (halfLen - w * shrink);   // 普通角色朝背光方向拉长;大体型(hf>1)完全居中在脚下
+    // 外层软影（方向拉长）；hf=厚度系数(大体型角色的影子要更"厚"才压得住)
     this._scratchC.set(0, 0, 0, Math.min(255, Math.round(c.a * 150 * shrink * boost)));
     g.fillColor = this._scratchC;
-    g.ellipse(cx, sy - 2, halfLen, 7 * shrink); g.fill();
+    g.ellipse(cx, sy - 2, halfLen, 7 * hf * shrink); g.fill();
     // 内层接触影核（脚下小而浓 → 踩得更实）
     this._scratchC.set(0, 0, 0, Math.min(255, Math.round(c.a * 235 * shrink * boost)));
     g.fillColor = this._scratchC;
-    g.ellipse(sx, sy - 2, w * 0.45 * shrink, 3.6 * shrink); g.fill();
+    g.ellipse(sx, sy - 2, w * 0.45 * shrink, 3.6 * hf * shrink); g.fill();
   }
 
   // Bloom 辉光（加法混合层）：给亮元素叠柔和外发光
