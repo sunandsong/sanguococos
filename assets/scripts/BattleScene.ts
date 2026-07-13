@@ -1191,10 +1191,6 @@ export class BattleScene extends Component {
     this.attackDmg = this.baseAtk; this.heroSpeed = this.baseSpeed; this.specialCdCur = this.SPECIAL_CD;
     if (this.upgradePanel) this.upgradePanel.active = false;
     this.score = 0; this.spawnT = 0; this.over = false; this.dayT = 0; this._charTintZone = -1;   // 重开回到清晨
-    // ⚠️临时预览:开局即出牛头(看完效果删掉这三行,Boss 回到第10段路尽头)
-    this.bossSpawned = true;
-    this.spawnBoss();
-    this.setWeather('余烬');
     this.leftHeld = this.rightHeld = false;
     this.banner.active = false; this.restartBtn.active = false; this.arrow.active = false;
     this.deadOverlay.active = false;   // 撤掉阵亡灰化
