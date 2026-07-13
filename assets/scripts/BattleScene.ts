@@ -2618,7 +2618,7 @@ export class BattleScene extends Component {
     // 阴影垫底
     const h = this.hero;
     if (h.state !== 'dead') this.drawShadow(g, h.x, h.lane, 14, h.jumpY);   // 主角影子（步战赵云，窄）
-    for (const m of this.monsters) if (m.state !== 'dead') this.drawShadow(g, m.x, m.lane, (m.kind === 'boss' ? 68 : 14) * m.scale, m.jumpY, m.kind === 'boss' ? 2.6 : 1);   // Boss 影更宽更厚,不然像贴画
+    for (const m of this.monsters) if (m.state !== 'dead') this.drawShadow(g, m.x, m.lane, (m.kind === 'boss' ? 68 : 14) * m.scale, m.jumpY, m.kind === 'boss' ? 2.6 : 1);   // Boss 影更宽更厚,不然像贴画(和 BOSS_SCALE 同比)
 
     this.drawBossWarning(g);   // Boss 重击预警红圈（画在地面、角色之下）
     this.drawDrops(g);   // 掉落物（垫在角色后）
@@ -3119,12 +3119,13 @@ export class BattleScene extends Component {
     const boost = 1 + (this.weather === '雨' ? this.lightT * 0.9 : 0);   // 闪电瞬间影子变浓
     const halfLen = w * c.sx * shrink;
     const cx = hf > 1 ? sx : sx + c.ox * (halfLen - w * shrink);   // 普通角色朝背光方向拉长;大体型(hf>1)完全居中在脚下
-    // 外层软影（方向拉长）；hf=厚度系数(大体型角色的影子要更"厚"才压得住)
-    this._scratchC.set(0, 0, 0, Math.min(255, Math.round(c.a * 150 * shrink * boost)));
+    // 外层软影（方向拉长）；hf=厚度系数(大体型角色的影子要更"厚"更浓才压得住)
+    const dk = hf > 1 ? 1.35 : 1;   // 大体型影子加深
+    this._scratchC.set(0, 0, 0, Math.min(255, Math.round(c.a * 150 * dk * shrink * boost)));
     g.fillColor = this._scratchC;
     g.ellipse(cx, sy - 2, halfLen, 7 * hf * shrink); g.fill();
     // 内层接触影核（脚下小而浓 → 踩得更实）
-    this._scratchC.set(0, 0, 0, Math.min(255, Math.round(c.a * 235 * shrink * boost)));
+    this._scratchC.set(0, 0, 0, Math.min(255, Math.round(c.a * 235 * dk * shrink * boost)));
     g.fillColor = this._scratchC;
     g.ellipse(sx, sy - 2, w * 0.45 * shrink, 3.6 * hf * shrink); g.fill();
   }
