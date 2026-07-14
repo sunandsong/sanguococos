@@ -1,9 +1,10 @@
 import {
   _decorator, Component, Node, Graphics, Label, Color, UITransform,
-  input, Input, EventKeyboard, KeyCode, Layers, Sprite, SpriteFrame, Texture2D, Rect, Vec3, tween, EventTouch,
+  input, Input, EventKeyboard, KeyCode, Layers, Sprite, SpriteFrame, Texture2D, Vec3, tween, EventTouch,
 } from 'cc';
 import { DESIGN_W as W, DESIGN_H as H } from './Constants';
 import { AssetHub } from './AssetHub';
+import { HeroRig, HeroMode } from './HeroRig';
 
 const { ccclass } = _decorator;
 
@@ -23,7 +24,6 @@ export class Chapter2Well extends Component {
   private g!: Graphics;
   private depthLabel!: Label;
   private readonly CTRL_ALPHA = 0.5;
-  private readonly HERO_ROW = 1;
 
   // demo→Cocos 缩放（按宽度铺满井筒；demo 宽 460、高 760）
   private readonly SCALE = W / 460;
@@ -34,8 +34,14 @@ export class Chapter2Well extends Component {
   private wallRoot!: Node; private decorRoot!: Node; private wallNodes: Node[] = []; private wallAR = 1.8;
   private mouthNode: Node | null = null; private mouthAR = 1.4;
   private ledgeNode: Node | null = null; private ledgeAR = 0.6;
-  private heroNode!: Node; private heroSp!: Sprite;
-  private footFrames: SpriteFrame[] = []; private jumpFrames: SpriteFrame[] = []; private walkPh = 0;
+  private hero!: HeroRig; private walkPh = 0;
+  private atkTimer = 0; private atkDur = 0.42; private readonly ATK_DUR = 0.42;   // 一刀时长
+  private atkType = 0; private comboT = 0; private readonly COMBO_WINDOW = 0.5;    // 三段连击
+  private specialCd = 0; private readonly SPECIAL_CD = 1.0;                        // 剑气冷却
+  private fxCre: SpriteFrame | null = null;                                         // 新月贴图（刀气/剑气）
+  private fxLayer!: Node; private slashN: Node | null = null; private slashSp: Sprite | null = null;
+  private wavePool: { n: Node; sp: Sprite }[] = [];
+  private waves: { x: number; y: number; dir: number; life: number; max: number }[] = [];
 
   // 世界参数（缩短落差：落一下就见水见台；潜水段仍深）
   private readonly SURFACE = 900;
@@ -73,7 +79,13 @@ export class Chapter2Well extends Component {
     gn.addComponent(UITransform);
     this.g = gn.addComponent(Graphics);
 
-    this.buildHero();
+    this.hero = new HeroRig(this.node);
+    // 特效层（刀气/剑气新月），排在角色之上
+    this.fxLayer = new Node('c2-fx'); this.fxLayer.layer = Layers.Enum.UI_2D; this.fxLayer.parent = this.node; this.fxLayer.addComponent(UITransform);
+    this.slashN = new Node('c2-slash'); this.slashN.layer = Layers.Enum.UI_2D; this.slashN.parent = this.fxLayer;
+    this.slashN.addComponent(UITransform).setContentSize(128, 128);
+    this.slashSp = this.slashN.addComponent(Sprite); this.slashSp.sizeMode = Sprite.SizeMode.CUSTOM; this.slashN.active = false;
+    AssetHub.loadSF('fx-crescent', (sf) => { if (!sf) return; this.fxCre = sf; if (this.slashSp) this.slashSp.spriteFrame = sf; });
 
     const ln = new Node('c2-depth'); ln.layer = Layers.Enum.UI_2D; ln.parent = this.node;
     ln.addComponent(UITransform);
@@ -146,38 +158,15 @@ export class Chapter2Well extends Component {
     this.ledgeNode.setPosition(this.SX(cx), this.SY(cy), 0);
   }
 
-  // ── 角色（第一章步战赵云）──
-  private buildHero() {
-    this.heroNode = new Node('c2-hero'); this.heroNode.layer = Layers.Enum.UI_2D; this.heroNode.parent = this.node;
-    const ut = this.heroNode.addComponent(UITransform); ut.setContentSize(40, 44); ut.setAnchorPoint(0.5, 0);
-    this.heroSp = this.heroNode.addComponent(Sprite); this.heroSp.sizeMode = Sprite.SizeMode.CUSTOM;
-    AssetHub.loadSF('zhaoyun-foot', (base) => {
-      if (!base) return; const tex = base.texture as Texture2D; tex.setFilters(Texture2D.Filter.NEAREST, Texture2D.Filter.NEAREST);
-      for (let c = 0; c < 4; c++) { const sf = new SpriteFrame(); sf.texture = tex; sf.rect = new Rect(c * 48 + 4, this.HERO_ROW * 64 + 13, 40, 44); this.footFrames.push(sf); }
-      if (!this.heroSp.spriteFrame) this.heroSp.spriteFrame = this.footFrames[0];
-    });
-    AssetHub.loadSF('zhaoyun-jump', (base) => {
-      if (!base) return; const tex = base.texture as Texture2D; tex.setFilters(Texture2D.Filter.NEAREST, Texture2D.Filter.NEAREST);
-      for (let c = 0; c < 3; c++) { const sf = new SpriteFrame(); sf.texture = tex; sf.rect = new Rect(c * 64, 0, 64, 56); this.jumpFrames.push(sf); }
-    });
-  }
-  private readonly SPRITE_SCALE = 1.8;   // 与第一章一致：64px 帧放大倍数
+  // ── 角色（第一章步战赵云套件 HeroRig）──
   private updateHero() {
-    const S = this.SPRITE_SCALE;
-    const ut = this.heroNode.getComponent(UITransform)!;
-    this.heroNode.setPosition(this.SX(this.px), this.SY(this.py), 0);
-    this.heroNode.setScale(this.dir * S, S, 1);
-    const inAir = !this.onG && !this.inWater;
-    if (inAir && this.jumpFrames.length >= 3) {
-      // 第一章跳跃帧：64×56、锚点(0.5,4/56)；上升伸展(1) / 下落屈腿(2)
-      ut.setContentSize(64, 56); ut.setAnchorPoint(0.5, 4 / 56);
-      this.heroSp.spriteFrame = this.jumpFrames[this.pvy < 0 ? 1 : 2];
-    } else if (this.footFrames.length) {
-      // 走路/待机/水里：40×44、锚点(0.5,0)
-      ut.setContentSize(40, 44); ut.setAnchorPoint(0.5, 0);
-      if (this.inWater) this.heroSp.spriteFrame = this.footFrames[0];
-      else { const moving = this.keys.left || this.keys.right; this.heroSp.spriteFrame = this.footFrames[moving ? (Math.floor(this.walkPh) % 4) : 0]; }
-    }
+    // 选姿势：攻击 > 空中 > 走 > 待机；水里保持待机直立
+    let mode: HeroMode; let p = 0;
+    if (this.atkTimer > 0) { mode = this.atkType === 2 ? 'slam' : 'attack'; p = 1 - this.atkTimer / this.atkDur; }
+    else if (!this.onG && !this.inWater) mode = 'air';
+    else if (!this.inWater && (this.keys.left || this.keys.right)) mode = 'walk';
+    else mode = 'idle';
+    this.hero.apply(this.SX(this.px), this.SY(this.py), this.dir, mode, p, this.pvy, this.walkPh);
   }
 
   // ── 按钮（第一章摇杆 + 攻击/剑气）──
@@ -215,7 +204,7 @@ export class Chapter2Well extends Component {
       g.strokeColor = new Color(160, 238, 255, ia(255)); g.lineWidth = 6; g.circle(-r * 0.1, 0, r * 0.42); g.stroke();
       g.strokeColor = new Color(240, 252, 255, ia(255)); g.lineWidth = 3; g.circle(-r * 0.1, 0, r * 0.26); g.stroke();
     });
-    this.tap(spc, () => { });
+    this.tap(spc, () => this.heroSpecial());
   }
   private setupJoystick(cx: number, cy: number) {
     const R = 96, KR = 50, DEAD = 18, HIT = 300; const A = this.CTRL_ALPHA; const a = (v: number) => Math.round(v * A);
@@ -259,7 +248,8 @@ export class Chapter2Well extends Component {
       case KeyCode.KEY_D: case KeyCode.ARROW_RIGHT: this.keys.right = true; break;
       case KeyCode.SPACE: case KeyCode.KEY_W: case KeyCode.ARROW_UP: this.keys.up = true; this.jump(); break;
       case KeyCode.KEY_S: case KeyCode.ARROW_DOWN: this.keys.down = true; break;
-      case KeyCode.KEY_J: case KeyCode.KEY_K: this.attack(); break;
+      case KeyCode.KEY_J: this.attack(); break;
+      case KeyCode.KEY_K: case KeyCode.KEY_L: this.heroSpecial(); break;
     }
   }
   private onKeyUp(e: EventKeyboard) {
@@ -275,12 +265,65 @@ export class Chapter2Well extends Component {
     else if (this.inWater) { this.pvy = Math.min(this.pvy, -580); }
   }
   private attack() {
-    if (!this.onG) return; this.dir = -1;
-    if (!this.rockBroken && this.px < 110) {
+    if (this.atkTimer > this.atkDur * 0.45) return;                     // 挥到后半段才能接下一刀（连点更顺）
+    this.atkType = this.comboT > 0 ? (this.atkType + 1) % 3 : 0;        // 连招窗口内 → 下一段
+    const dur = this.atkType === 2 ? this.ATK_DUR * 1.5 : this.ATK_DUR; // 跳劈稍长
+    this.atkTimer = dur; this.atkDur = dur; this.comboT = dur + this.COMBO_WINDOW;
+    // 在石台上、面朝石堆范围内 → 砸石开洞
+    if (this.onG && !this.rockBroken && this.px < 110) {
+      this.dir = -1;                          // 面朝石堆
       this.rockHP--; this.shake = 8;
       for (let i = 0; i < 9; i++) this.debris.push({ x: 38 + Math.random() * 26, y: this.LEDGE_Y - 14 - Math.random() * 72, vx: 40 + Math.random() * 150, vy: -60 - Math.random() * 170, life: 0.7, r: 2 + Math.random() * 3.2 });
       if (this.rockHP <= 0) this.rockBroken = true;
     }
+  }
+  private heroSpecial() {
+    if (this.specialCd > 0) return;
+    this.specialCd = this.SPECIAL_CD;
+    const dir = this.dir;
+    this.waves.push({ x: this.px + dir * 20, y: this.py - 30, dir, life: 0, max: 1.25 });   // 剑气波
+    if (this.atkTimer <= 0) { this.atkType = 0; this.atkDur = this.ATK_DUR; this.atkTimer = this.ATK_DUR; }  // 顺带摆挥砍姿势
+  }
+  private waveFx(i: number): { n: Node; sp: Sprite } | null {
+    if (this.wavePool[i]) return this.wavePool[i];
+    if (!this.fxCre || i >= 4) return null;
+    const n = new Node('c2-wave' + i); n.layer = Layers.Enum.UI_2D; n.parent = this.fxLayer;
+    n.addComponent(UITransform).setContentSize(128, 128);
+    const sp = n.addComponent(Sprite); sp.sizeMode = Sprite.SizeMode.CUSTOM; sp.spriteFrame = this.fxCre;
+    const rec = { n, sp }; this.wavePool.push(rec); return rec;
+  }
+  private updateFx(dt: number) {
+    if (this.specialCd > 0) this.specialCd -= dt;
+    if (this.comboT > 0) this.comboT -= dt;
+    // 挥砍刀气弧（新月随挥砍进度旋转 + 中段最亮）
+    let slashOn = false;
+    if (this.atkTimer > 0 && this.slashN && this.slashSp && this.slashSp.spriteFrame) {
+      const s = 1 - this.atkTimer / this.atkDur, a = 1 - Math.abs(s - 0.4) / 0.6;
+      if (a > 0.05) {
+        const cx = this.SX(this.px) + this.dir * 34, cy = this.SY(this.py) + 74;
+        const c0 = this.dir > 0 ? 0 : Math.PI;
+        const vert = this.atkType === 1 ? 0.9 - 1.9 * s : this.atkType === 2 ? 0.15 + 0.5 * s : -0.9 + 1.9 * s;
+        this.slashN.active = true;
+        this.slashN.setPosition(cx, cy, 0);
+        this.slashN.angle = (c0 - this.dir * vert) * 57.29578;
+        this.slashN.setScale(1.7, 1.7, 1);
+        this.slashSp.color = new Color(255, 245, 210, Math.round(230 * a));
+        slashOn = true;
+      }
+    }
+    if (!slashOn && this.slashN && this.slashN.active) this.slashN.active = false;
+    // 剑气波：飞行 + 淡出
+    const speed = 600;
+    for (let i = this.waves.length - 1; i >= 0; i--) { const w = this.waves[i]; w.life += dt; w.x += w.dir * speed * dt; if (w.life >= w.max) this.waves.splice(i, 1); }
+    let wi = 0;
+    for (const w of this.waves) {
+      const fx = this.waveFx(wi); if (!fx) break; wi++;
+      const a = Math.max(0, 1 - w.life / w.max);
+      fx.n.active = true; fx.n.setPosition(this.SX(w.x), this.SY(w.y), 0);
+      fx.n.angle = w.dir > 0 ? 0 : 180; fx.n.setScale(0.95, 0.95, 1);
+      fx.sp.color = new Color(150, 235, 255, Math.round(240 * a));   // 青白剑气
+    }
+    for (; wi < this.wavePool.length; wi++) this.wavePool[wi].n.active = false;
   }
   private splash(x: number, y: number) {
     this.ripples.push({ x, y, r: 6, life: 1 }); this.ripples.push({ x, y, r: 2, life: 1.3 });
@@ -296,6 +339,7 @@ export class Chapter2Well extends Component {
     this.camY = -140; this.joyY = 0; this.keys.up = this.keys.down = false;
     this.bubbles = []; this.silt = []; this.ripples = []; this.debris = [];
     this.rockHP = 5; this.rockBroken = false;
+    this.atkTimer = 0; this.atkType = 0; this.comboT = 0; this.specialCd = 0; this.waves = [];
     for (let i = 0; i < 60; i++) this.silt.push({ x: Math.random() * this.DW, wy: this.SURFACE + Math.random() * this.DH * 3, ph: Math.random() * 6.28, sp: 0.2 + Math.random() * 0.5, r: 0.5 + Math.random() * 1.6 });
   }
 
@@ -305,6 +349,7 @@ export class Chapter2Well extends Component {
   }
   private tick(dt: number) {
     dt = Math.min(dt, 0.05); this.t += dt; this.ph += dt * 6;
+    if (this.atkTimer > 0) this.atkTimer -= dt;
     const mvx = (this.keys.right ? 1 : 0) - (this.keys.left ? 1 : 0);
     if (mvx) { this.dir = mvx; this.walkPh += dt * 10; }
 
@@ -353,6 +398,7 @@ export class Chapter2Well extends Component {
     for (const d of this.debris) { d.life -= dt; d.x += d.vx * dt; d.y += d.vy * dt; d.vy += 700 * dt; } this.debris = this.debris.filter(d => d.life > 0);
     if (this.py >= this.GOAL) this.reset();
 
+    this.updateFx(dt);
     this.updateWall(); this.updateMouth(); this.updateLedge(); this.updateHero(); this.redraw();
   }
 
@@ -456,8 +502,8 @@ export class Chapter2Well extends Component {
       g.circle(this.SX(d.x), dy, Math.max(1, d.r * S)); g.fill();
     }
 
-    // 角色兜底标记
-    if (!this.footFrames.length) {
+    // 角色兜底标记（套件未就绪时）
+    if (!this.hero || !this.hero.ready) {
       g.fillColor = new Color(240, 220, 120, 255); g.circle(this.SX(this.px), this.SY(this.py) + 20, 16); g.fill();
     }
 
