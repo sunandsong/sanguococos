@@ -21,7 +21,11 @@ import { BottomMenu } from './BottomMenu';
 import { BattleScene } from './BattleScene';
 import { HUD } from './HUD';
 import { TitleScreen } from './TitleScreen';
+import { Chapter2Well } from './Chapter2Well';
 const { ccclass } = _decorator;
+
+// 临时开关：true = 直接进第二章「投井下降」关（第一阶段原型）；false = 正常第一章
+const START_CHAPTER2 = true;
 
 // 一键引导：挂在 Canvas 下的一个空节点上，运行时自动创建并配好整页。
 // 这样你只需建「一个」节点，省去手动逐个创建。
@@ -76,6 +80,11 @@ export class GameRoot extends Component {
     // const hud = make('HUD', HUD);
     // hud.getComponent(UITransform)!.setAnchorPoint(0, 1);
     // hud.setPosition(-DESIGN_W / 2 + 16, DESIGN_H / 2 - 12, 0);
+
+    if (START_CHAPTER2) {
+      make('Chapter2', Chapter2Well);  // 第二章「投井下降」关（第一阶段程序化原型）
+      return;
+    }
 
     make('Battle', BattleScene);       // 战场（标题点击后开启）
     make('Title', TitleScreen);        // 标题画面《我要上天》（开机最上层，点击进入）

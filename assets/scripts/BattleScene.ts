@@ -3,6 +3,7 @@ import {
   UITransform, UIOpacity, Color, tween, Vec3, Vec2, EventTouch,
   input, Input, EventKeyboard, KeyCode,
   Sprite, SpriteFrame, Texture2D, Rect, resources, gfx, director, profiler, Mask,
+  PhysicsSystem2D, RigidBody2D, BoxCollider2D, ERigidBody2DType, Size,
 } from 'cc';
 import { DESIGN_W, DESIGN_H } from './Constants';
 import { AudioMgr } from './AudioMgr';
@@ -37,6 +38,7 @@ interface Monster extends Stick {
   speed: number;        // 移动速度
   ranged: boolean;      // 远程（弓手）
   coin: number;         // 死亡掉金币数
+  corpse?: boolean;     // 已转为物理尸块（停止常规渲染，立即回收）
   slamState?: 'none' | 'windup' | 'strike';   // Boss 预警重击阶段
   slamT?: number;       // 当前阶段剩余时间
   slamCd?: number;      // 距下次重击
@@ -156,6 +158,10 @@ export class BattleScene extends Component {
   private groundFxCam = -99999;
   private spcCdKey = -1;          // 技能冷却环脏标记（48 级量化）
   private ambiOdd = false;        // 氛围动画隔帧开关（叶/草/小动物 30Hz 更新）
+  // Box2D 死亡尸块物理
+  private physOK = false;
+  private physLayer: Node | null = null;
+  private corpses: { n: Node; op: UIOpacity; life: number; settled: boolean; restT: number; lieDir: number }[] = [];
   private stageG!: Graphics;
   private fgG!: Graphics;   // 前景层（主角之上、暗角之下）
   private glowG!: Graphics;   // 辉光层（加法混合，亮元素发光）
@@ -583,6 +589,7 @@ export class BattleScene extends Component {
     }
 
     this.groundFxG = this.child('groundfx').addComponent(Graphics);   // 地面残留缓存层（雪面/血渍/脚印/箭，低频重画，垫在 stage 下）
+    // this.setupPhysics();   // 物理尸块已停用（如需重开一并解注 createPhysLayer 和 hitMonster 里的 spawnCorpse）
     this.stageG = this.child('stage').addComponent(Graphics);
     // 粒子精灵池图层（血滴/尘土）+ 剑气波精灵图层：紧跟 stage → 与原 Graphics 绘制层级一致
     this.dotLayer = this.child('fxdots');
@@ -831,6 +838,7 @@ export class BattleScene extends Component {
     this.makeGrassRow(this.node, 28, 0.07, 0.14, -8, 6, 1.0);   // 40→28：草更省 draw call/overdraw，密度基本不变
 
     this.fgG = this.child('foreground').addComponent(Graphics);
+    // this.createPhysLayer();   // 尸块物理层已停用
     // 刀气精灵（新月贴图，随挥砍旋转/淡出）：替代每帧 hArc 描边
     {
       const n = this.child('fxslash');
@@ -1340,6 +1348,7 @@ export class BattleScene extends Component {
     }
     if (!this.over && this.zoneState !== 'scroll') this.stepWaves(dt);
     if (this.comboT > 0) { this.comboT -= dt; if (this.comboT <= 0) this.comboCount = 0; }
+    if (this.corpses.length) this.stepCorpses(dt);   // 物理尸块寿命/淡出
     this.cullMonsters();
     this.stepSparks(dt);
     this.stepBloods(dt);
@@ -1844,6 +1853,84 @@ export class BattleScene extends Component {
       this.spawnDrop(m);
       // 击杀慢动作：只在击杀 Boss 时演出（普通清波太频繁太短，读起来像卡顿，已去掉）
       if (m.kind === 'boss') this.slowMo = 0.75;
+      // 物理尸块（已还原为程序化倒地，如需重开把下面这行解注）
+      // if (this.physOK && m.kind !== 'boss') this.spawnCorpse(m, kdir);
+    }
+  }
+
+  // 开启 2D 物理（模块被裁则 physOK=false，走回退）。尸块图层在 onLoad 后段单独建（保证渲染在角色之上）。
+  private setupPhysics() {
+    try {
+      if (!RigidBody2D || !BoxCollider2D || !PhysicsSystem2D) return;
+      PhysicsSystem2D.instance.enable = true;
+      PhysicsSystem2D.instance.gravity = new Vec2(0, -300);   // 米制重力（很沉，尸块贴地飞不起来）
+      this.physOK = true;
+    } catch (e) { console.warn('2D 物理不可用，尸块回退程序化倒地：', e); this.physOK = false; }
+  }
+
+  // 尸块图层 + 物理地面（在前景层之后建 → 尸块渲染在角色之上）
+  private createPhysLayer() {
+    if (!this.physOK) return;
+    const layer = this.child('physlayer');
+    const ground = new Node('physground'); ground.layer = this.node.layer; ground.parent = layer;
+    ground.addComponent(UITransform).setContentSize(6000, 80);
+    ground.setPosition(0, this.groundY - 42, 0);
+    const rb = ground.addComponent(RigidBody2D); rb.type = ERigidBody2DType.Static;
+    const c = ground.addComponent(BoxCollider2D); c.size = new Size(6000, 80); c.friction = 0.7; c.apply();
+    this.physLayer = layer;
+  }
+
+  // 死亡尸块物理体：用当前精灵帧生成一个刚体，按击退方向击飞 + 上抛 + 旋转
+  private spawnCorpse(m: Monster, kdir: number) {
+    if (!this.physLayer) return;
+    const frames = this.kindFrames[m.kind] || this.infantryFrames;
+    const sf = frames && frames.length ? frames[2] : null;
+    if (!sf) return;
+    const disp = this.kindDisp[m.kind] || [40, 46];
+    const S = this.INF_SCALE * m.scale;
+    const w = disp[0] * S, h = disp[1] * S;
+    const n = new Node('corpse'); n.layer = this.node.layer; n.parent = this.physLayer;
+    const u = n.addComponent(UITransform); u.setContentSize(w, h); u.setAnchorPoint(0.5, 0.5);
+    const sp = n.addComponent(Sprite); sp.sizeMode = Sprite.SizeMode.CUSTOM; sp.spriteFrame = sf;
+    sp.color = new Color(210, 210, 214, 255);   // 略灰=尸体
+    const op = n.addComponent(UIOpacity);
+    n.setPosition(this.sX(m.x), this.groundY + m.lane + h * 0.5 + 16 + m.jumpY, 0);   // 生成在地面上方，避免穿模被弹飞
+    n.setScale(m.dir >= 0 ? -1 : 1, 1, 1);
+    const rb = n.addComponent(RigidBody2D);
+    rb.type = ERigidBody2DType.Dynamic; rb.linearDamping = 0.1; rb.angularDamping = 0.15;
+    const c = n.addComponent(BoxCollider2D); c.size = new Size(w * 0.7, h * 0.8); c.density = 1; c.friction = 0.4; c.restitution = 0.15; c.apply();
+    // 直接设速度（米制：×PTM 才是像素）→ 低平弧线，不飞天
+    rb.linearVelocity = new Vec2(kdir * (18 + Math.random() * 8), 5 + Math.random() * 3);   // 横飞更快、上抛低=贴地冲飞
+    rb.angularVelocity = (Math.random() - 0.5) * 10;
+    this.corpses.push({ n, op, life: 0, settled: false, restT: 0, lieDir: kdir >= 0 ? 1 : -1 });
+    while (this.corpses.length > 16) { const old = this.corpses.shift(); if (old && old.n.isValid) old.n.destroy(); }
+    m.corpse = true;   // 停止常规渲染 + 立即从 monsters 移除
+  }
+
+  private stepCorpses(dt: number) {
+    for (let i = this.corpses.length - 1; i >= 0; i--) {
+      const c = this.corpses[i];
+      if (!c.n.isValid) { this.corpses.splice(i, 1); continue; }
+      c.life += dt;
+      if (!c.settled) {
+        // 飞行停下 → 躺平（朝击飞方向倒），冻结物理
+        const rb = c.n.getComponent(RigidBody2D);
+        const v = rb ? rb.linearVelocity : null;
+        const speed = v ? Math.hypot(v.x, v.y) : 0;
+        if (c.life > 0.5 && speed < 1.8) {
+          c.settled = true; c.restT = 0;
+          if (rb) rb.type = ERigidBody2DType.Static;
+          tween(c.n).to(0.22, { angle: c.lieDir * 82 }, { easing: 'quadOut' }).start();   // 倒地躺平
+        }
+      } else {
+        // 停尸一会儿 → 缓缓淡出清场
+        c.restT += dt;
+        if (c.restT > 3.5) {
+          const a = Math.max(0, 1 - (c.restT - 3.5) / 1.4);
+          c.op.opacity = Math.round(255 * a);
+          if (a <= 0) { c.n.destroy(); this.corpses.splice(i, 1); }
+        }
+      }
     }
   }
 
@@ -2289,7 +2376,8 @@ export class BattleScene extends Component {
 
   private cullMonsters() {
     for (let i = this.monsters.length - 1; i >= 0; i--) {
-      if (this.monsters[i].state === 'dead' && this.monsters[i].deadT > 1.3) this.monsters.splice(i, 1);
+      const m = this.monsters[i];
+      if (m.corpse || (m.state === 'dead' && m.deadT > 1.3)) this.monsters.splice(i, 1);   // 尸块化=立即移出（物理体接管）
     }
   }
 
@@ -2749,7 +2837,7 @@ export class BattleScene extends Component {
     let pi = 0;
     if (ready) {
       for (const m of drawn) {
-        if (m.kind === 'boss' || pi >= this.monPool.length) continue;
+        if (m.kind === 'boss' || m.corpse || pi >= this.monPool.length) continue;
         const e = this.monPool[pi++];
         e.node.active = true;
         e.sp.color = tint;
