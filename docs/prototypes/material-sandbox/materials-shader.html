@@ -1,0 +1,133 @@
+<title>像素材质试验台 · shader</title>
+<style>
+  :root{--bg:#0c0e12;--panel:#14171e;--line:#262b36;--text:#e6e8ee;--text2:#9aa1b0;--acc:#ff7a3c;
+    --serif:"Songti SC","STSong",serif;--sans:"PingFang SC","Microsoft YaHei",system-ui,sans-serif;--mono:ui-monospace,"SF Mono",Menlo,monospace}
+  *{box-sizing:border-box}body{margin:0;min-height:100vh;background:radial-gradient(900px 500px at 70% -10%,#1a1420,transparent 60%),var(--bg);
+    color:var(--text);font-family:var(--sans);display:flex;flex-direction:column;align-items:center;padding:22px 16px 44px}
+  h1{font-family:var(--serif);font-size:clamp(22px,4.4vw,34px);letter-spacing:.1em;margin:2px 0}
+  .sub{font-family:var(--mono);font-size:11px;letter-spacing:.26em;text-transform:uppercase;color:var(--text2);margin-bottom:16px}
+  .stage{position:relative;width:100%;max-width:960px;aspect-ratio:3/2;border-radius:16px;overflow:hidden;border:1px solid var(--line);box-shadow:0 40px 100px -40px #000}
+  canvas{display:block;width:100%;height:100%}
+  .labels{position:absolute;inset:0;pointer-events:none;display:grid;grid-template-columns:repeat(3,1fr);grid-template-rows:repeat(2,1fr)}
+  .lab{display:flex;align-items:flex-end;padding:10px 12px;font-family:var(--serif);font-size:clamp(15px,2.6vw,22px);letter-spacing:.08em;
+    color:#fff;text-shadow:0 2px 10px rgba(0,0,0,.8);border:1px solid rgba(255,255,255,.06)}
+  .lab small{font-family:var(--mono);font-size:10px;letter-spacing:.14em;color:rgba(255,255,255,.65);margin-left:8px;text-transform:uppercase}
+  .bar{width:100%;max-width:960px;margin-top:18px;display:grid;grid-template-columns:1fr;gap:14px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px 18px}
+  .card h2{font-family:var(--serif);font-size:19px;margin:0 0 10px;letter-spacing:.04em}
+  .eng{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px}
+  .e{background:#0f1218;border:1px solid var(--line);border-radius:10px;padding:11px 13px}
+  .e b{font-family:var(--serif);font-size:15px}.e .t{font-family:var(--mono);font-size:11px;color:var(--acc);letter-spacing:.1em}
+  .e p{margin:6px 0 0;font-size:12.5px;color:var(--text2);line-height:1.6}
+  .e.you{border-color:var(--acc);box-shadow:0 0 0 1px var(--acc) inset}
+  .note{color:var(--text2);font-size:13px;line-height:1.7;margin:0}
+  .note b{color:var(--text)}
+  code{font-family:var(--mono);font-size:12px;background:#0f1218;border:1px solid var(--line);border-radius:5px;padding:1px 6px;color:#ffb08a}
+</style>
+<h1>像素材质试验台 · shader</h1>
+<div class="sub">webgl · 像素化流动材质 · 石岩浆沙水火溶解</div>
+<div class="stage">
+  <canvas id="c"></canvas>
+  <div class="labels">
+    <div class="lab">石 <small>stone</small></div>
+    <div class="lab">岩浆 <small>lava</small></div>
+    <div class="lab">沙 <small>sand</small></div>
+    <div class="lab">水 <small>water</small></div>
+    <div class="lab">火 <small>fire</small></div>
+    <div class="lab">溶解 <small>dissolve</small></div>
+  </div>
+</div>
+
+<div class="bar">
+  <div class="card">
+    <h2>这是什么 / 怎么做到流动的</h2>
+    <p class="note">这六格全是**同一段片元着色器(fragment shader / GLSL)**实时算出来的,没用任何贴图或视频。核心就三样:<b>噪声(noise/fbm)</b> 造纹理 + <b>时间(u_time)</b> 让它动 + <b>域扭曲(domain warp)</b> 造"流动"。岩浆/水/火/沙的流淌都是这么来的。<b>「溶解」</b>那格就是你之前想的<b>怪物死亡化掉</b>的效果——按噪声阈值随时间擦除,边缘发光。</p>
+  </div>
+  <div class="card">
+    <h2>什么引擎 / 平台能用(都能,因为都是 shader)</h2>
+    <div class="eng">
+      <div class="e you"><span class="t">你的引擎 ★</span><br><b>Cocos Creator</b><p><code>.effect</code> 文件就是 GLSL 着色器。这套材质基本能原样搬进去,配合你的三界染色 + Bloom。</p></div>
+      <div class="e"><span class="t">通用</span><br><b>Unity</b><p>ShaderLab / HLSL(或 Shader Graph 连节点)。</p></div>
+      <div class="e"><span class="t">通用</span><br><b>Godot</b><p><code>.gdshader</code>,语法几乎和这里一样。</p></div>
+      <div class="e"><span class="t">网页/原型</span><br><b>WebGL / Three.js</b><p>就是这个 demo 用的。也可去 <b>Shadertoy</b> 抄现成的岩浆/水/火。</p></div>
+    </div>
+  </div>
+  <div class="card">
+    <h2>用在你游戏哪</h2>
+    <p class="note">· <b>元素怪</b>(石/岩浆/沙/水/火怪)的身体材质<br>· 怪<b>死亡溶解</b>化成水/沙/岩浆(「溶解」格)<br>· 场景:黄泉<b>浊水流动</b>、火山关<b>岩浆</b>、沙关<b>流沙</b><br>· 技能特效:火焰、水流、熔岩喷发</p>
+  </div>
+</div>
+
+<script>
+const cv=document.getElementById('c');
+const gl=cv.getContext('webgl')||cv.getContext('experimental-webgl');
+const VS=`attribute vec2 p;void main(){gl_Position=vec4(p,0.,1.);}`;
+const FS=`
+precision highp float;
+uniform vec2 u_res; uniform float u_time;
+float hash(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}
+float noise(vec2 p){vec2 i=floor(p),f=fract(p);f=f*f*(3.-2.*f);
+  float a=hash(i),b=hash(i+vec2(1,0)),c=hash(i+vec2(0,1)),d=hash(i+vec2(1,1));
+  return mix(mix(a,b,f.x),mix(c,d,f.x),f.y);}
+float fbm(vec2 p){float v=0.,a=.5;for(int i=0;i<5;i++){v+=a*noise(p);p*=2.02;a*=.5;}return v;}
+
+vec3 mStone(vec2 uv){float n=fbm(uv*6.);float cr=smoothstep(0.46,0.5,fbm(uv*9.+n*1.5));
+  vec3 c=mix(vec3(0.26,0.24,0.22),vec3(0.52,0.49,0.44),n);return c*(1.-cr*0.5);}
+vec3 mLava(vec2 uv,float t){vec2 q=uv*3.5+vec2(0.,t*0.12);
+  float w=fbm(q+fbm(q+t*0.08)*1.5);
+  float glow=smoothstep(0.35,0.72,w);
+  vec3 c=mix(vec3(0.14,0.04,0.03),vec3(1.0,0.42,0.05),glow);
+  c=mix(c,vec3(1.,0.92,0.55),smoothstep(0.7,0.95,w));
+  c+=vec3(1.,0.4,0.1)*pow(glow,3.)*0.6;return c;}
+vec3 mSand(vec2 uv,float t){float dune=0.5+0.5*sin(uv.y*26.+fbm(uv*3.+vec2(t*0.15,0.))*7.);
+  float n=fbm(uv*14.);vec3 c=mix(vec3(0.62,0.47,0.28),vec3(0.92,0.80,0.52),dune);
+  return c*(0.9+0.18*n);}
+vec3 mWater(vec2 uv,float t){float ca=pow(0.5+0.5*sin(uv.x*22.+fbm(uv*3.+t*0.25)*9.+t),2.5);
+  float ca2=pow(0.5+0.5*sin(uv.y*18.-fbm(uv*4.-t*0.2)*8.-t*1.2),2.5);
+  vec3 c=mix(vec3(0.08,0.30,0.36),vec3(0.35,0.66,0.66),max(ca,ca2));
+  return c;}
+vec3 mFire(vec2 uv,float t){float f=fbm(vec2(uv.x*4.,uv.y*3.-t*1.3));
+  float fl=smoothstep(0.15,0.9,f*(1.15-uv.y)+ (1.-uv.y)*0.25);
+  vec3 c=mix(vec3(0.02,0.0,0.0),vec3(1.,0.28,0.02),fl);
+  c=mix(c,vec3(1.,0.85,0.25),smoothstep(0.55,0.95,fl));return c;}
+vec3 mDissolve(vec2 uv,float t){float th=0.42+0.32*(0.5+0.5*sin(t*0.6));
+  float n=fbm(uv*6.);float e=smoothstep(th-0.06,th,n)-smoothstep(th,th+0.06,n);
+  vec3 stone=mix(vec3(0.28,0.26,0.24),vec3(0.5,0.47,0.42),fbm(uv*7.));
+  vec3 c = n>th? stone : vec3(0.03,0.02,0.02);
+  c+=vec3(1.,0.5,0.12)*e*3.0;return c;}
+
+void main(){
+  vec2 uv=gl_FragCoord.xy/u_res; uv.y=1.-uv.y;
+  vec2 g=vec2(3.,2.);vec2 cell=floor(uv*g);vec2 luv=fract(uv*g);
+  float PIX=44.;                              // 每格像素数(方块大小)
+  vec2 q=(floor(luv*PIX)+0.5)/PIX;            // 坐标吸附到像素网格
+  float t=floor(u_time*10.)/10.;             // 动画按 ~10fps 步进(复古感)
+  int id=int(cell.x)+int(cell.y)*3;
+  vec3 c;
+  if(id==0)c=mStone(q);
+  else if(id==1)c=mLava(q,t);
+  else if(id==2)c=mSand(q,t);
+  else if(id==3)c=mWater(q,t);
+  else if(id==4)c=mFire(q,t);
+  else c=mDissolve(q,t);
+  c=floor(c*6.0+0.5)/6.0;                     // 限色板(分 6 阶,像素画感)
+  vec2 b=abs(luv-0.5);float bd=smoothstep(0.485,0.5,max(b.x,b.y));
+  c=mix(c,vec3(0.02),bd*0.7);
+  gl_FragColor=vec4(c,1.);
+}`;
+function sh(t,s){const o=gl.createShader(t);gl.shaderSource(o,s);gl.compileShader(o);
+  if(!gl.getShaderParameter(o,gl.COMPILE_STATUS))console.error(gl.getShaderInfoLog(o));return o;}
+const prog=gl.createProgram();gl.attachShader(prog,sh(gl.VERTEX_SHADER,VS));gl.attachShader(prog,sh(gl.FRAGMENT_SHADER,FS));
+gl.linkProgram(prog);gl.useProgram(prog);
+const buf=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,buf);
+gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,3,-1,-1,3]),gl.STATIC_DRAW);
+const loc=gl.getAttribLocation(prog,'p');gl.enableVertexAttribArray(loc);gl.vertexAttribPointer(loc,2,gl.FLOAT,false,0,0);
+const uRes=gl.getUniformLocation(prog,'u_res'),uT=gl.getUniformLocation(prog,'u_time');
+function resize(){const dpr=Math.min(devicePixelRatio||1,2);const r=cv.getBoundingClientRect();
+  cv.width=Math.round(r.width*dpr);cv.height=Math.round(r.height*dpr);gl.viewport(0,0,cv.width,cv.height);}
+addEventListener('resize',resize);
+let t0=performance.now();
+function loop(now){const t=(now-t0)/1000;resize();gl.uniform2f(uRes,cv.width,cv.height);gl.uniform1f(uT,t);
+  gl.drawArrays(gl.TRIANGLES,0,3);requestAnimationFrame(loop);}
+requestAnimationFrame(loop);
+</script>
