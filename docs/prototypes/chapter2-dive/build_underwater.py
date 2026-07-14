@@ -121,7 +121,7 @@ let p,camY,bubbles,silt,ripples,state,splashDone,depthMax,rockHP,rockBroken,debr
 function reset(){
   p={x:W/2,y:-40,vx:0,vy:0,inWater:false,onGround:false,dir:1,atk:0,ph:0};
   camY=-140;bubbles=[];silt=[];ripples=[];splashDone=false;depthMax=0;
-  rockHP=5;rockBroken=false;debris=[];
+  rockHP=5;rockBroken=false;debris=[];pileCache={};
   for(let i=0;i<60;i++)silt.push({x:Math.random()*W,wy:SURFACE+Math.random()*H*3,ph:Math.random()*6.28,sp:.2+Math.random()*.5,r:.5+Math.random()*1.6});
   updateHUD();
 }
@@ -188,13 +188,34 @@ function updateHUD(){document.getElementById('df').style.height=Math.max(0,Math.
   document.getElementById('dl').textContent=!p.inWater?'落下':(p.y>GOAL*0.7?'黄泉深处':'浊水中');}
 function waterCol(d){const t=Math.min(1,d),top=[70,84,60],bot=[12,20,15];return top.map((v,i)=>Math.round(v+(bot[i]-v)*t));}
 
-function drawRockPile(ly,hp){
-  const stones=[[16,-12,20],[42,-9,18],[24,-38,22],[48,-42,16],[12,-60,16],[36,-66,20],[22,-88,15],[48,-84,13]];
-  for(const s of stones){ctx.fillStyle='#3a332a';ctx.beginPath();ctx.arc(s[0],ly+s[1],s[2],0,6.28);ctx.fill();
-    ctx.fillStyle='#4b4234';ctx.beginPath();ctx.arc(s[0]-s[2]*0.32,ly+s[1]-s[2]*0.32,s[2]*0.58,0,6.28);ctx.fill();}
-  const dmg=5-hp;ctx.strokeStyle='rgba(16,11,6,0.85)';ctx.lineWidth=2.2;
-  for(let i=0;i<dmg;i++){ctx.beginPath();ctx.moveTo(18+i*5,ly-16);ctx.lineTo(30+i*7,ly-62);ctx.stroke();}
+const STPAL=['#8a8072','#736a5c','#5c5448','#463f34','#332d24'];   // 暖灰褐石(与井壁同调)
+function hsh(a,b){return ((Math.sin(a*12.9898+b*78.233)*43758.5453)%1+1)%1;}
+const PILE=[[-8,-52,24],[22,-46,26],[52,-50,22],[8,-84,24],[40,-86,24],[-4,-114,20],[28,-118,22],[56,-92,18],[18,-116,18]];
+const RUBBLE=[[-8,-54,16],[44,-50,14],[20,-92,15]];
+let pileCache={};
+function bakePile(circles,dmg,key){    // 烘焙成离屏小图(只算一次),之后整张贴 → 像素锁死不爬
+  if(pileCache[key])return pileCache[key];
+  const P=4;let mnx=1e9,mxx=-1e9,mny=1e9,mxy=-1e9;
+  for(const c of circles){mnx=Math.min(mnx,c[0]-c[2]);mxx=Math.max(mxx,c[0]+c[2]);mny=Math.min(mny,c[1]-c[2]);mxy=Math.max(mxy,c[1]+c[2]);}
+  const cw=Math.ceil((mxx-mnx)/P+1)*P,ch=Math.ceil((mxy-mny)/P+1)*P;
+  const oc=document.createElement('canvas');oc.width=cw;oc.height=ch;const x=oc.getContext('2d');
+  const inLC=(px,py)=>{for(const c of circles){const dx=px-(c[0]-mnx),dy=py-(c[1]-mny);if(dx*dx+dy*dy<=c[2]*c[2])return true;}return false;};
+  const span=Math.max(1,mxy-mny);
+  for(let py=0;py<ch;py+=P)for(let px=0;px<cw;px+=P){
+    const cx=px+P/2,cy=py+P/2;if(!inLC(cx,cy))continue;
+    const edge=!inLC(cx-P,cy)||!inLC(cx+P,cy)||!inLC(cx,cy-P)||!inLC(cx,cy+P);
+    let sh=0.55-(cy/span)*0.28+(hsh(Math.floor(px/P),Math.floor(py/P))-0.5)*0.55;
+    let idx=sh>0.64?0:sh>0.46?1:sh>0.28?2:3;if(edge)idx=Math.min(4,idx+1);
+    x.fillStyle=STPAL[idx];x.fillRect(px,py,P,P);
+  }
+  x.fillStyle='#1c150c';
+  for(let i=0;i<dmg;i++){const bx=(22+i*9)-mnx;let d=0;for(let Y=-14;Y>-64;Y-=4){x.fillRect(Math.floor((bx+d*0.12)/4)*4,Math.floor((Y-mny)/4)*4,4,4);d+=4;}}
+  pileCache[key]={c:oc,ox:mnx,oy:mny};return pileCache[key];
 }
+function blitPile(r,ly){ctx.imageSmoothingEnabled=false;const dx=Math.round(r.ox),dy=Math.round(ly+r.oy);
+  ctx.save();ctx.globalAlpha=0.34;ctx.filter='brightness(0)';ctx.drawImage(r.c,dx+7,dy+6);ctx.restore(); // 墙面投影 → 贴墙凸出感
+  ctx.drawImage(r.c,dx,dy);}
+function drawRockPile(ly,hp){blitPile(bakePile(PILE,5-hp,'p'+hp),ly);}
 function render(){
   const cx=camY;
   ctx.save();if(state.shake>0)ctx.translate((Math.random()-.5)*state.shake,(Math.random()-.5)*state.shake);
@@ -209,7 +230,7 @@ function render(){
     if(!rockBroken){drawRockPile(ly,rockHP);
       ctx.fillStyle='rgba(224,206,150,0.85)';ctx.font='12px sans-serif';ctx.textAlign='center';ctx.fillText('砸开石堆',94,ly-104);}
     else{ctx.fillStyle='#060906';ctx.beginPath();ctx.ellipse(26,ly-32,42,40,0,0,6.28);ctx.fill();
-      ctx.fillStyle='#33291d';for(const s of [[4,-4,11],[54,-8,9],[50,-62,8]]){ctx.beginPath();ctx.arc(s[0],ly+s[1],s[2],0,6.28);ctx.fill();}
+      blitPile(bakePile(RUBBLE,0,'rub'),ly);
       ctx.fillStyle='rgba(200,220,170,0.85)';ctx.font='12px sans-serif';ctx.textAlign='center';ctx.fillText('← 进洞',64,ly-30);}
   }}
   const surfSy=SURFACE-cx;
