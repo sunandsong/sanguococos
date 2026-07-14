@@ -1,10 +1,12 @@
 import {
   _decorator, Component, Node, Graphics, Label, Color, UITransform,
-  input, Input, EventKeyboard, KeyCode, Layers, Sprite, SpriteFrame, Texture2D, Vec3, tween, EventTouch,
+  input, Input, EventKeyboard, KeyCode, Layers, Sprite, SpriteFrame, Texture2D, Rect, Vec3, tween, EventTouch,
 } from 'cc';
 import { DESIGN_W as W, DESIGN_H as H } from './Constants';
 import { AssetHub } from './AssetHub';
 import { HeroRig, HeroMode } from './HeroRig';
+import { TouchControls } from './TouchControls';
+import { HeroHUD } from './HeroHUD';
 
 const { ccclass } = _decorator;
 
@@ -35,8 +37,12 @@ export class Chapter2Well extends Component {
   private mouthNode: Node | null = null; private mouthAR = 1.4;
   private ledgeNode: Node | null = null; private ledgeAR = 0.6;
   private hero!: HeroRig; private walkPh = 0;
+  private controls!: TouchControls; private hud!: HeroHUD;
+  private hp = 100; private coins = 0;   // 井下暂无战斗损耗,先接通 HUD 显示
   private atkTimer = 0; private atkDur = 0.42; private readonly ATK_DUR = 0.42;   // 一刀时长
   private atkType = 0; private comboT = 0; private readonly COMBO_WINDOW = 0.5;    // 三段连击
+  private slamJump = false; private slamLandT = 0;   // 第3段跳劈:腾空中/落地收势(对齐第一章:蹲→跃起→下劈→落地冲击)
+  private slamFxX = 0;   // 冲击点世界x(镜头动时把最新屏幕坐标喂给套件特效)
   private specialCd = 0; private readonly SPECIAL_CD = 1.0;                        // 剑气冷却
   private fxCre: SpriteFrame | null = null;                                         // 新月贴图（刀气/剑气）
   private fxLayer!: Node; private slashN: Node | null = null; private slashSp: Sprite | null = null;
@@ -46,7 +52,8 @@ export class Chapter2Well extends Component {
   // 世界参数（缩短落差：落一下就见水见台；潜水段仍深）
   private readonly SURFACE = 900;
   private readonly GOAL = 3900;
-  private readonly LEDGE_Y = 900 - 62;       // 838 · 水面上方一点点
+  private readonly LEDGE_Y = 900 - 32 - 20;  // 848 · 角色站立脚线(台子整体下移30,跳得上去)
+  private readonly LEDGE_BASE = 900 - 32;    // 868 · 台座/石堆/破洞的基准(贴图和石头不随脚线动)
   private readonly LEDGE_L = -14; private readonly LEDGE_R = 178;   // 井台在左
   private readonly PASSAGE_X = 26;           // 破洞后走到此=进洞
   private readonly WALL_X = 58;              // 未破石堆挡住处
@@ -79,9 +86,9 @@ export class Chapter2Well extends Component {
     gn.addComponent(UITransform);
     this.g = gn.addComponent(Graphics);
 
-    this.hero = new HeroRig(this.node);
-    // 特效层（刀气/剑气新月），排在角色之上
+    // 特效层（刀气/剑气新月/跳劈特效），排在角色之上
     this.fxLayer = new Node('c2-fx'); this.fxLayer.layer = Layers.Enum.UI_2D; this.fxLayer.parent = this.node; this.fxLayer.addComponent(UITransform);
+    this.hero = new HeroRig(this.node, this.fxLayer);   // 角色套件(跳劈冲击波/闪电已内置在套件里)
     this.slashN = new Node('c2-slash'); this.slashN.layer = Layers.Enum.UI_2D; this.slashN.parent = this.fxLayer;
     this.slashN.addComponent(UITransform).setContentSize(128, 128);
     this.slashSp = this.slashN.addComponent(Sprite); this.slashSp.sizeMode = Sprite.SizeMode.CUSTOM; this.slashN.active = false;
@@ -93,7 +100,15 @@ export class Chapter2Well extends Component {
     this.depthLabel.fontSize = 30; this.depthLabel.color = new Color(233, 201, 138);
     ln.setPosition(0, H / 2 - 60, 0);
 
-    this.buildButtons();
+    // 操作/HUD 套件(与第一章同款):摇杆+攻击/技能钮、顶部头像血条金币
+    this.controls = new TouchControls(this.node, {
+      onDir: (d) => { this.keys.left = d < 0; this.keys.right = d > 0; },
+      onAxis: (_ax, ay) => { this.joyY = ay; },
+      onJump: () => this.jump(),
+      onAttack: () => this.attack(),
+      onSpecial: () => this.heroSpecial(),
+    }, { alpha: this.CTRL_ALPHA, jumpButton: true, upJump: false });   // 井下:独立跳跃键,摇杆上推只管游泳
+    this.hud = new HeroHUD(this.node);
     input.on(Input.EventType.KEY_DOWN, this.onKeyDown, this);
     input.on(Input.EventType.KEY_UP, this.onKeyUp, this);
     this.reset();
@@ -153,100 +168,42 @@ export class Chapter2Well extends Component {
   private updateLedge() {
     if (!this.ledgeNode) return;
     const w = 192, h = w * this.ledgeAR, sf = 0.30;
-    // demo: drawImage(img, LEDGE.L, ly - sf*h, w, h) → 图顶 world y = LEDGE_Y - sf*h
-    const cx = this.LEDGE_L + w / 2, cy = this.LEDGE_Y - sf * h + h / 2;
+    // demo: drawImage(img, LEDGE.L, ly - sf*h, w, h) → 图顶 world y = 838 - sf*h(脚线上移了13,这里+13补偿,贴图不动)
+    const cx = this.LEDGE_L + w / 2, cy = this.LEDGE_BASE - sf * h + h / 2;
     this.ledgeNode.setPosition(this.SX(cx), this.SY(cy), 0);
   }
 
   // ── 角色（第一章步战赵云套件 HeroRig）──
   private updateHero() {
     // 选姿势：攻击 > 空中 > 走 > 待机；水里保持待机直立
-    let mode: HeroMode; let p = 0;
-    if (this.atkTimer > 0) { mode = this.atkType === 2 ? 'slam' : 'attack'; p = 1 - this.atkTimer / this.atkDur; }
+    let mode: HeroMode; let p = 0; let tilt = 0;
+    if (this.slamJump) { mode = 'slam'; p = this.pvy < 0 ? 0.1 : 0.5; }        // 腾空跳劈:上升举枪 / 下落俯冲
+    else if (this.slamLandT > 0) { mode = 'slam'; p = 0.95; }                  // 落地砸击收势帧
+    else if (this.atkTimer > 0) { mode = this.atkType === 2 ? 'slam' : 'attack'; p = 1 - this.atkTimer / this.atkDur; }
     else if (!this.onG && !this.inWater) mode = 'air';
-    else if (!this.inWater && (this.keys.left || this.keys.right)) mode = 'walk';
+    else if (this.inWater) {
+      // 水性三态:到水面一律踩水(只露头肩);水下有横向分量=横游(斜游身体倾斜);纯竖直=竖游
+      const movingH = Math.abs(this.pvx) > 30;
+      if (this.py <= this.SURFACE + 30) mode = 'float';   // 提前量:快到水面就先摆出踩水姿势,升到水线正好衔接
+      else if (movingH) {
+        mode = 'swimH';
+        tilt = Math.max(-55, Math.min(55, Math.atan2(-this.pvy, Math.abs(this.pvx)) * 57.29578));   // 抬头角(度)
+      } else mode = 'swim';
+    }
+    else if (this.keys.left || this.keys.right) mode = 'walk';
     else mode = 'idle';
-    this.hero.apply(this.SX(this.px), this.SY(this.py), this.dir, mode, p, this.pvy, this.walkPh);
+    this.hero.apply(this.SX(this.px), this.SY(this.py), this.dir, mode, p, this.pvy, this.walkPh, tilt);
   }
 
   // ── 按钮（第一章摇杆 + 攻击/剑气）──
-  private makeCircleBtn(x: number, y: number, r: number, base: [number, number, number], icon: (g: Graphics, r: number) => void): Node {
-    const n = new Node('c2cbtn'); n.layer = Layers.Enum.UI_2D; n.parent = this.node;
-    const ut = n.addComponent(UITransform); ut.setContentSize(r * 2 + 18, r * 2 + 18); ut.setAnchorPoint(0.5, 0.5);
-    n.setPosition(x, y, 0);
-    const g = n.addComponent(Graphics); const A = this.CTRL_ALPHA; const a = (v: number) => Math.round(v * A);
-    g.fillColor = new Color(0, 0, 0, a(110)); g.circle(0, -4, r + 8); g.fill();
-    g.fillColor = new Color(22, 18, 24, a(240)); g.circle(0, 0, r + 7); g.fill();
-    g.fillColor = new Color(Math.round(base[0] * 0.55), Math.round(base[1] * 0.55), Math.round(base[2] * 0.55), a(255)); g.circle(0, 0, r); g.fill();
-    g.fillColor = new Color(base[0], base[1], base[2], a(255)); g.ellipse(0, r * 0.12, r * 0.94, r * 0.86); g.fill();
-    g.fillColor = new Color(255, 255, 255, a(34)); g.ellipse(0, r * 0.42, r * 0.74, r * 0.4); g.fill();
-    g.strokeColor = new Color(255, 214, 130, a(210)); g.lineWidth = 3; g.circle(0, 0, r + 7); g.stroke();
-    g.strokeColor = new Color(0, 0, 0, a(110)); g.lineWidth = 2; g.circle(0, 0, r + 1); g.stroke();
-    icon(g, r);
-    return n;
-  }
-  private tap(n: Node, cb: () => void) {
-    n.on(Node.EventType.TOUCH_START, () => n.setScale(0.92, 0.92, 1), this);
-    const up = () => tween(n).to(0.05, { scale: new Vec3(1.06, 1.06, 1) }).to(0.08, { scale: new Vec3(1, 1, 1) }).start();
-    n.on(Node.EventType.TOUCH_END, () => { up(); cb(); }, this); n.on(Node.EventType.TOUCH_CANCEL, up, this);
-  }
-  private buildButtons() {
-    const by = -H / 2 + 160; const A = this.CTRL_ALPHA; const ia = (v: number) => Math.round(v * A);
-    this.setupJoystick(-236, by + 18);
-    const atk = this.makeCircleBtn(268, by, 82, [152, 58, 52], (g, r) => {
-      g.lineCap = Graphics.LineCap.ROUND;
-      g.strokeColor = new Color(238, 243, 250, ia(250)); g.lineWidth = 9; g.moveTo(-r * 0.14, -r * 0.14); g.lineTo(r * 0.44, r * 0.44); g.stroke();
-      g.strokeColor = new Color(255, 214, 120, ia(250)); g.lineWidth = 5; g.moveTo(-r * 0.02, -r * 0.32); g.lineTo(-r * 0.32, -r * 0.02); g.stroke();
-      g.strokeColor = new Color(96, 62, 40, ia(255)); g.lineWidth = 7; g.moveTo(-r * 0.2, -r * 0.2); g.lineTo(-r * 0.42, -r * 0.42); g.stroke();
-    });
-    this.tap(atk, () => this.attack());
-    const spc = this.makeCircleBtn(132, by + 52, 56, [54, 102, 138], (g, r) => {
-      g.strokeColor = new Color(160, 238, 255, ia(255)); g.lineWidth = 6; g.circle(-r * 0.1, 0, r * 0.42); g.stroke();
-      g.strokeColor = new Color(240, 252, 255, ia(255)); g.lineWidth = 3; g.circle(-r * 0.1, 0, r * 0.26); g.stroke();
-    });
-    this.tap(spc, () => this.heroSpecial());
-  }
-  private setupJoystick(cx: number, cy: number) {
-    const R = 96, KR = 50, DEAD = 18, HIT = 300; const A = this.CTRL_ALPHA; const a = (v: number) => Math.round(v * A);
-    const base = new Node('c2-joybase'); base.layer = Layers.Enum.UI_2D; base.parent = this.node;
-    const but = base.addComponent(UITransform); but.setContentSize(HIT, HIT); but.setAnchorPoint(0.5, 0.5); base.setPosition(cx, cy, 0);
-    const bg = base.addComponent(Graphics);
-    bg.fillColor = new Color(0, 0, 0, a(120)); bg.circle(0, -4, R + 8); bg.fill();
-    bg.fillColor = new Color(22, 18, 24, a(255)); bg.circle(0, 0, R + 6); bg.fill();
-    bg.fillColor = new Color(38, 40, 54, a(255)); bg.circle(0, 0, R); bg.fill();
-    bg.fillColor = new Color(255, 255, 255, a(26)); bg.ellipse(0, R * 0.32, R * 0.8, R * 0.44); bg.fill();
-    bg.strokeColor = new Color(255, 214, 130, a(210)); bg.lineWidth = 3; bg.circle(0, 0, R + 6); bg.stroke();
-    bg.fillColor = new Color(240, 245, 252, a(150));
-    for (const s of [-1, 1]) { bg.moveTo(s * (R - 20), 12); bg.lineTo(s * (R - 4), 0); bg.lineTo(s * (R - 20), -12); bg.close(); bg.fill(); }
-    bg.fillColor = new Color(200, 246, 205, a(170)); bg.moveTo(-12, R - 20); bg.lineTo(0, R - 4); bg.lineTo(12, R - 20); bg.close(); bg.fill();
-    const knobN = new Node('c2-joyknob'); knobN.layer = Layers.Enum.UI_2D; knobN.parent = base; knobN.addComponent(UITransform); knobN.setPosition(0, 0, 0);
-    const kg = knobN.addComponent(Graphics);
-    kg.fillColor = new Color(96, 116, 158, a(255)); kg.circle(0, 0, KR); kg.fill();
-    kg.fillColor = new Color(140, 162, 205, a(255)); kg.ellipse(0, KR * 0.14, KR * 0.9, KR * 0.82); kg.fill();
-    kg.strokeColor = new Color(255, 214, 130, a(200)); kg.lineWidth = 3; kg.circle(0, 0, KR); kg.stroke();
-    const JUMP_UP = R * 0.55; let jumpArmed = true;
-    const uiT = this.node.getComponent(UITransform)!;
-    const move = (e: EventTouch) => {
-      const loc = e.getUILocation(); const p = uiT.convertToNodeSpaceAR(new Vec3(loc.x, loc.y, 0));
-      let dx = p.x - cx, dy = p.y - cy; const mag = Math.hypot(dx, dy);
-      if (mag > R) { dx = dx / mag * R; dy = dy / mag * R; }
-      knobN.setPosition(dx, dy, 0); this.joyY = dy / R;
-      if (dx < -DEAD) { this.keys.left = true; this.keys.right = false; }
-      else if (dx > DEAD) { this.keys.right = true; this.keys.left = false; }
-      else { this.keys.left = this.keys.right = false; }
-      if (dy > JUMP_UP) { if (jumpArmed) { jumpArmed = false; this.jump(); } } else if (dy < JUMP_UP * 0.5) { jumpArmed = true; }
-    };
-    const reset = () => { this.keys.left = this.keys.right = false; this.joyY = 0; jumpArmed = true; tween(knobN).to(0.08, { position: new Vec3(0, 0, 0) }, { easing: 'quadOut' }).start(); };
-    base.on(Node.EventType.TOUCH_START, move, this); base.on(Node.EventType.TOUCH_MOVE, move, this);
-    base.on(Node.EventType.TOUCH_END, reset, this); base.on(Node.EventType.TOUCH_CANCEL, reset, this);
-  }
 
   // ── 输入动作 ──
   private onKeyDown(e: EventKeyboard) {
     switch (e.keyCode) {
       case KeyCode.KEY_A: case KeyCode.ARROW_LEFT: this.keys.left = true; break;
       case KeyCode.KEY_D: case KeyCode.ARROW_RIGHT: this.keys.right = true; break;
-      case KeyCode.SPACE: case KeyCode.KEY_W: case KeyCode.ARROW_UP: this.keys.up = true; this.jump(); break;
+      case KeyCode.KEY_W: case KeyCode.ARROW_UP: this.keys.up = true; break;   // 上=游泳/无跳跃
+      case KeyCode.SPACE: this.jump(); break;                                  // 空格=专职跳跃(水中=出水鱼跃)
       case KeyCode.KEY_S: case KeyCode.ARROW_DOWN: this.keys.down = true; break;
       case KeyCode.KEY_J: this.attack(); break;
       case KeyCode.KEY_K: case KeyCode.KEY_L: this.heroSpecial(); break;
@@ -265,18 +222,38 @@ export class Chapter2Well extends Component {
     else if (this.inWater) { this.pvy = Math.min(this.pvy, -580); }
   }
   private attack() {
+    if (this.slamJump) return;                                          // 跳劈腾空中不可出招
     if (this.atkTimer > this.atkDur * 0.45) return;                     // 挥到后半段才能接下一刀（连点更顺）
     this.atkType = this.comboT > 0 ? (this.atkType + 1) % 3 : 0;        // 连招窗口内 → 下一段
     const dur = this.atkType === 2 ? this.ATK_DUR * 1.5 : this.ATK_DUR; // 跳劈稍长
     this.atkTimer = dur; this.atkDur = dur; this.comboT = dur + this.COMBO_WINDOW;
+    this.hero.sndSwing(this.atkType);   // 起手音效(套件自带,与第一章一致)
+    // 第 3 段跳劈：地面上真的跃起，冲击在落地时结算（水中/空中退化为原地挥）
+    if (this.atkType === 2 && this.onG) { this.pvy = -430; this.onG = false; this.slamJump = true; }
     // 在石台上、面朝石堆范围内 → 砸石开洞
     if (this.onG && !this.rockBroken && this.px < 110) {
       this.dir = -1;                          // 面朝石堆
       this.rockHP--; this.shake = 8;
-      for (let i = 0; i < 9; i++) this.debris.push({ x: 38 + Math.random() * 26, y: this.LEDGE_Y - 14 - Math.random() * 72, vx: 40 + Math.random() * 150, vy: -60 - Math.random() * 170, life: 0.7, r: 2 + Math.random() * 3.2 });
+      for (let i = 0; i < 9; i++) this.debris.push({ x: 38 + Math.random() * 26, y: this.LEDGE_BASE - 14 - Math.random() * 72, vx: 40 + Math.random() * 150, vy: -60 - Math.random() * 170, life: 0.7, r: 2 + Math.random() * 3.2 });
       if (this.rockHP <= 0) this.rockBroken = true;
     }
   }
+  // 跳劈落地冲击：震屏 + 两侧碎屑;砸在石堆附近 → 双倍碎石(跳劈开洞更快)
+  private slamImpact() {
+    this.slamJump = false; this.slamLandT = 0.22; this.shake = 11;
+    this.slamFxX = this.px;
+    this.hero.slamImpactFx(this.SX(this.px), this.SY(this.LEDGE_Y), H / 2);   // 套件特效:冲击波+闪电
+    for (let i = 0; i < 14; i++) {
+      const d = i % 2 ? 1 : -1;
+      this.debris.push({ x: this.px + d * (6 + Math.random() * 40), y: this.LEDGE_Y - 2, vx: d * (50 + Math.random() * 160), vy: -40 - Math.random() * 190, life: 0.6, r: 1.5 + Math.random() * 2.6 });
+    }
+    if (!this.rockBroken && this.px < 140) {
+      this.rockHP -= 2; this.shake = 13;
+      for (let i = 0; i < 12; i++) this.debris.push({ x: 38 + Math.random() * 26, y: this.LEDGE_BASE - 14 - Math.random() * 72, vx: 40 + Math.random() * 150, vy: -60 - Math.random() * 170, life: 0.7, r: 2 + Math.random() * 3.2 });
+      if (this.rockHP <= 0) this.rockBroken = true;
+    }
+  }
+
   private heroSpecial() {
     if (this.specialCd > 0) return;
     this.specialCd = this.SPECIAL_CD;
@@ -324,6 +301,11 @@ export class Chapter2Well extends Component {
       fx.sp.color = new Color(150, 235, 255, Math.round(240 * a));   // 青白剑气
     }
     for (; wi < this.wavePool.length; wi++) this.wavePool[wi].n.active = false;
+    // 跳劈落地特效(冲击波+闪电)在角色套件里推进;镜头会动,把冲击点最新屏幕坐标喂进去
+    this.hero.updateFx(dt, this.SX(this.slamFxX), this.SY(this.LEDGE_Y));
+    // HUD/技能冷却(套件内部有脏标记,平时零开销)
+    this.hud.set(this.hp, 100, this.hp, this.coins);
+    this.controls.setSpecialCd(this.specialCd / this.SPECIAL_CD);
   }
   private splash(x: number, y: number) {
     this.ripples.push({ x, y, r: 6, life: 1 }); this.ripples.push({ x, y, r: 2, life: 1.3 });
@@ -340,6 +322,7 @@ export class Chapter2Well extends Component {
     this.bubbles = []; this.silt = []; this.ripples = []; this.debris = [];
     this.rockHP = 5; this.rockBroken = false;
     this.atkTimer = 0; this.atkType = 0; this.comboT = 0; this.specialCd = 0; this.waves = [];
+    this.slamJump = false; this.slamLandT = 0;
     for (let i = 0; i < 60; i++) this.silt.push({ x: Math.random() * this.DW, wy: this.SURFACE + Math.random() * this.DH * 3, ph: Math.random() * 6.28, sp: 0.2 + Math.random() * 0.5, r: 0.5 + Math.random() * 1.6 });
   }
 
@@ -350,8 +333,9 @@ export class Chapter2Well extends Component {
   private tick(dt: number) {
     dt = Math.min(dt, 0.05); this.t += dt; this.ph += dt * 6;
     if (this.atkTimer > 0) this.atkTimer -= dt;
+    if (this.slamLandT > 0) this.slamLandT -= dt;
     const mvx = (this.keys.right ? 1 : 0) - (this.keys.left ? 1 : 0);
-    if (mvx) { this.dir = mvx; this.walkPh += dt * 10; }
+    if (mvx) { this.dir = mvx; if (!this.inWater) this.walkPh += dt * 10; }   // 走路相位只在陆上推进(水里由蹬水节奏管)
 
     if (!this.inWater) {
       if (this.onG) {
@@ -365,23 +349,35 @@ export class Chapter2Well extends Component {
         this.pvy += 1200 * dt; this.pvy = Math.min(this.pvy, 900); this.px += mvx * 150 * dt; this.py += this.pvy * dt;
         if (this.pvy > 0) {
           const pf = this.py - this.pvy * dt;
-          if (pf <= this.LEDGE_Y && this.py >= this.LEDGE_Y && this.px >= this.LEDGE_L && this.px <= this.LEDGE_R) { this.py = this.LEDGE_Y; this.pvy = 0; this.onG = true; }
+          if (pf <= this.LEDGE_Y && this.py >= this.LEDGE_Y && this.px >= this.LEDGE_L && this.px <= this.LEDGE_R) {
+            this.py = this.LEDGE_Y; this.pvy = 0; this.onG = true;
+            if (this.slamJump) this.slamImpact();   // 跳劈落地冲击
+          }
         }
-        if (!this.onG && this.py >= this.SURFACE) { this.inWater = true; this.splash(this.px, this.SURFACE); this.pvy *= 0.4; }
+        if (!this.onG && this.py >= this.SURFACE) { this.inWater = true; this.splash(this.px, this.SURFACE); this.pvy *= 0.4; this.slamJump = false; this.slamLandT = 0; }   // 劈进水里=大水花,冲击取消
       }
     } else {
       // 水下浮力阻尼潜行
-      const mvy = (this.keys.down ? 1 : 0) - (this.keys.up ? 1 : 0) + (this.joyY > 0.25 ? -1 : this.joyY < -0.25 ? 1 : 0);
-      this.pvy += 120 * dt; this.pvy += mvy * 760 * dt; this.pvx += mvx * 520 * dt;
+      let mvy = (this.keys.down ? 1 : 0) - (this.keys.up ? 1 : 0) + (this.joyY > 0.25 ? -1 : this.joyY < -0.25 ? 1 : 0);
+      if (this.py <= this.SURFACE + 4 && mvy < 0) mvy = 0;   // 身体到水面就踩水,不能再往上游(出水只靠跳跃鱼跃)
+      this.pvy += 120 * dt; this.pvy += mvy * 330 * dt; this.pvx += mvx * 240 * dt;
       this.pvx -= this.pvx * 3.4 * dt; this.pvy -= this.pvy * 2.6 * dt;
-      this.pvy = Math.max(-640, Math.min(340, this.pvy)); this.pvx = Math.max(-190, Math.min(190, this.pvx));
+      this.pvy = Math.max(-350, Math.min(200, this.pvy)); this.pvx = Math.max(-100, Math.min(100, this.pvx));
       this.px += this.pvx * dt; this.py += this.pvy * dt; this.px = Math.max(46, Math.min(this.DW - 46, this.px));
       if (this.py < this.SURFACE) {
-        if (this.pvy < -300) { this.inWater = false; this.ripples.push({ x: this.px, y: this.SURFACE, r: 6, life: 0.8 }); }  // 用力上冲才跃出
+        if (this.pvy < -300) { this.inWater = false; this.pvy = Math.min(this.pvy, -540); this.ripples.push({ x: this.px, y: this.SURFACE, r: 6, life: 0.8 }); }  // 用力上冲才跃出;出水鱼跃补偿(水中限速不吃掉跳跃冲量)
         else { this.py = this.SURFACE; if (this.pvy < 0) this.pvy = 0; }   // 轻浮到水面 → 贴着漂，不反复进出
       }
-      if ((mvx || mvy) && Math.random() < 0.4) this.bub(this.px - Math.sign(this.pvx || 1) * 6, this.py - 6, 1, 8);
-      if (Math.random() < 0.02) this.bub(this.px, this.py, 1, 10);
+      // 蹬水节奏:水面踩水固定慢拍;水下游动才划水,松手把这一循环划完,定格收腿静漂
+      if (this.py <= this.SURFACE + 30) this.walkPh += dt * 1.8;   // 踩水:双臂开合约0.55秒一换
+      else if (mvx || mvy) this.walkPh += dt * 4.2;
+      else if (this.walkPh % 3 > 0.08) this.walkPh += dt * 4.2;
+      else this.walkPh = 0;
+      // 身上冒泡只在潜水时(水面踩水头已出水,不冒)
+      if (this.py > this.SURFACE + 30) {
+        if ((mvx || mvy) && Math.random() < 0.4) this.bub(this.px - Math.sign(this.pvx || 1) * 6, this.py - 6, 1, 8);
+        if (Math.random() < 0.02) this.bub(this.px, this.py, 1, 10);
+      }
     }
 
     // 相机
@@ -390,7 +386,14 @@ export class Chapter2Well extends Component {
 
     // 环境水泡（自下升起）
     if (this.inWater && Math.random() < 0.5) this.bubbles.push({ x: Math.random() * this.DW, y: this.camY + this.DH + 10, vx: (Math.random() - 0.5) * 10, vy: -30 - Math.random() * 36, life: 3, r: 1 + Math.random() * 2 });
-    for (const b of this.bubbles) { b.life -= dt; b.x += b.vx * dt; b.y += b.vy * dt; if (b.air) b.vy += 520 * dt; else { b.vy -= 6 * dt; b.x += Math.sin(this.t * 3 + b.y * 0.05) * 10 * dt; } }
+    for (const b of this.bubbles) {
+      b.life -= dt; b.x += b.vx * dt; b.y += b.vy * dt;
+      if (b.air) b.vy += 520 * dt;
+      else {
+        b.vy -= 6 * dt; b.x += Math.sin(this.t * 3 + b.y * 0.05) * 10 * dt;
+        if (b.y <= this.SURFACE + 1) b.life = 0;   // 水下气泡升到水面即破,不会飘到空气里
+      }
+    }
     this.bubbles = this.bubbles.filter(b => b.life > 0);
     for (const r of this.ripples) { r.life -= dt * 1.4; r.r += 160 * dt; } this.ripples = this.ripples.filter(r => r.life > 0);
     for (const s of this.silt) { s.wy += s.sp * 10 * dt; s.ph += dt; }
@@ -420,7 +423,7 @@ export class Chapter2Well extends Component {
     const span = Math.max(1, mxy - mny), bw = P * S + 0.6;
     const cell = (wx: number, wy: number, col: number[], al: number) => { g.fillColor = new Color(col[0], col[1], col[2], al); g.rect(this.SX(wx) - bw / 2, this.SY(wy) - bw / 2, bw, bw); g.fill(); };
     // 投影层（贴墙凸出感）
-    for (let py = mny; py < mxy; py += P) for (let px = mnx; px < mxx; px += P) { const cx = px + P / 2, cy = py + P / 2; if (inLC(cx, cy)) cell(cx + 7, this.LEDGE_Y + cy + 6, [12, 9, 5], 90); }
+    for (let py = mny; py < mxy; py += P) for (let px = mnx; px < mxx; px += P) { const cx = px + P / 2, cy = py + P / 2; if (inLC(cx, cy)) cell(cx + 7, this.LEDGE_BASE + cy + 6, [12, 9, 5], 90); }
     // 像素主体
     for (let py = mny; py < mxy; py += P) for (let px = mnx; px < mxx; px += P) {
       const cx = px + P / 2, cy = py + P / 2; if (!inLC(cx, cy)) continue;
@@ -428,10 +431,10 @@ export class Chapter2Well extends Component {
       const ny = (py - mny) / span;
       const sh = 0.55 - ny * 0.28 + (this.hsh(Math.floor(px / P), Math.floor(py / P)) - 0.5) * 0.55;
       let idx = sh > 0.64 ? 0 : sh > 0.46 ? 1 : sh > 0.28 ? 2 : 3; if (edge) idx = Math.min(4, idx + 1);
-      cell(cx, this.LEDGE_Y + cy, this.STPAL[idx], 255);
+      cell(cx, this.LEDGE_BASE + cy, this.STPAL[idx], 255);
     }
     // 裂痕（受损）
-    for (let i = 0; i < dmg; i++) { const bx = 22 + i * 9; let d = 0; for (let Y = -14; Y > -64; Y -= 4) { cell(bx + d * 0.12, this.LEDGE_Y + Y, [28, 21, 12], 255); d += 4; } }
+    for (let i = 0; i < dmg; i++) { const bx = 22 + i * 9; let d = 0; for (let Y = -14; Y > -64; Y -= 4) { cell(bx + d * 0.12, this.LEDGE_BASE + Y, [28, 21, 12], 255); d += 4; } }
   }
 
   private redraw() {
@@ -445,7 +448,7 @@ export class Chapter2Well extends Component {
         this.drawPixelPile(g, this.PILE, 5 - this.rockHP);   // demo 像素石堆
       } else {
         // 破洞 + 残渣
-        g.fillColor = new Color(6, 9, 6, 255); g.ellipse(this.SX(26), this.SY(this.LEDGE_Y - 32), 42 * S, 40 * S); g.fill();
+        g.fillColor = new Color(6, 9, 6, 255); g.ellipse(this.SX(26), this.SY(this.LEDGE_BASE - 32), 42 * S, 40 * S); g.fill();
         this.drawPixelPile(g, this.RUBBLE, 0);
       }
     }
