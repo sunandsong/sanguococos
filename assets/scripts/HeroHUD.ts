@@ -12,6 +12,7 @@ export class HeroHUD {
   private g: Graphics;
   private coinLbl: Label;
   private key = -1;
+  private air = 1;
 
   constructor(parent: Node, avatarRes = 'avatar-zhaoyun') {
     this.root = new Node('hero-hud'); this.root.layer = Layers.Enum.UI_2D; this.root.parent = parent;
@@ -38,13 +39,15 @@ export class HeroHUD {
     ln.setPosition(241, H / 2 - 71, 0);
   }
 
-  /** 每帧调用:hp/hpMax 血量,lagHp 掉血残影(不传=hp),coins 金币 */
-  set(hp: number, hpMax: number, lagHp?: number, coins = 0) {
+  /** 每帧调用:hp/hpMax 血量,lagHp 掉血残影(不传=hp),coins 金币,air 憋气 0..1(<1 时血条下方显示黄色气条) */
+  set(hp: number, hpMax: number, lagHp?: number, coins = 0, air = 1) {
     const p = Math.max(0, hp / hpMax);
     const lag = Math.max(p, (lagHp ?? hp) / hpMax);
-    const key = (Math.round(p * 336) * 337 + Math.round(lag * 336)) * 100000 + coins;
+    const aq = Math.round(Math.max(0, Math.min(1, air)) * 200);
+    const key = ((Math.round(p * 336) * 337 + Math.round(lag * 336)) * 100000 + coins) * 201 + aq;
     if (key === this.key) return;
     this.key = key;
+    this.air = air;
     this.coinLbl.string = `${coins}`;
     const g = this.g;
     g.clear();
@@ -84,6 +87,16 @@ export class HeroHUD {
     g.circle(hx - 5, hy + 3, 6.5); g.fill(); g.circle(hx + 5, hy + 3, 6.5); g.fill();
     g.moveTo(hx - 10.5, hy + 0.5); g.lineTo(hx, hy - 12); g.lineTo(hx + 10.5, hy + 0.5); g.close(); g.fill();
     g.fillColor = new Color(255, 190, 190, 220); g.circle(hx - 4, hy + 5, 2.2); g.fill();
+    // 憋气条(血条正下方,黄色):满气隐藏,潜水耗气时出现
+    if (this.air < 1) {
+      const ay2 = y - 16, ah = 10;
+      g.fillColor = new Color(10, 8, 12, 200); g.roundRect(x - 2, ay2 - 2, w + 4, ah + 4, 6); g.fill();
+      g.fillColor = new Color(44, 38, 26, 255); g.roundRect(x, ay2, w, ah, 5); g.fill();
+      const af = Math.max(0, Math.min(1, this.air));
+      g.fillColor = af < 0.3 ? new Color(255, 150, 40, 255) : new Color(255, 208, 64, 255);   // 黄;告急偏橙
+      if (af > 0.01) { g.roundRect(x + 1, ay2 + 1, (w - 2) * af, ah - 2, 4); g.fill(); }
+      g.strokeColor = new Color(255, 232, 190, 110); g.lineWidth = 1.5; g.roundRect(x, ay2, w, ah, 5); g.stroke();
+    }
     // 金币徽章(数字 Label 盖在上面)
     const bx = x + w + 20, cy = y + hh / 2;
     g.fillColor = new Color(10, 8, 12, 200); g.roundRect(bx, y - 3, 132, hh + 6, 15); g.fill();

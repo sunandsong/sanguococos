@@ -7,6 +7,8 @@ import { AssetHub } from './AssetHub';
 import { HeroRig, HeroMode } from './HeroRig';
 import { TouchControls } from './TouchControls';
 import { HeroHUD } from './HeroHUD';
+import { DeathFx } from './DeathFx';
+import { AudioMgr } from './AudioMgr';
 
 const { ccclass } = _decorator;
 
@@ -38,7 +40,13 @@ export class Chapter2Well extends Component {
   private ledgeNode: Node | null = null; private ledgeAR = 0.6;
   private hero!: HeroRig; private walkPh = 0;
   private controls!: TouchControls; private hud!: HeroHUD;
-  private hp = 100; private coins = 0;   // 井下暂无战斗损耗,先接通 HUD 显示
+  private hp = 100; private coins = 0;
+  private air = 1;                          // 憋气 0..1:潜水消耗,水面/岸上回复
+  private readonly AIR_SEC = 10;            // 满气可潜秒数
+  private readonly AIR_RECOVER = 2.5;       // 回满秒数
+  private readonly DROWN_DPS = 8;           // 气尽掉血速度(每秒)
+  private deathFx!: DeathFx;                // 阵亡演出套件(每章复用)
+  private over = false; private deadT = 0;  // 阵亡状态/演出计时
   private atkTimer = 0; private atkDur = 0.42; private readonly ATK_DUR = 0.42;   // 一刀时长
   private atkType = 0; private comboT = 0; private readonly COMBO_WINDOW = 0.5;    // 三段连击
   private slamJump = false; private slamLandT = 0;   // 第3段跳劈:腾空中/落地收势(对齐第一章:蹲→跃起→下劈→落地冲击)
@@ -67,6 +75,9 @@ export class Chapter2Well extends Component {
 
   private bubbles: P[] = []; private silt: Silt[] = []; private ripples: Ripple[] = []; private debris: P[] = [];
   private rockHP = 5; private rockBroken = false;
+  private hitStop = 0;    // 顿帧(打击感灵魂):命中瞬间全场定格几帧
+  private flashT = 0;     // 石堆受击白闪剩余
+  private sparks: P[] = [];   // 击石火花(亮黄白,短命)
 
   onLoad() {
     this.node.layer = Layers.Enum.UI_2D;
@@ -99,6 +110,7 @@ export class Chapter2Well extends Component {
     this.depthLabel = ln.addComponent(Label);
     this.depthLabel.fontSize = 30; this.depthLabel.color = new Color(233, 201, 138);
     ln.setPosition(0, H / 2 - 60, 0);
+    ln.active = false;   // 顶部深度黄字已隐藏(报错时 update 的 catch 会重新打开兜底显示)
 
     // 操作/HUD 套件(与第一章同款):摇杆+攻击/技能钮、顶部头像血条金币
     this.controls = new TouchControls(this.node, {
@@ -109,6 +121,12 @@ export class Chapter2Well extends Component {
       onSpecial: () => this.heroSpecial(),
     }, { alpha: this.CTRL_ALPHA, jumpButton: true, upJump: false });   // 井下:独立跳跃键,摇杆上推只管游泳
     this.hud = new HeroHUD(this.node);
+    // 阵亡演出(灰罩+「阵 亡」+「重来」),点重来复活重开
+    this.deathFx = new DeathFx(this.node, () => {
+      this.deathFx.hide();
+      this.over = false; this.deadT = 0; this.hp = 100; this.air = 1;
+      this.reset();
+    });
     input.on(Input.EventType.KEY_DOWN, this.onKeyDown, this);
     input.on(Input.EventType.KEY_UP, this.onKeyUp, this);
     this.reset();
@@ -182,17 +200,28 @@ export class Chapter2Well extends Component {
     else if (this.atkTimer > 0) { mode = this.atkType === 2 ? 'slam' : 'attack'; p = 1 - this.atkTimer / this.atkDur; }
     else if (!this.onG && !this.inWater) mode = 'air';
     else if (this.inWater) {
-      // 水性三态:到水面一律踩水(只露头肩);水下有横向分量=横游(斜游身体倾斜);纯竖直=竖游
+      // 水性姿势:到水面=踩水(只露头肩);主动下潜=头朝下俯冲(横游帧旋转);有横向分量=横游(斜游倾斜);其余=竖游
       const movingH = Math.abs(this.pvx) > 30;
       if (this.py <= this.SURFACE + 30) mode = 'float';   // 提前量:快到水面就先摆出踩水姿势,升到水线正好衔接
-      else if (movingH) {
+      else if (this.pvy > 70) {
+        mode = 'swimH';   // 下潜:头顺着运动方向朝下(直下-90°,斜下按角度;缓慢下沉不算,仍竖游静漂)
+        tilt = Math.max(-90, Math.min(-30, Math.atan2(-this.pvy, Math.abs(this.pvx)) * 57.29578));
+      } else if (movingH) {
         mode = 'swimH';
         tilt = Math.max(-55, Math.min(55, Math.atan2(-this.pvy, Math.abs(this.pvx)) * 57.29578));   // 抬头角(度)
       } else mode = 'swim';
     }
     else if (this.keys.left || this.keys.right) mode = 'walk';
     else mode = 'idle';
-    this.hero.apply(this.SX(this.px), this.SY(this.py), this.dir, mode, p, this.pvy, this.walkPh, tilt);
+    // 影子:在石台上空(非水中)才有,传台面屏幕 y 给套件(腾空自动缩小)
+    const overLedge = !this.inWater && this.px >= this.LEDGE_L - 4 && this.px <= this.LEDGE_R + 4 && this.py <= this.LEDGE_Y + 2;
+    if (this.over) {   // 阵亡:套件的倒地/灰化/溶解演出
+      this.hero.apply(this.SX(this.px), this.SY(this.py), this.dir, 'dead', this.deadT, this.pvy, 0, 0,
+        overLedge ? this.SY(this.LEDGE_Y) : undefined);
+      return;
+    }
+    this.hero.apply(this.SX(this.px), this.SY(this.py), this.dir, mode, p, this.pvy, this.walkPh, tilt,
+      overLedge ? this.SY(this.LEDGE_Y) : undefined);
   }
 
   // ── 按钮（第一章摇杆 + 攻击/剑气）──
@@ -218,10 +247,13 @@ export class Chapter2Well extends Component {
     }
   }
   private jump() {
+    if (this.over) return;
     if (this.onG) { this.pvy = -470; this.onG = false; }
-    else if (this.inWater) { this.pvy = Math.min(this.pvy, -580); }
+    else if (this.inWater && this.py <= this.SURFACE + 30) { this.pvy = Math.min(this.pvy, -580); }   // 只有在水面(踩水区)才能鱼跃;深水按跳无效
   }
   private attack() {
+    if (this.over) return;
+    if (this.inWater) return;                                           // 水下不能攻击
     if (this.slamJump) return;                                          // 跳劈腾空中不可出招
     if (this.atkTimer > this.atkDur * 0.45) return;                     // 挥到后半段才能接下一刀（连点更顺）
     this.atkType = this.comboT > 0 ? (this.atkType + 1) % 3 : 0;        // 连招窗口内 → 下一段
@@ -230,12 +262,12 @@ export class Chapter2Well extends Component {
     this.hero.sndSwing(this.atkType);   // 起手音效(套件自带,与第一章一致)
     // 第 3 段跳劈：地面上真的跃起，冲击在落地时结算（水中/空中退化为原地挥）
     if (this.atkType === 2 && this.onG) { this.pvy = -430; this.onG = false; this.slamJump = true; }
-    // 在石台上、面朝石堆范围内 → 砸石开洞
+    // 在石台上、面朝石堆范围内 → 砸石开洞(顿帧+白闪+火花+音效,打击感三板斧)
     if (this.onG && !this.rockBroken && this.px < 110) {
       this.dir = -1;                          // 面朝石堆
-      this.rockHP--; this.shake = 8;
-      for (let i = 0; i < 9; i++) this.debris.push({ x: 38 + Math.random() * 26, y: this.LEDGE_BASE - 14 - Math.random() * 72, vx: 40 + Math.random() * 150, vy: -60 - Math.random() * 170, life: 0.7, r: 2 + Math.random() * 3.2 });
-      if (this.rockHP <= 0) this.rockBroken = true;
+      this.rockHP--;
+      this.rockHit(1);
+      if (this.rockHP <= 0) this.rockBreak();
     }
   }
   // 跳劈落地冲击：震屏 + 两侧碎屑;砸在石堆附近 → 双倍碎石(跳劈开洞更快)
@@ -248,13 +280,30 @@ export class Chapter2Well extends Component {
       this.debris.push({ x: this.px + d * (6 + Math.random() * 40), y: this.LEDGE_Y - 2, vx: d * (50 + Math.random() * 160), vy: -40 - Math.random() * 190, life: 0.6, r: 1.5 + Math.random() * 2.6 });
     }
     if (!this.rockBroken && this.px < 140) {
-      this.rockHP -= 2; this.shake = 13;
-      for (let i = 0; i < 12; i++) this.debris.push({ x: 38 + Math.random() * 26, y: this.LEDGE_BASE - 14 - Math.random() * 72, vx: 40 + Math.random() * 150, vy: -60 - Math.random() * 170, life: 0.7, r: 2 + Math.random() * 3.2 });
-      if (this.rockHP <= 0) this.rockBroken = true;
+      this.rockHP -= 2;
+      this.rockHit(1.6);   // 跳劈砸石:更狠的顿帧/白闪/火花
+      if (this.rockHP <= 0) this.rockBreak();
     }
   }
 
+  // 击石反馈:顿帧+白闪+震屏+碎屑+火花+音效(k=力度系数,跳劈>平砍)
+  private rockHit(k: number) {
+    this.hitStop = 0.05 * k; this.flashT = 0.12 * k; this.shake = 10 * k;
+    AudioMgr.inst.play('hit', Math.min(1, 0.85 * k));
+    // 打击不再喷碎石(只留顿帧/白闪/火花/音效;破碎瞬间仍有漫天碎石)
+    for (let i = 0; i < Math.round(6 * k); i++) this.sparks.push({ x: 58 + Math.random() * 14, y: this.LEDGE_BASE - 30 - Math.random() * 50, vx: 80 + Math.random() * 260, vy: -(30 + Math.random() * 220), life: 0.2 + Math.random() * 0.12, r: 1.4 + Math.random() * 1.4 });
+  }
+
+  // 石堆破碎:大震+闷响(不喷碎石)
+  private rockBreak() {
+    this.rockBroken = true;
+    this.hitStop = 0.09; this.flashT = 0.2; this.shake = 17;
+    AudioMgr.inst.play('land', 0.9);
+  }
+
   private heroSpecial() {
+    if (this.over) return;
+    if (this.inWater) return;   // 水下不能放剑气
     if (this.specialCd > 0) return;
     this.specialCd = this.SPECIAL_CD;
     const dir = this.dir;
@@ -303,8 +352,17 @@ export class Chapter2Well extends Component {
     for (; wi < this.wavePool.length; wi++) this.wavePool[wi].n.active = false;
     // 跳劈落地特效(冲击波+闪电)在角色套件里推进;镜头会动,把冲击点最新屏幕坐标喂进去
     this.hero.updateFx(dt, this.SX(this.slamFxX), this.SY(this.LEDGE_Y));
+    // 憋气:潜在水面提前量以下=耗气;头在水面/岸上=回气;气尽掉血,血尽阵亡演出
+    if (!this.over) {
+      if (this.inWater && this.py > this.SURFACE + 30) this.air = Math.max(0, this.air - dt / this.AIR_SEC);
+      else this.air = Math.min(1, this.air + dt / this.AIR_RECOVER);
+      if (this.air <= 0) {
+        this.hp -= this.DROWN_DPS * dt;
+        if (this.hp <= 0) { this.hp = 0; this.over = true; this.deadT = 0; this.deathFx.show(); }
+      }
+    } else this.deadT += dt;
     // HUD/技能冷却(套件内部有脏标记,平时零开销)
-    this.hud.set(this.hp, 100, this.hp, this.coins);
+    this.hud.set(this.hp, 100, this.hp, this.coins, this.air);
     this.controls.setSpecialCd(this.specialCd / this.SPECIAL_CD);
   }
   private splash(x: number, y: number) {
@@ -328,13 +386,20 @@ export class Chapter2Well extends Component {
 
   update(dt: number) {
     try { this.tick(dt); }
-    catch (e: any) { if (this.depthLabel) this.depthLabel.string = 'ERR: ' + (e && e.message ? e.message : String(e)); }
+    catch (e: any) { if (this.depthLabel) { this.depthLabel.node.active = true; this.depthLabel.string = 'ERR: ' + (e && e.message ? e.message : String(e)); } }
   }
   private tick(dt: number) {
-    dt = Math.min(dt, 0.05); this.t += dt; this.ph += dt * 6;
+    dt = Math.min(dt, 0.05);
+    // 顿帧:命中石头的一瞬全场定格(只刷渲染不走逻辑),打击感的灵魂
+    if (this.hitStop > 0) {
+      this.hitStop -= dt;
+      this.updateWall(); this.updateMouth(); this.updateLedge(); this.updateHero(); this.redraw();
+      return;
+    }
+    this.t += dt; this.ph += dt * 6;
     if (this.atkTimer > 0) this.atkTimer -= dt;
     if (this.slamLandT > 0) this.slamLandT -= dt;
-    const mvx = (this.keys.right ? 1 : 0) - (this.keys.left ? 1 : 0);
+    const mvx = this.over ? 0 : (this.keys.right ? 1 : 0) - (this.keys.left ? 1 : 0);   // 阵亡后不受操控
     if (mvx) { this.dir = mvx; if (!this.inWater) this.walkPh += dt * 10; }   // 走路相位只在陆上推进(水里由蹬水节奏管)
 
     if (!this.inWater) {
@@ -358,7 +423,7 @@ export class Chapter2Well extends Component {
       }
     } else {
       // 水下浮力阻尼潜行
-      let mvy = (this.keys.down ? 1 : 0) - (this.keys.up ? 1 : 0) + (this.joyY > 0.25 ? -1 : this.joyY < -0.25 ? 1 : 0);
+      let mvy = this.over ? 0 : (this.keys.down ? 1 : 0) - (this.keys.up ? 1 : 0) + (this.joyY > 0.25 ? -1 : this.joyY < -0.25 ? 1 : 0);
       if (this.py <= this.SURFACE + 4 && mvy < 0) mvy = 0;   // 身体到水面就踩水,不能再往上游(出水只靠跳跃鱼跃)
       this.pvy += 120 * dt; this.pvy += mvy * 330 * dt; this.pvx += mvx * 240 * dt;
       this.pvx -= this.pvx * 3.4 * dt; this.pvy -= this.pvy * 2.6 * dt;
@@ -398,7 +463,26 @@ export class Chapter2Well extends Component {
     for (const r of this.ripples) { r.life -= dt * 1.4; r.r += 160 * dt; } this.ripples = this.ripples.filter(r => r.life > 0);
     for (const s of this.silt) { s.wy += s.sp * 10 * dt; s.ph += dt; }
     if (this.shake > 0) this.shake = Math.max(0, this.shake - dt * 32);
-    for (const d of this.debris) { d.life -= dt; d.x += d.vx * dt; d.y += d.vy * dt; d.vy += 700 * dt; } this.debris = this.debris.filter(d => d.life > 0);
+    if (this.flashT > 0) this.flashT -= dt;
+    for (const d of this.debris) {
+      d.life -= dt;
+      const wasAbove = d.y < this.SURFACE;
+      d.x += d.vx * dt; d.y += d.vy * dt;
+      if (d.y >= this.SURFACE) {
+        // 入水:小涟漪一圈,然后阻尼下沉
+        if (wasAbove && d.vy > 60) this.ripples.push({ x: d.x, y: this.SURFACE, r: 2, life: 0.5 });
+        d.vy += 140 * dt; d.vy -= d.vy * 2.8 * dt; d.vx -= d.vx * 2.4 * dt;
+      } else {
+        d.vy += 700 * dt;
+        // 落上石台面:停住躺一会儿再淡出
+        if (d.vy > 0 && d.y >= this.LEDGE_Y - 2 && d.y <= this.LEDGE_Y + 12 && d.x >= this.LEDGE_L && d.x <= this.LEDGE_R) {
+          d.y = this.LEDGE_Y - 1; d.vy = 0; d.vx *= 0.25;
+          d.life = Math.max(d.life, 0.9);
+        }
+      }
+    }
+    this.debris = this.debris.filter(d => d.life > 0);
+    for (const s of this.sparks) { s.life -= dt; s.x += s.vx * dt; s.y += s.vy * dt; s.vy += 500 * dt; } this.sparks = this.sparks.filter(s => s.life > 0);
     if (this.py >= this.GOAL) this.reset();
 
     this.updateFx(dt);
@@ -417,11 +501,18 @@ export class Chapter2Well extends Component {
   // demo bakePile 的像素石堆：4 世界单位一块，调色板明暗 + 边缘描暗 + 贴墙投影
   private drawPixelPile(g: Graphics, circles: number[][], dmg: number) {
     const S = this.SCALE, P = 4;
+    const fl = Math.max(0, Math.min(1, this.flashT / 0.12)) * 0.85;   // 受击白闪:命中瞬间整堆提亮
     let mnx = 1e9, mxx = -1e9, mny = 1e9, mxy = -1e9;
     for (const c of circles) { mnx = Math.min(mnx, c[0] - c[2]); mxx = Math.max(mxx, c[0] + c[2]); mny = Math.min(mny, c[1] - c[2]); mxy = Math.max(mxy, c[1] + c[2]); }
     const inLC = (x: number, y: number) => { for (const c of circles) { const dx = x - c[0], dy = y - c[1]; if (dx * dx + dy * dy <= c[2] * c[2]) return true; } return false; };
     const span = Math.max(1, mxy - mny), bw = P * S + 0.6;
-    const cell = (wx: number, wy: number, col: number[], al: number) => { g.fillColor = new Color(col[0], col[1], col[2], al); g.rect(this.SX(wx) - bw / 2, this.SY(wy) - bw / 2, bw, bw); g.fill(); };
+    const cell = (wx: number, wy: number, col: number[], al: number) => {
+      g.fillColor = new Color(
+        Math.round(col[0] + (255 - col[0]) * fl),
+        Math.round(col[1] + (255 - col[1]) * fl),
+        Math.round(col[2] + (255 - col[2]) * fl), al);
+      g.rect(this.SX(wx) - bw / 2, this.SY(wy) - bw / 2, bw, bw); g.fill();
+    };
     // 投影层（贴墙凸出感）
     for (let py = mny; py < mxy; py += P) for (let px = mnx; px < mxx; px += P) { const cx = px + P / 2, cy = py + P / 2; if (inLC(cx, cy)) cell(cx + 7, this.LEDGE_BASE + cy + 6, [12, 9, 5], 90); }
     // 像素主体
@@ -434,7 +525,14 @@ export class Chapter2Well extends Component {
       cell(cx, this.LEDGE_BASE + cy, this.STPAL[idx], 255);
     }
     // 裂痕（受损）
-    for (let i = 0; i < dmg; i++) { const bx = 22 + i * 9; let d = 0; for (let Y = -14; Y > -64; Y -= 4) { cell(bx + d * 0.12, this.LEDGE_BASE + Y, [28, 21, 12], 255); d += 4; } }
+    // 裂痕:浅色断续细纹(暗棕半透明,随机断点),不再是通黑实线
+    for (let i = 0; i < dmg; i++) {
+      const bx = 22 + i * 9; let d = 0;
+      for (let Y = -30; Y > -80; Y -= 4) {
+        if (this.hsh(bx, Y) > 0.32) cell(bx + d * 0.12, this.LEDGE_BASE + Y, [56, 47, 36], 150);
+        d += 4;
+      }
+    }
   }
 
   private redraw() {
@@ -448,8 +546,21 @@ export class Chapter2Well extends Component {
         this.drawPixelPile(g, this.PILE, 5 - this.rockHP);   // demo 像素石堆
       } else {
         // 破洞 + 残渣
-        g.fillColor = new Color(6, 9, 6, 255); g.ellipse(this.SX(26), this.SY(this.LEDGE_BASE - 32), 42 * S, 40 * S); g.fill();
-        this.drawPixelPile(g, this.RUBBLE, 0);
+        // 破洞:像素噪声咬边的不规则黑洞(边缘一圈碎岩过渡),不是滑溜溜的椭圆
+        {
+          // 竖长条裂口(像山缝),噪声咬边;整体比原来靠上
+          // 位置/大小对齐原石堆(包围盒中心 x≈21,y≈台座上方80,半径≈50×58)
+          const cx0 = 21, cy0 = this.LEDGE_BASE - 80, P = 4, bw = P * S + 0.6;
+          for (let oy = -66; oy <= 62; oy += P) for (let ox = -56; ox <= 56; ox += P) {
+            const rr = (ox / 46) * (ox / 46) + (oy / 56) * (oy / 56);
+            const nz = this.hsh(ox * 3.1, oy * 2.7);
+            if (rr < 0.58 + 0.52 * nz) {
+              const edge = rr > 0.42 + 0.42 * nz;
+              g.fillColor = edge ? new Color(26, 22, 16, 255) : new Color(6, 9, 6, 255);
+              g.rect(this.SX(cx0 + ox) - bw / 2, this.SY(cy0 + oy) - bw / 2, bw, bw); g.fill();
+            }
+          }
+        }
       }
     }
 
@@ -503,6 +614,15 @@ export class Chapter2Well extends Component {
       const dy = this.SY(d.y);
       g.fillColor = new Color(74, 61, 42, Math.round(Math.max(0, Math.min(1, d.life * 1.6)) * 255));
       g.circle(this.SX(d.x), dy, Math.max(1, d.r * S)); g.fill();
+    }
+    // 击石火花(亮黄白,短命,带小拖尾感)
+    for (const s2 of this.sparks) {
+      const sy2 = this.SY(s2.y);
+      const a2 = Math.max(0, Math.min(1, s2.life * 4));
+      g.fillColor = new Color(255, 240, 170, Math.round(255 * a2));
+      g.circle(this.SX(s2.x), sy2, Math.max(1, s2.r * S)); g.fill();
+      g.fillColor = new Color(255, 255, 230, Math.round(200 * a2));
+      g.circle(this.SX(s2.x), sy2, Math.max(0.5, s2.r * 0.45 * S)); g.fill();
     }
 
     // 角色兜底标记（套件未就绪时）

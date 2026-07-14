@@ -7,7 +7,7 @@ import { AudioMgr } from './AudioMgr';
 //   走路 / 待机 / 空中(跳跃) / 攻击(横斩) / 跳劈 —— 帧尺寸/锚点/缩放/朝向全部对齐第一章。
 //   约定：默认精灵朝左，dir>=0(朝右) 时水平翻转；整体 ×1.8。
 // ─────────────────────────────────────────────────────────────
-export type HeroMode = 'idle' | 'walk' | 'air' | 'attack' | 'slam' | 'swim' | 'swimH' | 'float';
+export type HeroMode = 'idle' | 'walk' | 'air' | 'attack' | 'slam' | 'swim' | 'swimH' | 'float' | 'dead';
 
 export class HeroRig {
   readonly node: Node;
@@ -31,7 +31,13 @@ export class HeroRig {
   private bolt: number[][] = [];      // 相对冲击点的偏移折线
   private boltT = 0; private fxX = 0; private fxY = 0; private fxClock = 0;
 
+  private shadowG: Graphics | null = null;
+
   constructor(parent: Node, fxParent?: Node) {
+    // 接地影(先建=画在角色底下):场景在 apply 里传地面 y 就显示,腾空越高影子越小
+    const shN = new Node('rig-shadow'); shN.layer = Layers.Enum.UI_2D; shN.parent = parent;
+    shN.addComponent(UITransform);
+    this.shadowG = shN.addComponent(Graphics);
     this.node = new Node('hero-rig'); this.node.layer = Layers.Enum.UI_2D; this.node.parent = parent;
     this.ut = this.node.addComponent(UITransform); this.ut.setContentSize(40, 44); this.ut.setAnchorPoint(0.5, 0);
     this.sp = this.node.addComponent(Sprite); this.sp.sizeMode = Sprite.SizeMode.CUSTOM;
@@ -125,11 +131,36 @@ export class HeroRig {
     }
   }
 
-  /** 每帧调用。x/y = 脚底 Cocos 坐标；dir +1右/-1左；p = 攻击/跳劈进度 0..1；vy 世界竖速(向下为正)；walkPhase 走路相位；tilt 抬头倾角(度,斜游用) */
-  apply(x: number, y: number, dir: number, mode: HeroMode, p = 0, vy = 0, walkPhase = 0, tilt = 0) {
+  /** 每帧调用。x/y = 脚底 Cocos 坐标；dir +1右/-1左；p = 攻击/跳劈进度 0..1；vy 世界竖速(向下为正)；walkPhase 走路相位；tilt 抬头倾角(度,斜游用)；shadowY = 脚下地面的屏幕 y(不传=无影子) */
+  apply(x: number, y: number, dir: number, mode: HeroMode, p = 0, vy = 0, walkPhase = 0, tilt = 0, shadowY?: number) {
     this.node.setPosition(x, y, 0);
+    // 接地影:双层椭圆(软影+脚下浓核),离地越高越小越淡
+    if (this.shadowG) {
+      const g = this.shadowG; g.clear();
+      if (shadowY !== undefined) {
+        const hgt = Math.max(0, y - shadowY);
+        const k = Math.max(0.3, 1 - hgt / 320);
+        g.fillColor = new Color(0, 0, 0, Math.round(95 * k));
+        g.ellipse(x, shadowY - 2, 22 * k, 6.5 * k); g.fill();
+        g.fillColor = new Color(0, 0, 0, Math.round(150 * k));
+        g.ellipse(x, shadowY - 2, 11 * k, 3.4 * k); g.fill();
+      }
+    }
     this.node.setScale((dir >= 0 ? -this.S : this.S), this.S, 1);   // 默认朝左 → 朝右翻转（对齐第一章）
     this.node.angle = tilt === 0 ? 0 : (dir >= 0 ? tilt : -tilt);   // 抬头为正(斜游身体顺着运动方向倾)
+    // 阵亡演出(与第一章一致):缓缓倒地(90°) + 下沉 + 灰化 + 溶解;p = 阵亡秒数
+    if (mode === 'dead') {
+      this.ut.setContentSize(40, 44); this.ut.setAnchorPoint(0.5, 0);
+      if (this.foot.length) this.sp.spriteFrame = this.foot[0];
+      const d = p;
+      this.node.angle = (dir >= 0 ? 1 : -1) * Math.min(90, d * 72);
+      this.node.setPosition(x, y - Math.min(1, d / 1.3) * 25, 0);
+      const v = Math.round(255 - 95 * Math.min(1, d / 1.8));                              // 渐渐灰化
+      const a2 = Math.max(0, Math.round(255 * (1 - Math.max(0, d - 2.6) / 1.4)));         // 先看倒地 2.6s,再溶解
+      this.sp.color = new Color(v, v, v, a2);
+      return;
+    }
+    if (this.sp.color.r !== 255 || this.sp.color.a !== 255) this.sp.color = new Color(255, 255, 255, 255);   // 复活恢复本色
     if (mode === 'slam' && this.slam.length >= 4) {
       this.ut.setContentSize(72, 72); this.ut.setAnchorPoint(0.5, 4 / 72);
       const idx = p <= 0.15 ? 0 : p < 0.9 ? 1 : 2;
@@ -163,5 +194,6 @@ export class HeroRig {
     if (this.node && this.node.isValid) this.node.destroy();
     if (this.fxSlamN && this.fxSlamN.isValid) this.fxSlamN.destroy();
     if (this.boltG && this.boltG.node.isValid) this.boltG.node.destroy();
+    if (this.shadowG && this.shadowG.node.isValid) this.shadowG.node.destroy();
   }
 }

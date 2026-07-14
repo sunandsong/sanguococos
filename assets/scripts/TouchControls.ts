@@ -37,9 +37,9 @@ export class TouchControls {
       // 独立跳跃键(绿,上箭头):在攻击钮上方偏左
       const jmp = this.circleBtn(218, by + 150, 56, [70, 138, 84], (g, r, ia) => {
         g.fillColor = new Color(220, 250, 225, ia(255));
-        g.moveTo(-r * 0.34, -r * 0.05); g.lineTo(0, -r * 0.42); g.lineTo(r * 0.34, -r * 0.05); g.close(); g.fill();
+        g.moveTo(-r * 0.34, r * 0.05); g.lineTo(0, r * 0.42); g.lineTo(r * 0.34, r * 0.05); g.close(); g.fill();   // 箭头朝上
         g.fillColor = new Color(220, 250, 225, ia(220));
-        g.rect(-r * 0.12, -r * 0.05, r * 0.24, r * 0.42); g.fill();
+        g.rect(-r * 0.12, -r * 0.37, r * 0.24, r * 0.42); g.fill();   // 箭杆在下
       });
       this.tap(jmp, () => this.ev.onJump && this.ev.onJump());
     }
