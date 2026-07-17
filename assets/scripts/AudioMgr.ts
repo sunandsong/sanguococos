@@ -1,4 +1,4 @@
-import { Node, AudioSource, AudioClip, resources, director, tween } from 'cc';
+import { Node, AudioSource, AudioClip, resources, director, tween, Tween } from 'cc';
 
 // 极简音频管理：懒加载 + 缓存 + 缺文件静默跳过（音效没下齐也不报错）
 // 约定：所有音频放 resources/audio/ 下，用文件名（不含扩展名）播放。
@@ -15,6 +15,7 @@ export class AudioMgr {
   private stingerSource: AudioSource;   // 结局乐（胜利/阵亡，单次，可淡入）
   private cache: Record<string, AudioClip> = {};
   private missing: Record<string, boolean> = {};   // 已知缺失，不再重试
+  private stingerGen = 0;   // 结局乐世代号:stopStinger 后,仍在加载中的旧请求作废
   sfxVolume = 1.0;
   bgmVolume = 0.55;
 
@@ -92,9 +93,10 @@ export class AudioMgr {
 
   /** 播放结局乐（单次，从 0 淡入）：与战斗乐交叉过渡 */
   playStinger(name: string, vol = 0.8, fadeIn = 0.9) {
+    const gen = ++this.stingerGen;
     const src = this.stingerSource;
     this.load(name, clip => {
-      if (!clip) return;
+      if (!clip || gen !== this.stingerGen) return;   // 播之前被 stopStinger 取消了(重开/转场),不再迟到响起
       src.stop();
       src.clip = clip;
       src.volume = 0;
@@ -102,6 +104,16 @@ export class AudioMgr {
       tween(src).to(fadeIn, { volume: vol }).start();
     });
   }
+
+  /** 停掉结局乐(重开/转场时调,连同尚未加载完的待播请求一起取消) */
+  stopStinger() {
+    this.stingerGen++;
+    Tween.stopAllByTarget(this.stingerSource);
+    this.stingerSource.stop();
+  }
+
+  /** 预加载音频进缓存(不播),用于死亡乐等"必须准点响"的场合 */
+  preload(name: string) { this.load(name, () => {}); }
 
   /** 循环播放环境音（雨声等；同名重复调用不重启） */
   playAmb(name: string, vol = 0.5) {

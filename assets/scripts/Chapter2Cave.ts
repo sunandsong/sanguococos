@@ -1,6 +1,6 @@
 import {
   _decorator, Component, Node, Graphics, Color, UITransform, Layers,
-  input, Input, EventKeyboard, KeyCode,
+  input, Input, EventKeyboard, KeyCode, UIOpacity, tween,
 } from 'cc';
 import { DESIGN_W as W, DESIGN_H as H } from './Constants';
 import { HeroRig, HeroMode } from './HeroRig';
@@ -8,6 +8,7 @@ import { HeroCombat } from './HeroCombat';
 import { TouchControls } from './TouchControls';
 import { HeroHUD } from './HeroHUD';
 import { DeathFx } from './DeathFx';
+import { Chapter2Well } from './Chapter2Well';
 
 const { ccclass } = _decorator;
 
@@ -35,6 +36,7 @@ export class Chapter2Cave extends Component {
   private camX = 0; private t = 0;
   private combat!: HeroCombat; private slamJump = false; private slamLandT = 0;   // 跳劈大招:腾空/落地收势
   private deathFx!: DeathFx; private over = false; private deadT = 0;   // 共用阵亡演出
+  private exiting = false;   // 回井转场中(防重复触发)
   private hp = 100; private coins = 0;
   private keys = { left: false, right: false };
 
@@ -112,12 +114,31 @@ export class Chapter2Cave extends Component {
     if (this.onG) this.px += mv * this.SPEED * dt;
     else { this.px += mv * this.SPEED * 0.7 * dt; this.vy -= this.GRAV * dt; this.py += this.vy * dt; if (this.py <= this.GROUND) { this.py = this.GROUND; this.vy = 0; this.onG = true; if (this.slamJump) this.slamImpact(); } }
     this.px = Math.max(-this.DEPTH, Math.min(0, this.px));   // 右端(0)→ 左端(-DEPTH)
+    if (!this.over && this.onG && this.px >= 0 && mv > 0) { this.exitToWell(); return; }   // 顶着洞口往右走=回井里
     this.camX = this.px - this.HERO_SX;
     this.combat.update(dt, this.HERO_SX, this.py, this.dir);       // 连招计时 + 刀气弧 + 剑气波
     this.hero.updateFx(dt, this.HERO_SX, this.GROUND);              // 跳劈冲击波/闪电
     this.controls.setSpecialCd(this.combat.specialCd / this.combat.SPECIAL_CD);
     this.updateHero(); this.redraw();
     this.hud.set(this.hp, 100, this.hp, this.coins, 1);
+  }
+
+  // 洞口往右顶着走 → 黑幕淡入 → 回井关(石头保持已破,人落在洞口台上) → 淡出
+  private exitToWell() {
+    if (this.exiting) return; this.exiting = true;
+    const parent = this.node.parent!;
+    const fade = new Node('cave-fade'); fade.layer = Layers.Enum.UI_2D; fade.parent = parent;
+    fade.addComponent(UITransform).setContentSize(W, H);
+    const fg = fade.addComponent(Graphics); fg.fillColor = new Color(0, 0, 0, 255); fg.rect(-W / 2, -H / 2, W, H); fg.fill();
+    const op = fade.addComponent(UIOpacity); op.opacity = 0;
+    tween(op).to(0.45, { opacity: 255 }).call(() => {
+      this.node.destroy();                                   // 销毁洞穴
+      Chapter2Well.returnFromCave = true;                    // 井关按「从洞里回来」出生:洞已开、站在洞口台上
+      const n = new Node('Chapter2'); n.layer = Layers.Enum.UI_2D; n.addComponent(UITransform); n.parent = parent;
+      n.addComponent(Chapter2Well);
+      fade.setSiblingIndex(parent.children.length - 1);      // 黑幕置顶,盖住新场景再淡出
+      tween(op).delay(0.1).to(0.45, { opacity: 0 }).call(() => fade.destroy()).start();
+    }).start();
   }
 
   private updateHero() {

@@ -15,6 +15,7 @@ export class DeathFx {
   active = false;
 
   constructor(parent: Node, onRestart: () => void) {
+    AudioMgr.inst.preload('lose');   // 提前热缓存:死亡乐必须准点响,不能等异步加载迟到才凭空冒出来
     // 灰化遮罩(整体压灰) + 电影暗角(四边细带,边缘最深向内淡出)
     this.overlay = new Node('death-overlay'); this.overlay.layer = Layers.Enum.UI_2D; this.overlay.parent = parent;
     this.overlay.addComponent(UITransform);
@@ -72,7 +73,7 @@ export class DeathFx {
     if (this.active) return;
     this.active = true;
     AudioMgr.inst.fadeOutBgm(1.6); AudioMgr.inst.stopAmb();
-    this.loseTimer = setTimeout(() => { if (this.active) AudioMgr.inst.playStinger('lose', 0.8, 1.2); }, 800);   // 紧跟阵亡画面,不要隔太久凭空响
+    this.loseTimer = setTimeout(() => { if (this.active && this.overlay.isValid) AudioMgr.inst.playStinger('lose', 0.8, 1.2); }, 800);   // 紧跟阵亡画面;场景已销毁则不响(防跨场景凭空响)
     this.overlay.active = true;
     this.overlayOp.opacity = 0;
     tween(this.overlayOp).to(2.0, { opacity: 255 }).start();
@@ -90,6 +91,7 @@ export class DeathFx {
   hide() {
     this.active = false;
     if (this.loseTimer) { clearTimeout(this.loseTimer); this.loseTimer = null; }
+    AudioMgr.inst.stopStinger();   // 重来/转场时把已在播或还没播出来的伤感乐一并掐掉,不留到下个场景
     this.overlay.active = false; this.banner.active = false; this.restart.active = false;
   }
 

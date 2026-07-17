@@ -48,6 +48,7 @@ export class Chapter2Well extends Component {
   private deathFx!: DeathFx;                // 阵亡演出套件(每章复用)
   private over = false; private deadT = 0;  // 阵亡状态/演出计时
   private exiting = false;                  // 进洞转场中(防重复触发)
+  static returnFromCave = false;            // 洞穴回井:下次 onLoad 按「从洞里回来」出生(洞已开、站洞口台上)
   private slamJump = false; private slamLandT = 0;   // 第3段跳劈:腾空中/落地收势(对齐第一章:蹲→跃起→下劈→落地冲击)
   private slamFxX = 0;   // 冲击点世界x(镜头动时把最新屏幕坐标喂给套件特效)
   private fxLayer!: Node;
@@ -123,6 +124,14 @@ export class Chapter2Well extends Component {
     input.on(Input.EventType.KEY_DOWN, this.onKeyDown, this);
     input.on(Input.EventType.KEY_UP, this.onKeyUp, this);
     this.reset();
+    if (Chapter2Well.returnFromCave) {
+      // 从洞穴走回来:不再从天上掉,洞保持已破,人站在洞口台上朝右,镜头直接就位
+      Chapter2Well.returnFromCave = false;
+      this.rockBroken = true; this.rockHP = 0;
+      this.px = this.PASSAGE_X + 44; this.py = this.LEDGE_Y;
+      this.pvx = 0; this.pvy = 0; this.onG = true; this.inWater = false; this.dir = 1;
+      this.camY = this.py - this.DH * 0.36;
+    }
   }
   onDestroy() {
     input.off(Input.EventType.KEY_DOWN, this.onKeyDown, this);
@@ -303,10 +312,9 @@ export class Chapter2Well extends Component {
     // 跳劈落地特效(冲击波+闪电)在角色套件里推进;镜头会动,把冲击点最新屏幕坐标喂进去
     this.hero.updateFx(dt, this.SX(this.slamFxX), this.SY(this.LEDGE_Y));
     // 憋气/溺水(共用套件):没入水面提前量以下=耗气,露头/岸上=回气,气尽掉血,血尽阵亡演出
-    if (!this.over) {
-      const dmg = this.breath.update(dt, this.inWater && this.py > this.SURFACE + 30);
-      if (dmg > 0) { this.hp -= dmg; if (this.hp <= 0) { this.hp = 0; this.over = true; this.deadT = 0; this.deathFx.show(); } }
-    } else this.deadT += dt;
+    const dmg = this.breath.update(dt, this.inWater && this.py > this.SURFACE + 30);
+    if (dmg > 0) { this.hp -= dmg; if (this.hp <= 0) { this.hp = 0; this.over = true; this.deadT = 0; this.deathFx.show(); } }
+    // (阵亡后的 deadT 推进在 tick 开头的停摆分支里;走到这里必然未阵亡)
     // HUD/技能冷却(套件内部有脏标记,平时零开销)
     this.hud.set(this.hp, 100, this.hp, this.coins, this.breath.air);
     this.controls.setSpecialCd(this.combat.specialCd / this.combat.SPECIAL_CD);
@@ -359,6 +367,12 @@ export class Chapter2Well extends Component {
       this.updateWall(); this.updateMouth(); this.updateLedge(); this.updateHero(); this.redraw();
       return;
     }
+    // 阵亡:全场停摆(不再下沉/移动/憋气/到底重置),只走死亡演出
+    if (this.over) {
+      this.deadT += dt;
+      this.updateWall(); this.updateMouth(); this.updateLedge(); this.updateHero(); this.redraw();
+      return;
+    }
     this.t += dt; this.ph += dt * 6;
     if (this.slamLandT > 0) this.slamLandT -= dt;   // 连招计时归 HeroCombat.update 管
     const mvx = this.over ? 0 : (this.keys.right ? 1 : 0) - (this.keys.left ? 1 : 0);   // 阵亡后不受操控
@@ -387,7 +401,8 @@ export class Chapter2Well extends Component {
       // 水下浮力阻尼潜行
       let mvy = this.over ? 0 : (this.keys.down ? 1 : 0) - (this.keys.up ? 1 : 0) + (this.joyY > 0.25 ? -1 : this.joyY < -0.25 ? 1 : 0);
       if (this.py <= this.SURFACE + 4 && mvy < 0) mvy = 0;   // 身体到水面就踩水,不能再往上游(出水只靠跳跃鱼跃)
-      this.pvy += 120 * dt; this.pvy += mvy * 330 * dt; this.pvx += mvx * 240 * dt;
+      // 无输入=浮力托着缓缓上浮回水面(不会无声下沉挂机溺死);有输入沿用原手感
+      this.pvy += (mvy === 0 ? -140 : 120) * dt; this.pvy += mvy * 330 * dt; this.pvx += mvx * 240 * dt;
       this.pvx -= this.pvx * 3.4 * dt; this.pvy -= this.pvy * 2.6 * dt;
       this.pvy = Math.max(-350, Math.min(200, this.pvy)); this.pvx = Math.max(-100, Math.min(100, this.pvx));
       this.px += this.pvx * dt; this.py += this.pvy * dt; this.px = Math.max(46, Math.min(this.DW - 46, this.px));
