@@ -9,6 +9,7 @@ import { DESIGN_W, DESIGN_H } from './Constants';
 import { AudioMgr } from './AudioMgr';
 import { AssetHub } from './AssetHub';
 import { hLine, hArc } from './HandDraw';
+import { JUMP } from './JumpKit';
 const { ccclass, property } = _decorator;
 
 // ── Q版风格改造开关 ──
@@ -85,13 +86,13 @@ export class BattleScene extends Component {
   private readonly SPECIAL_CD = 1.2;      // 剑气波冷却
   private readonly PREJUMP_DUR = 0.14;    // 起跳前的蓄力下蹲时长
   private readonly JUMP_PRE = 0.1;        // 普通跳跃：起跳前下蹲蓄力时长
-  private readonly JUMP_MOVE_VY = 900;    // 普通跳跃：起跳速度
-  private readonly GRAVITY_MOVE = 2500;   // 普通跳跃：重力
+  private readonly JUMP_MOVE_VY = JUMP.VY;      // 普通跳跃：起跳速度(全章共用 JumpKit)
+  private readonly GRAVITY_MOVE = JUMP.GRAVITY; // 普通跳跃：重力(全章共用 JumpKit)
   private readonly JUMP_LAND = 0.3;       // 普通跳跃：落地缓冲下蹲时长（长一点看得清弹性）
   private readonly SLIDE_DUR = 0.35;      // 闪躲滑铲：滑行时长（全程无敌帧）
   private readonly SLIDE_CD = 0.55;       // 闪躲滑铲：冷却
   private readonly SLIDE_SPEED = 2.4;     // 闪躲滑铲：起始速度倍率（相对 heroSpeed，滑行中衰减）
-  private readonly JUMP_VY = 980;         // 跳劈起跳速度
+  private readonly JUMP_VY = JUMP.SLAM_VY;   // 跳劈起跳速度(全章共用 JumpKit)
   private readonly GRAVITY_J = 2800;      // 跳劈重力
   private readonly LAND_DUR = 0.7;        // 落地深蹲→起身时长（越大起身越慢）
   // Boss 预警重击
@@ -1014,11 +1015,12 @@ export class BattleScene extends Component {
     }
 
     // 电影暗角（压暗四周，聚焦中央；盖在角色之上、UI 之下，只画一次）
+    // Q版:暗角减半、黑改暖褐,画面保持亮暖绘本感,只留一点点聚焦
     const vg = this.child('vignette').addComponent(Graphics);
     const bands = 7, bw = 30;
     for (let i = 0; i < bands; i++) {
-      const a = Math.round(11 * (bands - i));   // 越靠边越暗
-      vg.fillColor = new Color(0, 0, 0, a);
+      const a = Math.round(5 * (bands - i));   // 越靠边越暗(Q版减半)
+      vg.fillColor = new Color(46, 28, 18, a);
       vg.rect(-W / 2, H / 2 - (i + 1) * bw, W, bw); vg.fill();          // 顶
       vg.rect(-W / 2, -H / 2 + i * bw, W, bw); vg.fill();              // 底
       vg.rect(-W / 2 + i * bw, -H / 2, bw, H); vg.fill();              // 左
@@ -3943,20 +3945,30 @@ export class BattleScene extends Component {
     if (key === this.cloudKey) return;
     this.cloudKey = key;
     g.clear();
-    // 云色：平时亮云 → 雨天渐变成深灰乌云
-    const bright = this.sh(this.timeOfDay().sky, 1.16);
+    // Q版棉花云:云色 = 时段天空色掺白(白天近白、黄昏染粉、夜里偏灰蓝);雨天仍可压灰
+    const bright = this.sh(this.timeOfDay().sky, 1.12);
+    const mixW = 0.68;   // 掺白比例:越高越白越可爱
     const col = new Color(
-      Math.round(bright.r + (86 - bright.r) * k),
-      Math.round(bright.g + (92 - bright.g) * k),
-      Math.round(bright.b + (106 - bright.b) * k), 255);
+      Math.round((bright.r + (255 - bright.r) * mixW) + (86 - bright.r) * k),
+      Math.round((bright.g + (255 - bright.g) * mixW) + (92 - bright.g) * k),
+      Math.round((bright.b + (255 - bright.b) * mixW) + (106 - bright.b) * k), 255);
+    // 云底阴影色:同色系压一档,棉花团才有厚度
+    const und = new Color(Math.round(col.r * 0.88), Math.round(col.g * 0.9), Math.round(col.b * 0.96), 255);
     for (let i = 0; i < n; i++) {
       const bx = bxs[i];
-      const by = gy + 420 + (i % 3) * 70 - (i >= 5 ? 36 : 0);   // 增补的云稍低，铺满天空
-      const s = (0.85 + (i % 3) * 0.28) * (1 + k * 0.55);       // 乌云更大更厚
+      const by = gy + 430 + (i % 3) * 70 - (i >= 5 ? 36 : 0);   // 增补的云稍低，铺满天空
+      const s = (0.8 + (i % 3) * 0.26) * (1 + k * 0.55);        // 乌云更大更厚
+      const cx = bx + 48 * s, cy = snap(by);
+      // 云底:扁椭圆(平底),先铺阴影色再叠亮色,底边露一条阴影
+      g.fillColor = und;
+      g.ellipse(cx, cy + 6 * s, 62 * s, 20 * s); g.fill();
       g.fillColor = col;
-      g.rect(bx, snap(by), snap(96 * s), snap(26 * s)); g.fill();
-      g.rect(snap(bx + 22 * s), snap(by + 18 * s), snap(60 * s), snap(20 * s)); g.fill();
-      g.rect(snap(bx - 16 * s), snap(by + 10 * s), snap(42 * s), snap(18 * s)); g.fill();
+      g.ellipse(cx, cy + 9 * s, 58 * s, 17 * s); g.fill();
+      // 一排圆鼓包(中间最大,两侧收小),union 出棉花团轮廓
+      g.circle(cx - 34 * s, cy + 8 * s, 19 * s); g.fill();
+      g.circle(cx - 12 * s, cy + 16 * s, 26 * s); g.fill();
+      g.circle(cx + 14 * s, cy + 14 * s, 22 * s); g.fill();
+      g.circle(cx + 36 * s, cy + 6 * s, 16 * s); g.fill();
     }
   }
 
@@ -4186,9 +4198,10 @@ export class BattleScene extends Component {
     g.clear();
 
     // 天空：平滑竖直渐变（地平线亮 → 天顶暗），无硬分割线
+    // Q版粉彩天:整体提亮、顶部少压暗,对比放柔
     const sky = this.timeOfDay().sky;
-    const skyBot = sky.map(v => Math.min(255, v * 1.06));
-    const skyTop = sky.map(v => v * 0.66);
+    const skyBot = sky.map(v => Math.min(255, v * 1.14 + 14));
+    const skyTop = sky.map(v => v * 0.84);
     const skyRegion = H / 2 - gy, sb = 26, sbh = skyRegion / sb;
     for (let i = 0; i < sb; i++) {
       const c = this.blend(skyBot, skyTop, i / (sb - 1));

@@ -9,6 +9,7 @@ import { TouchControls } from './TouchControls';
 import { HeroHUD } from './HeroHUD';
 import { DeathFx } from './DeathFx';
 import { Chapter2Well } from './Chapter2Well';
+import { JUMP } from './JumpKit';
 
 const { ccclass } = _decorator;
 
@@ -29,7 +30,7 @@ export class Chapter2Cave extends Component {
   private readonly GROUND = -H * 0.16;      // 脚线 Cocos y
   private readonly CEIL_H = 360;            // 走廊净高
   private readonly HERO_SX = W * 0.16;      // 角色固定屏幕 x(右侧,朝左走)
-  private readonly SPEED = 290; private readonly JUMP_VY = 740; private readonly GRAV = 1900;   // 与井关同屏幕手感(井关 demo 参数 ×SCALE)
+  private readonly SPEED = 290; private readonly JUMP_VY = JUMP.VY; private readonly GRAV = JUMP.GRAVITY;   // 跳跃物理全章共用 JumpKit
   private readonly DEPTH = 3200;            // 通道往左的深度(px 从 0 走到 -DEPTH)
 
   private px = 0; private py = 0; private vy = 0; private onG = true; private dir = -1; private walkPh = 0;   // 从右端入,朝左
@@ -91,7 +92,7 @@ export class Chapter2Cave extends Component {
   private attack() {
     if (this.over || this.slamJump) return;
     const type = this.combat.tryAttack();
-    if (type === 2 && this.onG) { this.vy = this.JUMP_VY * 0.915; this.onG = false; this.slamJump = true; }   // 第3段跳劈:真跃起(与井关同比例),落地结算
+    if (type === 2 && this.onG) { this.vy = JUMP.SLAM_VY; this.onG = false; this.slamJump = true; }   // 第3段跳劈:真跃起(全章共用 JumpKit),落地结算
   }
   private special() { if (this.over) return; this.combat.trySpecial(this.dir, this.HERO_SX + this.dir * 20, this.py + 60); }   // 剑气波
   /** 受伤(供未来陷阱/敌人调用):掉血,血尽 → 阵亡演出 */

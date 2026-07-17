@@ -1,6 +1,7 @@
 import { Node, Sprite, SpriteFrame, UITransform, Texture2D, Rect, Layers, Graphics, Color } from 'cc';
 import { AssetHub } from './AssetHub';
 import { AudioMgr } from './AudioMgr';
+import { JUMP } from './JumpKit';
 
 // ─────────────────────────────────────────────────────────────
 // 步战赵云「角色套件」：从第一章 BattleScene 抽出来的可复用可视模块。
@@ -22,6 +23,10 @@ export class HeroRig {
   private float: SpriteFrame[] = [];  // 水面踩水 2 帧 56×56(双臂开合)
   private readonly HERO_ROW = 1;
   private readonly S = 1.8;           // 与第一章 SPRITE_SCALE 一致
+  jumpRefVy = JUMP.VY;                // 跳跃初速参考(空中挤压拉伸的归一化基准);非屏幕像素坐标系的场景要除以自己的 SCALE
+  private landT = 0;                  // 落地回弹计时(空中→落地时由套件自己触发,压扁→过冲→归位)
+  private wasAir = false;             // 上一帧是否空中(检测落地瞬间)
+  private readonly LAND_DUR = 0.3;    // 落地缓冲时长(与第一章 JUMP_LAND 同参)
   ready = false;
 
   // ── 跳劈落地特效(套件自带):贴地冲击波序列帧 + 天降闪电,参数与第一章一致 ──
@@ -97,6 +102,7 @@ export class HeroRig {
   /** 每帧推进跳劈特效;镜头会动的场景把冲击点的最新屏幕坐标传进来(不传则用触发时坐标) */
   updateFx(dt: number, x?: number, y?: number) {
     this.fxClock += dt;
+    if (this.landT > 0) this.landT -= dt;   // 落地回弹计时(视觉专用,不影响物理)
     if (x !== undefined) this.fxX = x;
     if (y !== undefined) this.fxY = y;
     // 冲击波:计时选帧,横宽纵扁贴地
@@ -161,6 +167,9 @@ export class HeroRig {
       return;
     }
     if (this.sp.color.r !== 255 || this.sp.color.a !== 255) this.sp.color = new Color(255, 255, 255, 255);   // 复活恢复本色
+    const grounded = mode === 'walk' || mode === 'idle';
+    if (this.wasAir && grounded) this.landT = this.LAND_DUR;   // 空中→落地瞬间:触发回弹(套件自检,场景零接线)
+    this.wasAir = mode === 'air';
     if (mode === 'slam' && this.slam.length >= 4) {
       this.ut.setContentSize(72, 72); this.ut.setAnchorPoint(0.5, 4 / 72);
       const idx = p <= 0.15 ? 0 : p < 0.9 ? 1 : 2;
@@ -183,10 +192,29 @@ export class HeroRig {
     } else if (mode === 'air' && this.jump.length >= 3) {
       this.ut.setContentSize(64, 56); this.ut.setAnchorPoint(0.5, 4 / 56);
       this.sp.spriteFrame = this.jump[vy < 0 ? 1 : 2];             // 上升伸展 / 下落屈腿
+      // 跳跃挤压拉伸(从第一章提取):上升越快越拉长 → 顶点缩短(0.72) → 下落回正;
+      // 跳跃帧姿态已画在图里,程序挤压只留 40%(与第一章同参)
+      const vn = -vy / this.jumpRefVy;   // >0 上升
+      const ry = vn > 0 ? 0.72 + Math.min(1, vn) * 0.68 : 0.72 + Math.min(1, -vn) * 0.28;
+      const cy = Math.max(0.6, Math.min(1.45, 1 + (ry - 1) * 0.4));
+      const cx = Math.max(0.7, 1 + (1 - (ry - 1) * 0.6 - 1) * 0.4);
+      this.node.setScale((dir >= 0 ? -this.S : this.S) * cx, this.S * cy, 1);
     } else if (this.foot.length) {
-      this.ut.setContentSize(40, 44); this.ut.setAnchorPoint(0.5, 0);
-      const idx = mode === 'walk' ? (Math.floor(walkPhase) % 4) : 0;
-      this.sp.spriteFrame = this.foot[idx];
+      if (this.landT > 0 && grounded && this.jump.length >= 3) {
+        // 落地回弹(从第一章提取,同参):前段蹲帧压扁 → 后段弹性过冲拉高 → 归位;程序挤压只留40%
+        const l = Math.max(0, this.landT) / this.LAND_DUR;   // 1→0
+        this.ut.setContentSize(64, 56); this.ut.setAnchorPoint(0.5, 4 / 56);
+        this.sp.spriteFrame = this.jump[0];                  // 落地蹲帧
+        const overshoot = l < 0.45 ? Math.sin((0.45 - l) / 0.45 * Math.PI) * 0.13 : 0;
+        const ry = (1 - l * 0.34) * (1 + overshoot);
+        const cy = Math.max(0.6, Math.min(1.45, 1 + (ry - 1) * 0.4));
+        const cx = Math.max(0.7, 1 - (ry - 1) * 0.2);
+        this.node.setScale((dir >= 0 ? -this.S : this.S) * cx, this.S * cy, 1);
+      } else {
+        this.ut.setContentSize(40, 44); this.ut.setAnchorPoint(0.5, 0);
+        const idx = mode === 'walk' ? (Math.floor(walkPhase) % 4) : 0;
+        this.sp.spriteFrame = this.foot[idx];
+      }
     }
   }
 

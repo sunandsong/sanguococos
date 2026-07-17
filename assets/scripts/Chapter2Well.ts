@@ -11,6 +11,7 @@ import { DeathFx } from './DeathFx';
 import { AudioMgr } from './AudioMgr';
 import { HeroCombat } from './HeroCombat';
 import { Breath } from './Breath';
+import { JUMP } from './JumpKit';
 import { Chapter2Cave } from './Chapter2Cave';
 
 const { ccclass } = _decorator;
@@ -97,6 +98,7 @@ export class Chapter2Well extends Component {
     // 特效层（跳劈冲击波/刀气/剑气），排在角色之上
     this.fxLayer = new Node('c2-fx'); this.fxLayer.layer = Layers.Enum.UI_2D; this.fxLayer.parent = this.node; this.fxLayer.addComponent(UITransform);
     this.hero = new HeroRig(this.node, this.fxLayer);   // 角色套件(跳劈冲击波/闪电已内置)
+    this.hero.jumpRefVy = JUMP.VY / this.SCALE;         // 井关喂给套件的是 demo 坐标速度,拉伸归一化同步换算
     this.combat = new HeroCombat(this.fxLayer, this.hero);   // 共用战斗套件(连招+刀气+剑气)
 
     const ln = new Node('c2-depth'); ln.layer = Layers.Enum.UI_2D; ln.parent = this.node;
@@ -251,7 +253,7 @@ export class Chapter2Well extends Component {
   }
   private jump() {
     if (this.over) return;
-    if (this.onG) { this.pvy = -470; this.onG = false; }
+    if (this.onG) { this.pvy = -JUMP.VY / this.SCALE; this.onG = false; }   // 全章共用 JumpKit(井关 demo 坐标÷SCALE)
     else if (this.inWater && this.py <= this.SURFACE + 30) { this.pvy = Math.min(this.pvy, -580); }   // 只有在水面(踩水区)才能鱼跃;深水按跳无效
   }
   private attack() {
@@ -261,7 +263,7 @@ export class Chapter2Well extends Component {
     const type = this.combat.tryAttack();                               // 共用套件:连招+起手音效
     if (type < 0) return;                                               // 还在挥、不能接
     // 第 3 段跳劈：地面上真的跃起，冲击在落地时结算（水中/空中退化为原地挥）
-    if (type === 2 && this.onG) { this.pvy = -430; this.onG = false; this.slamJump = true; }
+    if (type === 2 && this.onG) { this.pvy = -JUMP.SLAM_VY / this.SCALE; this.onG = false; this.slamJump = true; }   // 跳劈起跳,全章共用 JumpKit
     // 在石台上、面朝石堆范围内 → 砸石开洞(顿帧+白闪+火花+音效,打击感三板斧)
     if (this.onG && !this.rockBroken && this.px < 110) {
       this.dir = -1;                          // 面朝石堆
@@ -387,7 +389,7 @@ export class Chapter2Well extends Component {
         if (this.px > this.LEDGE_R + 2) this.onG = false;         // 走出右缘 → 掉落
       } else {
         // 空中自由下落
-        this.pvy += 1200 * dt; this.pvy = Math.min(this.pvy, 900); this.px += mvx * 150 * dt; this.py += this.pvy * dt;
+        this.pvy += JUMP.GRAVITY / this.SCALE * dt; this.pvy = Math.min(this.pvy, JUMP.FALL_CAP / this.SCALE); this.px += mvx * 150 * dt; this.py += this.pvy * dt;   // 跳跃物理全章共用 JumpKit(demo 坐标÷SCALE)
         if (this.pvy > 0) {
           const pf = this.py - this.pvy * dt;
           if (pf <= this.LEDGE_Y && this.py >= this.LEDGE_Y && this.px >= this.LEDGE_L && this.px <= this.LEDGE_R) {
