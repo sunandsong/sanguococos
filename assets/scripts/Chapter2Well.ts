@@ -1,6 +1,6 @@
 import {
   _decorator, Component, Node, Graphics, Label, Color, UITransform,
-  input, Input, EventKeyboard, KeyCode, Layers, Sprite, SpriteFrame, Texture2D, Rect, Vec3, tween, EventTouch,
+  input, Input, EventKeyboard, KeyCode, Layers, Sprite, SpriteFrame, Texture2D, Rect, Vec3, tween, EventTouch, UIOpacity,
 } from 'cc';
 import { DESIGN_W as W, DESIGN_H as H } from './Constants';
 import { AssetHub } from './AssetHub';
@@ -9,6 +9,9 @@ import { TouchControls } from './TouchControls';
 import { HeroHUD } from './HeroHUD';
 import { DeathFx } from './DeathFx';
 import { AudioMgr } from './AudioMgr';
+import { HeroCombat } from './HeroCombat';
+import { Breath } from './Breath';
+import { Chapter2Cave } from './Chapter2Cave';
 
 const { ccclass } = _decorator;
 
@@ -41,21 +44,14 @@ export class Chapter2Well extends Component {
   private hero!: HeroRig; private walkPh = 0;
   private controls!: TouchControls; private hud!: HeroHUD;
   private hp = 100; private coins = 0;
-  private air = 1;                          // 憋气 0..1:潜水消耗,水面/岸上回复
-  private readonly AIR_SEC = 10;            // 满气可潜秒数
-  private readonly AIR_RECOVER = 2.5;       // 回满秒数
-  private readonly DROWN_DPS = 8;           // 气尽掉血速度(每秒)
+  private breath = new Breath({ sec: 10, recover: 2.5, drownDps: 8 });   // 共用憋气/溺水套件
   private deathFx!: DeathFx;                // 阵亡演出套件(每章复用)
   private over = false; private deadT = 0;  // 阵亡状态/演出计时
-  private atkTimer = 0; private atkDur = 0.42; private readonly ATK_DUR = 0.42;   // 一刀时长
-  private atkType = 0; private comboT = 0; private readonly COMBO_WINDOW = 0.5;    // 三段连击
+  private exiting = false;                  // 进洞转场中(防重复触发)
   private slamJump = false; private slamLandT = 0;   // 第3段跳劈:腾空中/落地收势(对齐第一章:蹲→跃起→下劈→落地冲击)
   private slamFxX = 0;   // 冲击点世界x(镜头动时把最新屏幕坐标喂给套件特效)
-  private specialCd = 0; private readonly SPECIAL_CD = 1.0;                        // 剑气冷却
-  private fxCre: SpriteFrame | null = null;                                         // 新月贴图（刀气/剑气）
-  private fxLayer!: Node; private slashN: Node | null = null; private slashSp: Sprite | null = null;
-  private wavePool: { n: Node; sp: Sprite }[] = [];
-  private waves: { x: number; y: number; dir: number; life: number; max: number }[] = [];
+  private fxLayer!: Node;
+  private combat!: HeroCombat;   // 共用战斗套件(连招+刀气+剑气)
 
   // 世界参数（缩短落差：落一下就见水见台；潜水段仍深）
   private readonly SURFACE = 900;
@@ -97,13 +93,10 @@ export class Chapter2Well extends Component {
     gn.addComponent(UITransform);
     this.g = gn.addComponent(Graphics);
 
-    // 特效层（刀气/剑气新月/跳劈特效），排在角色之上
+    // 特效层（跳劈冲击波/刀气/剑气），排在角色之上
     this.fxLayer = new Node('c2-fx'); this.fxLayer.layer = Layers.Enum.UI_2D; this.fxLayer.parent = this.node; this.fxLayer.addComponent(UITransform);
-    this.hero = new HeroRig(this.node, this.fxLayer);   // 角色套件(跳劈冲击波/闪电已内置在套件里)
-    this.slashN = new Node('c2-slash'); this.slashN.layer = Layers.Enum.UI_2D; this.slashN.parent = this.fxLayer;
-    this.slashN.addComponent(UITransform).setContentSize(128, 128);
-    this.slashSp = this.slashN.addComponent(Sprite); this.slashSp.sizeMode = Sprite.SizeMode.CUSTOM; this.slashN.active = false;
-    AssetHub.loadSF('fx-crescent', (sf) => { if (!sf) return; this.fxCre = sf; if (this.slashSp) this.slashSp.spriteFrame = sf; });
+    this.hero = new HeroRig(this.node, this.fxLayer);   // 角色套件(跳劈冲击波/闪电已内置)
+    this.combat = new HeroCombat(this.fxLayer, this.hero);   // 共用战斗套件(连招+刀气+剑气)
 
     const ln = new Node('c2-depth'); ln.layer = Layers.Enum.UI_2D; ln.parent = this.node;
     ln.addComponent(UITransform);
@@ -124,7 +117,7 @@ export class Chapter2Well extends Component {
     // 阵亡演出(灰罩+「阵 亡」+「重来」),点重来复活重开
     this.deathFx = new DeathFx(this.node, () => {
       this.deathFx.hide();
-      this.over = false; this.deadT = 0; this.hp = 100; this.air = 1;
+      this.over = false; this.deadT = 0; this.hp = 100; this.breath.reset();
       this.reset();
     });
     input.on(Input.EventType.KEY_DOWN, this.onKeyDown, this);
@@ -195,9 +188,10 @@ export class Chapter2Well extends Component {
   private updateHero() {
     // 选姿势：攻击 > 空中 > 走 > 待机；水里保持待机直立
     let mode: HeroMode; let p = 0; let tilt = 0;
+    const ca = this.combat.anim();
     if (this.slamJump) { mode = 'slam'; p = this.pvy < 0 ? 0.1 : 0.5; }        // 腾空跳劈:上升举枪 / 下落俯冲
     else if (this.slamLandT > 0) { mode = 'slam'; p = 0.95; }                  // 落地砸击收势帧
-    else if (this.atkTimer > 0) { mode = this.atkType === 2 ? 'slam' : 'attack'; p = 1 - this.atkTimer / this.atkDur; }
+    else if (ca) { mode = ca.mode; p = ca.p; }                                 // 挥砍/跳劈(共用套件)
     else if (!this.onG && !this.inWater) mode = 'air';
     else if (this.inWater) {
       // 水性姿势:到水面=踩水(只露头肩);主动下潜=头朝下俯冲(横游帧旋转);有横向分量=横游(斜游倾斜);其余=竖游
@@ -255,13 +249,10 @@ export class Chapter2Well extends Component {
     if (this.over) return;
     if (this.inWater) return;                                           // 水下不能攻击
     if (this.slamJump) return;                                          // 跳劈腾空中不可出招
-    if (this.atkTimer > this.atkDur * 0.45) return;                     // 挥到后半段才能接下一刀（连点更顺）
-    this.atkType = this.comboT > 0 ? (this.atkType + 1) % 3 : 0;        // 连招窗口内 → 下一段
-    const dur = this.atkType === 2 ? this.ATK_DUR * 1.5 : this.ATK_DUR; // 跳劈稍长
-    this.atkTimer = dur; this.atkDur = dur; this.comboT = dur + this.COMBO_WINDOW;
-    this.hero.sndSwing(this.atkType);   // 起手音效(套件自带,与第一章一致)
+    const type = this.combat.tryAttack();                               // 共用套件:连招+起手音效
+    if (type < 0) return;                                               // 还在挥、不能接
     // 第 3 段跳劈：地面上真的跃起，冲击在落地时结算（水中/空中退化为原地挥）
-    if (this.atkType === 2 && this.onG) { this.pvy = -430; this.onG = false; this.slamJump = true; }
+    if (type === 2 && this.onG) { this.pvy = -430; this.onG = false; this.slamJump = true; }
     // 在石台上、面朝石堆范围内 → 砸石开洞(顿帧+白闪+火花+音效,打击感三板斧)
     if (this.onG && !this.rockBroken && this.px < 110) {
       this.dir = -1;                          // 面朝石堆
@@ -304,66 +295,21 @@ export class Chapter2Well extends Component {
   private heroSpecial() {
     if (this.over) return;
     if (this.inWater) return;   // 水下不能放剑气
-    if (this.specialCd > 0) return;
-    this.specialCd = this.SPECIAL_CD;
-    const dir = this.dir;
-    this.waves.push({ x: this.px + dir * 20, y: this.py - 30, dir, life: 0, max: 1.25 });   // 剑气波
-    if (this.atkTimer <= 0) { this.atkType = 0; this.atkDur = this.ATK_DUR; this.atkTimer = this.ATK_DUR; }  // 顺带摆挥砍姿势
-  }
-  private waveFx(i: number): { n: Node; sp: Sprite } | null {
-    if (this.wavePool[i]) return this.wavePool[i];
-    if (!this.fxCre || i >= 4) return null;
-    const n = new Node('c2-wave' + i); n.layer = Layers.Enum.UI_2D; n.parent = this.fxLayer;
-    n.addComponent(UITransform).setContentSize(128, 128);
-    const sp = n.addComponent(Sprite); sp.sizeMode = Sprite.SizeMode.CUSTOM; sp.spriteFrame = this.fxCre;
-    const rec = { n, sp }; this.wavePool.push(rec); return rec;
+    this.combat.trySpecial(this.dir, this.SX(this.px) + this.dir * 20, this.SY(this.py) + 55);   // 剑气波(共用套件)
   }
   private updateFx(dt: number) {
-    if (this.specialCd > 0) this.specialCd -= dt;
-    if (this.comboT > 0) this.comboT -= dt;
-    // 挥砍刀气弧（新月随挥砍进度旋转 + 中段最亮）
-    let slashOn = false;
-    if (this.atkTimer > 0 && this.slashN && this.slashSp && this.slashSp.spriteFrame) {
-      const s = 1 - this.atkTimer / this.atkDur, a = 1 - Math.abs(s - 0.4) / 0.6;
-      if (a > 0.05) {
-        const cx = this.SX(this.px) + this.dir * 34, cy = this.SY(this.py) + 74;
-        const c0 = this.dir > 0 ? 0 : Math.PI;
-        const vert = this.atkType === 1 ? 0.9 - 1.9 * s : this.atkType === 2 ? 0.15 + 0.5 * s : -0.9 + 1.9 * s;
-        this.slashN.active = true;
-        this.slashN.setPosition(cx, cy, 0);
-        this.slashN.angle = (c0 - this.dir * vert) * 57.29578;
-        this.slashN.setScale(1.7, 1.7, 1);
-        this.slashSp.color = new Color(255, 245, 210, Math.round(230 * a));
-        slashOn = true;
-      }
-    }
-    if (!slashOn && this.slashN && this.slashN.active) this.slashN.active = false;
-    // 剑气波：飞行 + 淡出
-    const speed = 600;
-    for (let i = this.waves.length - 1; i >= 0; i--) { const w = this.waves[i]; w.life += dt; w.x += w.dir * speed * dt; if (w.life >= w.max) this.waves.splice(i, 1); }
-    let wi = 0;
-    for (const w of this.waves) {
-      const fx = this.waveFx(wi); if (!fx) break; wi++;
-      const a = Math.max(0, 1 - w.life / w.max);
-      fx.n.active = true; fx.n.setPosition(this.SX(w.x), this.SY(w.y), 0);
-      fx.n.angle = w.dir > 0 ? 0 : 180; fx.n.setScale(0.95, 0.95, 1);
-      fx.sp.color = new Color(150, 235, 255, Math.round(240 * a));   // 青白剑气
-    }
-    for (; wi < this.wavePool.length; wi++) this.wavePool[wi].n.active = false;
+    // 连招计时 + 刀气弧 + 剑气波(共用套件)
+    this.combat.update(dt, this.SX(this.px), this.SY(this.py), this.dir);
     // 跳劈落地特效(冲击波+闪电)在角色套件里推进;镜头会动,把冲击点最新屏幕坐标喂进去
     this.hero.updateFx(dt, this.SX(this.slamFxX), this.SY(this.LEDGE_Y));
-    // 憋气:潜在水面提前量以下=耗气;头在水面/岸上=回气;气尽掉血,血尽阵亡演出
+    // 憋气/溺水(共用套件):没入水面提前量以下=耗气,露头/岸上=回气,气尽掉血,血尽阵亡演出
     if (!this.over) {
-      if (this.inWater && this.py > this.SURFACE + 30) this.air = Math.max(0, this.air - dt / this.AIR_SEC);
-      else this.air = Math.min(1, this.air + dt / this.AIR_RECOVER);
-      if (this.air <= 0) {
-        this.hp -= this.DROWN_DPS * dt;
-        if (this.hp <= 0) { this.hp = 0; this.over = true; this.deadT = 0; this.deathFx.show(); }
-      }
+      const dmg = this.breath.update(dt, this.inWater && this.py > this.SURFACE + 30);
+      if (dmg > 0) { this.hp -= dmg; if (this.hp <= 0) { this.hp = 0; this.over = true; this.deadT = 0; this.deathFx.show(); } }
     } else this.deadT += dt;
     // HUD/技能冷却(套件内部有脏标记,平时零开销)
-    this.hud.set(this.hp, 100, this.hp, this.coins, this.air);
-    this.controls.setSpecialCd(this.specialCd / this.SPECIAL_CD);
+    this.hud.set(this.hp, 100, this.hp, this.coins, this.breath.air);
+    this.controls.setSpecialCd(this.combat.specialCd / this.combat.SPECIAL_CD);
   }
   private splash(x: number, y: number) {
     this.ripples.push({ x, y, r: 6, life: 1 }); this.ripples.push({ x, y, r: 2, life: 1.3 });
@@ -373,13 +319,30 @@ export class Chapter2Well extends Component {
     for (let i = 0; i < n; i++) this.bubbles.push({ x: x + (Math.random() - 0.5) * spread, y, vx: (Math.random() - 0.5) * 20, vy: -30 - Math.random() * 40, life: 1.6, r: 1 + Math.random() * 2.4 });
   }
 
+  // 砸石开洞后走进洞口 → 黑幕淡入 → 切到「地下坑道」场景 → 淡出
+  private exitToCave() {
+    if (this.exiting) return; this.exiting = true;
+    const parent = this.node.parent!;
+    const fade = new Node('c2-fade'); fade.layer = Layers.Enum.UI_2D; fade.parent = parent;
+    fade.addComponent(UITransform).setContentSize(W, H);
+    const fg = fade.addComponent(Graphics); fg.fillColor = new Color(0, 0, 0, 255); fg.rect(-W / 2, -H / 2, W, H); fg.fill();
+    const op = fade.addComponent(UIOpacity); op.opacity = 0;
+    tween(op).to(0.45, { opacity: 255 }).call(() => {
+      this.node.destroy();                                   // 销毁井关
+      const n = new Node('Chapter2Cave'); n.layer = Layers.Enum.UI_2D; n.addComponent(UITransform); n.parent = parent;
+      n.addComponent(Chapter2Cave);                          // 起洞穴场景(在黑幕下)
+      fade.setSiblingIndex(parent.children.length - 1);      // 黑幕置顶,盖住新场景再淡出
+      tween(op).delay(0.1).to(0.45, { opacity: 0 }).call(() => fade.destroy()).start();
+    }).start();
+  }
+
   private reset() {
     this.px = this.DW / 2; this.py = -40; this.pvx = 0; this.pvy = 0;
     this.onG = false; this.inWater = false; this.dir = 1; this.ph = 0;
     this.camY = -140; this.joyY = 0; this.keys.up = this.keys.down = false;
     this.bubbles = []; this.silt = []; this.ripples = []; this.debris = [];
     this.rockHP = 5; this.rockBroken = false;
-    this.atkTimer = 0; this.atkType = 0; this.comboT = 0; this.specialCd = 0; this.waves = [];
+    this.combat.reset();
     this.slamJump = false; this.slamLandT = 0;
     for (let i = 0; i < 60; i++) this.silt.push({ x: Math.random() * this.DW, wy: this.SURFACE + Math.random() * this.DH * 3, ph: Math.random() * 6.28, sp: 0.2 + Math.random() * 0.5, r: 0.5 + Math.random() * 1.6 });
   }
@@ -397,8 +360,7 @@ export class Chapter2Well extends Component {
       return;
     }
     this.t += dt; this.ph += dt * 6;
-    if (this.atkTimer > 0) this.atkTimer -= dt;
-    if (this.slamLandT > 0) this.slamLandT -= dt;
+    if (this.slamLandT > 0) this.slamLandT -= dt;   // 连招计时归 HeroCombat.update 管
     const mvx = this.over ? 0 : (this.keys.right ? 1 : 0) - (this.keys.left ? 1 : 0);   // 阵亡后不受操控
     if (mvx) { this.dir = mvx; if (!this.inWater) this.walkPh += dt * 10; }   // 走路相位只在陆上推进(水里由蹬水节奏管)
 
@@ -407,7 +369,7 @@ export class Chapter2Well extends Component {
         // 站在水面上方左台
         this.px += mvx * 185 * dt; this.py = this.LEDGE_Y;
         const wallX = this.rockBroken ? this.PASSAGE_X : this.WALL_X;
-        if (this.px <= wallX) { if (this.rockBroken) { this.reset(); return; } else this.px = wallX; }
+        if (this.px <= wallX) { if (this.rockBroken) { this.exitToCave(); return; } else this.px = wallX; }
         if (this.px > this.LEDGE_R + 2) this.onG = false;         // 走出右缘 → 掉落
       } else {
         // 空中自由下落

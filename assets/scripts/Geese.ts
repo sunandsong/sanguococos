@@ -26,7 +26,7 @@ export class Geese extends Component {
     const range = W + 60;
     g.strokeColor = new Color(51, 51, 51, 255);
     g.lineWidth = 3;
-    g.lineCap = 'round';
+    g.lineCap = Graphics.LineCap.ROUND;
     for (let i = 0; i < 3; i++) {
       const x = ((this.t * this.speed + i * 200) % range) - 30 - W / 2;
       const fy = this.skyFy + i * 0.02;                        // 三只略错开高度

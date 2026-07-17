@@ -189,6 +189,7 @@ export class Soldiers extends Component {
     this.t += dt;
     const night = GameState.i.sunVis < 0.35;   // 太阳基本落下 = 夜
     for (const s of this.list) {
+      const poking = this.t < s.pokeUntil;
       // 白脸夜里：换无表情头（nhead → nhead-night）— 仅在非戳头时
       if (s.isCavalry && s.nheadNight && s.nhead && !poking) {
         const target = night ? s.nheadNight : s.nhead;
@@ -198,7 +199,6 @@ export class Soldiers extends Component {
       if (s.smileCover) s.smileCover.active = false;
       const tt = this.t + s.phase;
       // 夜里睡觉（黑/红）：站定后眼睛渐渐闭上，睡熟才飘 Zzz
-      const poking = this.t < s.pokeUntil;
       // sleepT 渐变：想睡→升，白天→降；被戳时暂停（保持状态，戳完继续）
       if (!poking) {
         const wantSleep = night && s.sleeps;
