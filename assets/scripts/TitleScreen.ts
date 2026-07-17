@@ -131,6 +131,11 @@ export class TitleScreen extends Component {
     if (this.phase === 0) { this.phase = 1; this.showStory(); return; }
     if (this.nextPage()) return;   // 还有下一页 → 翻页；翻完才出征
     this.leaving = true;
+    // 首页独立场景:此刻才创建战场节点(标题/剧情期间战场不存在、不耗资源)
+    const bn = new Node('Battle');
+    bn.layer = this.node.layer; bn.parent = this.node.parent!;
+    bn.addComponent(UITransform);
+    bn.addComponent(BattleScene);
     BattleScene.instance?.open();
     const op = this.node.getComponent(UIOpacity) || this.node.addComponent(UIOpacity);
     tween(op).to(0.45, { opacity: 0 })

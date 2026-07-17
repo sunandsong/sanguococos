@@ -27,7 +27,7 @@ const { ccclass } = _decorator;
 
 // 临时开关(从上往下,开哪个进哪个):洞穴 > 第二章 > 正常第一章
 const START_CAVE = false;      // true = 直接进第二章「地下坑道」场景(开发中)
-const START_CHAPTER2 = true;   // true = 直接进第二章「投井下降」关(砸石开洞→转场进洞穴)
+const START_CHAPTER2 = false;  // true = 直接进第二章「投井下降」关(砸石开洞→转场进洞穴)
 
 // 一键引导：挂在 Canvas 下的一个空节点上，运行时自动创建并配好整页。
 // 这样你只需建「一个」节点，省去手动逐个创建。
@@ -92,7 +92,7 @@ export class GameRoot extends Component {
       return;
     }
 
-    make('Battle', BattleScene);       // 战场（标题点击后开启）
-    make('Title', TitleScreen);        // 标题画面《我要上天》（开机最上层，点击进入）
+    // 首页(标题+剧情)独立成场景:开机只建标题页,出征时由 TitleScreen 自己创建战场并销毁自己
+    make('Title', TitleScreen);        // 标题画面《我要上天》
   }
 }

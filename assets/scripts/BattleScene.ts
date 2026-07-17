@@ -11,6 +11,11 @@ import { AssetHub } from './AssetHub';
 import { hLine, hArc } from './HandDraw';
 const { ccclass, property } = _decorator;
 
+// ── Q版风格改造开关 ──
+const SHOW_FG_PLANTS = false;    // 前景植物(底部大叶片带):Q版改造期间隐藏
+const SHOW_GROUND_STONE = true;  // 脚下地面石块切面图(bg-fg-stone)
+const SHOW_CODE_GROUND = false;  // 程序画的地面(绿阶梯渐变+棋盘抖动+草石散点+底部暗灌木带):Q版改造期间隐藏
+
 type Pose = 'walk' | 'idle' | 'attack' | 'dead';
 type ZoneState = 'fight' | 'cleared' | 'scroll';
 
@@ -548,7 +553,7 @@ export class BattleScene extends Component {
     this.makeScrollLayer('mid', 300, 0.5, 0, false);      // 中景层
     this.makeScrollLayer('near', 180, 0.7, -30, false);   // 近景层（角色身后）
     // 地面石块切面：草皮唇边对齐地面线（原尺寸 1:1），主角就站在唇边上 → 与草地融为一体
-    this.makeScrollLayer('bg-fg-stone', 524, 1.0, -494);
+    if (SHOW_GROUND_STONE) this.makeScrollLayer('bg-fg-stone', 524, 1.0, -494);
 
     // 地面装饰散布：资源存在几张用几张（decor-*.png 丢进 resources 即生效）
     const decorRoot = this.child('grounddecor');
@@ -980,7 +985,7 @@ export class BattleScene extends Component {
     // 底部前景带 = 会动的叶片元件（替代静态前景图）：密排成带、绕叶柄摆、雨天被雨滴敲击
     {
       const leafSizes: [number, number][] = [[223, 340], [349, 340], [291, 340]];
-      const LEAF_N = 9;                          // 叶片数（原 15→9）：大贴图 overdraw，减到 9
+      const LEAF_N = SHOW_FG_PLANTS ? 9 : 0;     // Q版改造:前景植物先隐藏(开关在文件顶部)
       const leafSpan = DESIGN_W + 320;           // 与 updateFgLeaves 的 span 一致
       for (let i = 0; i < LEAF_N; i++) {
         const n = new Node('fgleaf' + i); n.layer = this.node.layer; n.parent = this.node;
@@ -4195,6 +4200,14 @@ export class BattleScene extends Component {
     // 远山改用真图层（updateFarLayer）；这里只保留天空
 
     // 地面：绿色阶梯渐变（色调贴近近景草，越往下越暗）+ 色阶交界棋盘抖动 → 像素感
+    if (!SHOW_CODE_GROUND) {
+      // Q版改造:程序地面整段不画(渐变/棋盘/散点/暗灌木带),先垫一块纯色占位——
+      // 不垫的话该区域全透明,相机不清底色,会残留上一个画面(标题页)的帧
+      // 底色取 Q版石头图底部的深土色,和贴图自然接续
+      g.fillColor = new Color(104, 64, 50, 255);
+      g.rect(-W / 2, -H / 2, W, gy + H / 2); g.fill();
+      return;
+    }
     const top = [52, 68, 42];   // 地平线附近 ≈ 草色
     const bot = [12, 18, 10];   // 屏底最暗
     const steps = 6, region = gy + H / 2;
