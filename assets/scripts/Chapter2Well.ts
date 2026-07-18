@@ -115,7 +115,7 @@ export class Chapter2Well extends Component {
       onJump: () => this.jump(),
       onAttack: () => this.attack(),
       onSpecial: () => this.heroSpecial(),
-    }, { alpha: this.CTRL_ALPHA, jumpButton: true, upJump: false });   // 井下:独立跳跃键,摇杆上推只管游泳
+    }, { alpha: this.CTRL_ALPHA });   // 布局全局统一(套件内定死):摇杆+跳跃键+攻击+技能;摇杆上推=游泳
     this.hud = new HeroHUD(this.node);
     // 阵亡演出(灰罩+「阵 亡」+「重来」),点重来复活重开
     this.deathFx = new DeathFx(this.node, () => {

@@ -25,7 +25,8 @@ export class HeroRig {
   private readonly S = 1.8;           // 与第一章 SPRITE_SCALE 一致
   jumpRefVy = JUMP.VY;                // 跳跃初速参考(空中挤压拉伸的归一化基准);非屏幕像素坐标系的场景要除以自己的 SCALE
   private landT = 0;                  // 落地回弹计时(空中→落地时由套件自己触发,压扁→过冲→归位)
-  private wasAir = false;             // 上一帧是否空中(检测落地瞬间)
+  private wasAir = false;             // 上一帧是否腾空(检测起跳/落地瞬间)
+  private airJump = false;            // 本次腾空是"跳起来的"(走下台边的下坠不放大,与第一章一致)
   private readonly LAND_DUR = 0.3;    // 落地缓冲时长(与第一章 JUMP_LAND 同参)
   ready = false;
 
@@ -168,12 +169,20 @@ export class HeroRig {
     }
     if (this.sp.color.r !== 255 || this.sp.color.a !== 255) this.sp.color = new Color(255, 255, 255, 255);   // 复活恢复本色
     const grounded = mode === 'walk' || mode === 'idle';
-    if (this.wasAir && grounded) this.landT = this.LAND_DUR;   // 空中→落地瞬间:触发回弹(套件自检,场景零接线)
-    this.wasAir = mode === 'air';
+    const airborne = mode === 'air' || (mode === 'slam' && p < 0.9);   // 跳劈收势帧(p≥0.9)已落地:立即还原,不再按"速度0=最高点"误放大
+    if (this.wasAir && grounded) this.landT = this.LAND_DUR;   // 腾空→落地瞬间:触发回弹(套件自检,场景零接线)
+    if (airborne && !this.wasAir) this.airJump = -vy > this.jumpRefVy * 0.3;   // 起跳瞬间在上升=真跳;走下台边的下坠不算
+    this.wasAir = airborne;
+    // 跳跃随高度整体放大(从第一章提取):最高点约1.5倍,落地恢复——"跳起来人变大"的主效果。
+    // 高度用速度反推 h∝1-(v/V)²:与镜头无关(井关镜头垂直跟人,用屏幕坐标算高度会恒为0),天然跨坐标系
+    const ref = mode === 'slam' ? this.jumpRefVy * (JUMP.SLAM_VY / JUMP.VY) : this.jumpRefVy;
+    const hNorm = Math.max(0, 1 - (vy / ref) * (vy / ref));
+    const boost = airborne && this.airJump ? 1 + 0.5 * hNorm : 1;
     if (mode === 'slam' && this.slam.length >= 4) {
       this.ut.setContentSize(72, 72); this.ut.setAnchorPoint(0.5, 4 / 72);
       const idx = p <= 0.15 ? 0 : p < 0.9 ? 1 : 2;
       this.sp.spriteFrame = this.slam[idx];
+      this.node.setScale((dir >= 0 ? -this.S : this.S) * boost, this.S * boost, 1);   // 跳劈腾空同样随高度放大
     } else if (mode === 'attack' && this.atk.length >= 4) {
       this.ut.setContentSize(64, 56); this.ut.setAnchorPoint(0.5, 4 / 56);
       const idx = p < 0.32 ? 0 : p < 0.5 ? 1 : p < 0.75 ? 2 : 3;   // 预备→斩→刺→收
@@ -198,7 +207,7 @@ export class HeroRig {
       const ry = vn > 0 ? 0.72 + Math.min(1, vn) * 0.68 : 0.72 + Math.min(1, -vn) * 0.28;
       const cy = Math.max(0.6, Math.min(1.45, 1 + (ry - 1) * 0.4));
       const cx = Math.max(0.7, 1 + (1 - (ry - 1) * 0.6 - 1) * 0.4);
-      this.node.setScale((dir >= 0 ? -this.S : this.S) * cx, this.S * cy, 1);
+      this.node.setScale((dir >= 0 ? -this.S : this.S) * cx * boost, this.S * cy * boost, 1);   // 拉伸×随高度放大
     } else if (this.foot.length) {
       if (this.landT > 0 && grounded && this.jump.length >= 3) {
         // 落地回弹(从第一章提取,同参):前段蹲帧压扁 → 后段弹性过冲拉高 → 归位;程序挤压只留40%

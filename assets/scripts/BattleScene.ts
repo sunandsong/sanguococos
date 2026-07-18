@@ -10,10 +10,11 @@ import { AudioMgr } from './AudioMgr';
 import { AssetHub } from './AssetHub';
 import { hLine, hArc } from './HandDraw';
 import { JUMP } from './JumpKit';
+import { TouchControls } from './TouchControls';
 const { ccclass, property } = _decorator;
 
 // ── Q版风格改造开关 ──
-const SHOW_FG_PLANTS = false;    // 前景植物(底部大叶片带):Q版改造期间隐藏
+const SHOW_FG_PLANTS = true;     // 前景植物(底部大叶片带):已换Q版叶片
 const SHOW_GROUND_STONE = true;  // 脚下地面石块切面图(bg-fg-stone)
 const SHOW_CODE_GROUND = false;  // 程序画的地面(绿阶梯渐变+棋盘抖动+草石散点+底部暗灌木带):Q版改造期间隐藏
 
@@ -161,13 +162,14 @@ export class BattleScene extends Component {
   private bgG!: Graphics;         // 天空/地面（静态，缓存：只在镜头移动或换时段时重画）
   private cloudG!: Graphics;      // 云（每帧重画，云要飘）
   private bgKey = '';             // bgG 当前内容的标识（时段），相同则跳过重画
-  private cloudKey = -1;          // 云层脏标记（吸附位置+时段的数字哈希）：云挪过一格才重画
+  private cloudNodes: { n: Node; g: Graphics }[] = [];   // 每朵云一个节点:皮肤画一次,每帧只挪位置(丝滑零重画)
+  private cloudSkinKey = '';      // 云皮肤脏标记(时段+乌云档):变了才重上色
   private hudG!: Graphics;        // HUD 层（血条/Boss条/图标底座）：血量变了才重画
   private hudKey = -1;            // HUD 脏标记（血量/残影/Boss血的数字哈希）
   private groundFxG!: Graphics;   // 地面残留层（雪面/血渍/脚印/插地箭）：低频重画
   private groundFxT = 0;
   private groundFxCam = -99999;
-  private spcCdKey = -1;          // 技能冷却环脏标记（48 级量化）
+  private controls: TouchControls | null = null;   // 操控套件(摇杆/攻击/剑气,与第二章同一套)
   private ambiOdd = false;        // 氛围动画隔帧开关（叶/草/小动物 30Hz 更新）
   // Box2D 死亡尸块物理
   private physOK = false;
@@ -184,7 +186,6 @@ export class BattleScene extends Component {
   private layers: { tiles: Node[]; w: number; par: number; baseY: number; dispH: number }[] = [];   // 视差背景层（远→近）
   private bgTintRef: readonly number[] | null = null;   // 背景层当前界色数组引用（变了才重刷）
   private readonly _drawnScratch: Monster[] = [];        // 每帧绘制排序复用数组
-  private readonly _cloudBxs: number[] = [];             // 云位置计算复用数组
   private static readonly _drawOrder = (a: Monster, b: Monster) =>
     (a.state === 'dead' ? -1 : 1) - (b.state === 'dead' ? -1 : 1) || b.lane - a.lane;
   private readonly _charTintC = new Color(255, 255, 255, 255);   // charTint 缓存（按关）
@@ -201,7 +202,6 @@ export class BattleScene extends Component {
   private stepPar = 1;       // 左右脚交替
   private hpLag = 100;   // 掉血残影（血条上缓慢追上的亮橙段）
   private deadOverlay!: Node;   // 阵亡灰化遮罩
-  private spcCdG: Graphics | null = null;   // 剑气按钮冷却扇形遮罩
   private deadOverlayOp!: UIOpacity;
   private bannerOp!: UIOpacity;
   private restartOp!: UIOpacity;
@@ -682,12 +682,12 @@ export class BattleScene extends Component {
         });
       };
       const bSps: Sprite[] = [];
-      for (let i = 0; i < 3; i++) bSps.push(mkC('butterfly' + i, 33, 28, 0, i * 2.1, 2 + i * 3));
+      for (let i = 0; i < 3; i++) bSps.push(mkC('butterfly' + i, 23, 28, 0, i * 2.1, 2 + i * 3));   // Q版蝴蝶 0.81 比例
       loadSF('critter-butterfly', sf => { for (const sp of bSps) sp.spriteFrame = sf; });
-      const birdSp = mkC('bird', 38, 18, 1, 0, 3);   // 小鸟缩小（原 62×30 太大）
+      const birdSp = mkC('bird', 33, 24, 1, 0, 3);   // Q版圆鸟(站/飞两图已对齐同画布比例 1.38)
       loadSF('critter-bird-stand', sf => { this.birdStandSF = sf; birdSp.spriteFrame = sf; });
       loadSF('critter-bird-fly', sf => { this.birdFlySF = sf; });
-      mkC('rabbit', 66, 33, 2, 0, 10);
+      mkC('rabbit', 38, 41, 2, 0, 10);   // Q版兔(长耳竖构图,近方形)
       loadSF('critter-rabbit', sf => { const r = this.critters.find(c => c.kind === 2); if (r) r.sp.spriteFrame = sf; });
     }
 
@@ -1105,35 +1105,14 @@ export class BattleScene extends Component {
     // 图标透明度：与按钮主体同步（乘进颜色 alpha）
     const ia = (v: number) => Math.round(v * this.CTRL_ALPHA);
 
-    // —— 左手：虚拟摇杆（手机常用：按住左侧任意处拖动，左右滑动控制前进/后退）——
-    this.setupJoystick(-236, by + 18);
-
-    // —— 右手：攻击大钮 + 技能扇形（剑气/跳环绕）——
-    const atk = this.makeCircleBtn('atk', 268, by, 82, [152, 58, 52], (g, r) => {
-      g.lineCap = Graphics.LineCap.ROUND;
-      g.strokeColor = new Color(238, 243, 250, ia(250)); g.lineWidth = 9;     // 刀刃
-      g.moveTo(-r * 0.14, -r * 0.14); g.lineTo(r * 0.44, r * 0.44); g.stroke();
-      g.strokeColor = new Color(255, 214, 120, ia(250)); g.lineWidth = 5;     // 护手
-      g.moveTo(-r * 0.02, -r * 0.32); g.lineTo(-r * 0.32, -r * 0.02); g.stroke();
-      g.strokeColor = new Color(96, 62, 40, ia(255)); g.lineWidth = 7;        // 刀柄
-      g.moveTo(-r * 0.2, -r * 0.2); g.lineTo(-r * 0.42, -r * 0.42); g.stroke();
-    });
-    tapFx(atk, () => this.heroSwing());
-    // 剑气（攻击左侧偏上）：青白新月波
-    const spc = this.makeCircleBtn('spc', 132, by + 52, 56, [54, 102, 138], (g, r) => {
-      g.strokeColor = new Color(160, 238, 255, ia(255)); g.lineWidth = 6;
-      hArc(g, -r * 0.1, 0, r * 0.42, -1.15, 1.15, 12); g.stroke();
-      g.strokeColor = new Color(240, 252, 255, ia(255)); g.lineWidth = 3;
-      hArc(g, -r * 0.1, 0, r * 0.26, -0.95, 0.95, 10); g.stroke();
-    });
-    tapFx(spc, () => this.heroSpecial());
-    // 剑气冷却扇形遮罩（子节点，每帧重画）
-    {
-      const cdN = new Node('spccd'); cdN.layer = this.node.layer; cdN.parent = spc;
-      cdN.addComponent(UITransform);
-      this.spcCdG = cdN.addComponent(Graphics);
-    }
-    // 跳：不再单独设键 —— 摇杆上推即起跳（见 setupJoystick）
+    // —— 操控套件(与第二章同一套 TouchControls):摇杆(上推跳/双击滑铲) + 攻击/剑气钮(带冷却扇形) ——
+    this.controls = new TouchControls(this.node, {
+      onDir: (d) => { this.leftHeld = d < 0; this.rightHeld = d > 0; },
+      onJump: () => this.heroJump(),
+      onDash: (d) => this.heroSlide(d),
+      onAttack: () => this.heroSwing(),
+      onSpecial: () => this.heroSpecial(),
+    }, { alpha: this.CTRL_ALPHA });   // 布局全局统一(套件内定死):摇杆+跳跃键+攻击+技能
 
     // 「重来」：超链接式文字（下划线），点击重开
     {
@@ -3922,53 +3901,59 @@ export class BattleScene extends Component {
     }
   }
 
-  // 飘云（慢速视差，块状）—— 单独层 cloudG，每帧重画（云要飘）
+  // 飘云(Q版棉花云):每朵云一个节点,皮肤只在换时段时重画,每帧仅 setPosition → 丝滑零重绘
   private drawClouds(t: Theme, PX: number) {
-    const g = this.cloudG, W = DESIGN_W, gy = this.groundY;
+    const W = DESIGN_W, gy = this.groundY;
     const k = 0;   // 乌云效果已关闭（想恢复改回 this.stormK）
-    const snap = (v: number) => Math.round(v / PX) * PX;
     const span = W + 280;
     const n = 5 + Math.round(k * 3);            // 雨天云更多（5 → 8）
-    // 脏标记：云位置吸附在 12px 网格，云飘过一格（约 1~2 秒）才真正重画。
-    // key 用数字哈希（格序号进制拼合），不拼字符串 → 每帧零分配
-    let key = this.TIMES.indexOf(this.timeOfDay()) + 1;
-    const bxs = this._cloudBxs;
-    bxs.length = 0;
-    for (let i = 0; i < n; i++) {
+    // 首次:预建8个云节点(乌云档最多8朵),挂在云层节点下
+    if (!this.cloudNodes.length) {
+      this.cloudG.clear();
+      for (let i = 0; i < 8; i++) {
+        const cn = new Node('cloud' + i); cn.layer = this.node.layer; cn.parent = this.cloudG.node;
+        cn.addComponent(UITransform);
+        this.cloudNodes.push({ n: cn, g: cn.addComponent(Graphics) });
+      }
+    }
+    // 皮肤脏标记:时段或乌云档变了才重画云形/上色
+    const skin = this.timeOfDay().name + '|' + Math.round(k * 8);
+    const repaint = skin !== this.cloudSkinKey;
+    if (repaint) this.cloudSkinKey = skin;
+    let col: Color | null = null, und: Color | null = null;
+    if (repaint) {
+      // 云色 = 时段天空色掺白(白天近白、黄昏染粉、夜里偏灰蓝);雨天仍可压灰
+      const bright = this.sh(this.timeOfDay().sky, 1.12);
+      const mixW = 0.68;   // 掺白比例:越高越白越可爱
+      col = new Color(
+        Math.round((bright.r + (255 - bright.r) * mixW) + (86 - bright.r) * k),
+        Math.round((bright.g + (255 - bright.g) * mixW) + (92 - bright.g) * k),
+        Math.round((bright.b + (255 - bright.b) * mixW) + (106 - bright.b) * k), 255);
+      und = new Color(Math.round(col.r * 0.88), Math.round(col.g * 0.9), Math.round(col.b * 0.96), 255);   // 云底阴影:压一档显厚度
+    }
+    for (let i = 0; i < this.cloudNodes.length; i++) {
+      const rec = this.cloudNodes[i];
+      if (i >= n) { rec.n.active = false; continue; }
+      rec.n.active = true;
       const speed = (5 + i * 2) * (1 + k * 0.6);   // 乌云滚得快一点
       let bx = (-this.animT * speed - this.camX * 0.12 + i * 267) % span;
       bx = ((bx % span) + span) % span - W / 2 - 140;
-      const sx = snap(bx);
-      bxs.push(sx);
-      key = key * 256 + (sx / PX + 128);   // sx 是 PX 的整数倍，格序号范围远小于 256
-    }
-    if (key === this.cloudKey) return;
-    this.cloudKey = key;
-    g.clear();
-    // Q版棉花云:云色 = 时段天空色掺白(白天近白、黄昏染粉、夜里偏灰蓝);雨天仍可压灰
-    const bright = this.sh(this.timeOfDay().sky, 1.12);
-    const mixW = 0.68;   // 掺白比例:越高越白越可爱
-    const col = new Color(
-      Math.round((bright.r + (255 - bright.r) * mixW) + (86 - bright.r) * k),
-      Math.round((bright.g + (255 - bright.g) * mixW) + (92 - bright.g) * k),
-      Math.round((bright.b + (255 - bright.b) * mixW) + (106 - bright.b) * k), 255);
-    // 云底阴影色:同色系压一档,棉花团才有厚度
-    const und = new Color(Math.round(col.r * 0.88), Math.round(col.g * 0.9), Math.round(col.b * 0.96), 255);
-    for (let i = 0; i < n; i++) {
-      const bx = bxs[i];
       const by = gy + 430 + (i % 3) * 70 - (i >= 5 ? 36 : 0);   // 增补的云稍低，铺满天空
       const s = (0.8 + (i % 3) * 0.26) * (1 + k * 0.55);        // 乌云更大更厚
-      const cx = bx + 48 * s, cy = snap(by);
-      // 云底:扁椭圆(平底),先铺阴影色再叠亮色,底边露一条阴影
-      g.fillColor = und;
-      g.ellipse(cx, cy + 6 * s, 62 * s, 20 * s); g.fill();
-      g.fillColor = col;
-      g.ellipse(cx, cy + 9 * s, 58 * s, 17 * s); g.fill();
-      // 一排圆鼓包(中间最大,两侧收小),union 出棉花团轮廓
-      g.circle(cx - 34 * s, cy + 8 * s, 19 * s); g.fill();
-      g.circle(cx - 12 * s, cy + 16 * s, 26 * s); g.fill();
-      g.circle(cx + 14 * s, cy + 14 * s, 22 * s); g.fill();
-      g.circle(cx + 36 * s, cy + 6 * s, 16 * s); g.fill();
+      rec.n.setPosition(bx + 48 * s, by, 0);                    // 连续坐标,不吸附网格
+      if (repaint && col && und) {
+        const g = rec.g; g.clear();
+        // 云底:扁椭圆(平底),先铺阴影色再叠亮色,底边露一条阴影
+        g.fillColor = und;
+        g.ellipse(0, 6 * s, 62 * s, 20 * s); g.fill();
+        g.fillColor = col;
+        g.ellipse(0, 9 * s, 58 * s, 17 * s); g.fill();
+        // 一排圆鼓包(中间最大,两侧收小),union 出棉花团轮廓
+        g.circle(-34 * s, 8 * s, 19 * s); g.fill();
+        g.circle(-12 * s, 16 * s, 26 * s); g.fill();
+        g.circle(14 * s, 14 * s, 22 * s); g.fill();
+        g.circle(36 * s, 6 * s, 16 * s); g.fill();
+      }
     }
   }
 
@@ -4511,28 +4496,11 @@ export class BattleScene extends Component {
     g.fillColor = new Color(255, 240, 168, 255); g.circle(cx - 3.2, cy + 3.2, 3); g.fill();
   }
 
-  // 剑气冷却：按钮上盖一块顺时针消退的暗色扇形（转完=可用）
+  // 剑气冷却环:委托给操控套件(内部自带48级量化脏标记)
   private updateSkillCd() {
-    const g = this.spcCdG;
-    if (!g) return;
-    const cd = this.hero ? this.hero.specialCd : 0;
+    if (!this.controls || !this.hero) return;
     const total = this.specialCdCur || this.SPECIAL_CD;
-    // 脏标记：冷却比例量化到 48 级，跨级才重画（冷却中 ~10Hz，就绪后零开销）
-    const step = cd <= 0 ? 0 : Math.max(1, Math.ceil(Math.min(1, cd / total) * 48));
-    if (step === this.spcCdKey) return;
-    this.spcCdKey = step;
-    g.clear();
-    if (step === 0) return;
-    const f = step / 48;
-    const R = 53;
-    g.fillColor = new Color(0, 0, 0, 145);
-    g.moveTo(0, 0);
-    const seg = 30;
-    for (let i = 0; i <= seg; i++) {
-      const a = Math.PI / 2 - (i / seg) * f * Math.PI * 2;   // 从12点顺时针
-      g.lineTo(Math.cos(a) * R, Math.sin(a) * R);
-    }
-    g.close(); g.fill();
+    this.controls.setSpecialCd(this.hero.specialCd / total);
   }
 
   // 小怪攻击预警：起手到命中前，头顶弹出脉动的红黄感叹号（公平感）

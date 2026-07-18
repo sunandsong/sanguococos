@@ -63,7 +63,7 @@ export class Chapter2Cave extends Component {
       onJump: () => this.jump(),
       onAttack: () => this.attack(),
       onSpecial: () => this.special(),
-    }, { alpha: 0.5, jumpButton: true, upJump: false });
+    }, { alpha: 0.5 });   // 布局全局统一(套件内定死):摇杆+跳跃键+攻击+技能
     this.hud = new HeroHUD(this.node);
     this.deathFx = new DeathFx(this.node, () => {   // 点重来复活重开
       this.deathFx.hide(); this.over = false; this.deadT = 0; this.hp = 100;

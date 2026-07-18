@@ -17,32 +17,27 @@ export type ControlEvents = {
 
 export type ControlOpts = {
   alpha?: number;        // 按钮透明度(乘进颜色)
-  jumpButton?: boolean;  // 独立跳跃键(默认无,第一章用摇杆上推)
-  upJump?: boolean;      // 摇杆上推触发跳(默认开;配独立跳跃键时建议关)
 };
 
+// 布局全局唯一:摇杆(纯移动) + 跳跃键 + 攻击大钮 + 技能小钮。没有场景专用按钮,改布局=改这里,所有章一起变。
 export class TouchControls {
   private nodes: Node[] = [];
   private spcCdG: Graphics | null = null;
   private spcCdKey = -1;
   private readonly alpha: number;
-  private readonly upJump: boolean;
 
   constructor(private host: Node, private ev: ControlEvents, opts: ControlOpts = {}) {
     this.alpha = opts.alpha ?? 0.5;
-    this.upJump = opts.upJump ?? true;
     const by = -H / 2 + 120;
     this.joystick(-236, by + 18);
-    if (opts.jumpButton) {
-      // 独立跳跃键(绿,上箭头):在攻击钮上方偏左
-      const jmp = this.circleBtn(218, by + 150, 56, [70, 138, 84], (g, r, ia) => {
-        g.fillColor = new Color(220, 250, 225, ia(255));
-        g.moveTo(-r * 0.34, r * 0.05); g.lineTo(0, r * 0.42); g.lineTo(r * 0.34, r * 0.05); g.close(); g.fill();   // 箭头朝上
-        g.fillColor = new Color(220, 250, 225, ia(220));
-        g.rect(-r * 0.12, -r * 0.37, r * 0.24, r * 0.42); g.fill();   // 箭杆在下
-      });
-      this.tap(jmp, () => this.ev.onJump && this.ev.onJump());
-    }
+    // 跳跃键(绿,上箭头):在攻击钮上方偏左 —— 全章统一,跳跃只走这个键
+    const jmp = this.circleBtn(218, by + 150, 56, [70, 138, 84], (g, r, ia) => {
+      g.fillColor = new Color(220, 250, 225, ia(255));
+      g.moveTo(-r * 0.34, r * 0.05); g.lineTo(0, r * 0.42); g.lineTo(r * 0.34, r * 0.05); g.close(); g.fill();   // 箭头朝上
+      g.fillColor = new Color(220, 250, 225, ia(220));
+      g.rect(-r * 0.12, -r * 0.37, r * 0.24, r * 0.42); g.fill();   // 箭杆在下
+    });
+    this.tap(jmp, () => this.ev.onJump && this.ev.onJump());
     // 攻击大钮(刀)
     const atk = this.circleBtn(268, by, 82, [152, 58, 52], (g, r, ia) => {
       g.lineCap = Graphics.LineCap.ROUND;
@@ -139,10 +134,6 @@ export class TouchControls {
     bg.strokeColor = new Color(0, 0, 0, a(110)); bg.lineWidth = 2; bg.circle(0, 0, R); bg.stroke();
     bg.fillColor = new Color(240, 245, 252, a(150));
     for (const s of [-1, 1]) { bg.moveTo(s * (R - 20), 12); bg.lineTo(s * (R - 4), 0); bg.lineTo(s * (R - 20), -12); bg.close(); bg.fill(); }
-    if (this.upJump) {   // 上推=跳 的提示箭头(关掉上推跳时不画)
-      bg.fillColor = new Color(200, 246, 205, a(170));
-      bg.moveTo(-12, R - 20); bg.lineTo(0, R - 4); bg.lineTo(12, R - 20); bg.close(); bg.fill();
-    }
     // 滑块
     const knobN = new Node('tc-joyknob'); knobN.layer = Layers.Enum.UI_2D; knobN.parent = base;
     knobN.addComponent(UITransform); knobN.setPosition(0, 0, 0);
@@ -153,8 +144,6 @@ export class TouchControls {
     kg.fillColor = new Color(255, 255, 255, a(46)); kg.ellipse(0, KR * 0.4, KR * 0.66, KR * 0.36); kg.fill();
     kg.strokeColor = new Color(255, 214, 130, a(200)); kg.lineWidth = 3; kg.circle(0, 0, KR); kg.stroke();
 
-    const JUMP_UP = R * 0.55;
-    let jumpArmed = true;
     let tapDir = 0, tapT = -9;   // 双击方向 → 冲刺
     const uiT = this.host.getComponent(UITransform)!;
     const emitDir = (d: -1 | 0 | 1) => { if (this.ev.onDir) this.ev.onDir(d); };
@@ -167,10 +156,6 @@ export class TouchControls {
       knobN.setPosition(dx, dy, 0);
       if (this.ev.onAxis) this.ev.onAxis(dx / R, dy / R);
       emitDir(dx < -DEAD ? -1 : dx > DEAD ? 1 : 0);
-      if (this.upJump) {
-        if (dy > JUMP_UP) { if (jumpArmed) { jumpArmed = false; this.ev.onJump && this.ev.onJump(); } }
-        else if (dy < JUMP_UP * 0.5) { jumpArmed = true; }
-      }
     };
     const start = (e: EventTouch) => {
       move(e);
@@ -187,7 +172,6 @@ export class TouchControls {
     const reset = () => {
       emitDir(0);
       if (this.ev.onAxis) this.ev.onAxis(0, 0);
-      jumpArmed = true;
       tween(knobN).to(0.08, { position: new Vec3(0, 0, 0) }, { easing: 'quadOut' }).start();
     };
     base.on(Node.EventType.TOUCH_START, start);
