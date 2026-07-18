@@ -9,7 +9,7 @@ import { JUMP } from './JumpKit';
 //   走路 / 待机 / 空中(跳跃) / 攻击(横斩) / 跳劈 —— 帧尺寸/锚点/缩放/朝向全部对齐第一章。
 //   约定：默认精灵朝左，dir>=0(朝右) 时水平翻转；整体 ×1.8。
 // ─────────────────────────────────────────────────────────────
-export type HeroMode = 'idle' | 'walk' | 'air' | 'attack' | 'slam' | 'swim' | 'swimH' | 'float' | 'dead';
+export type HeroMode = 'idle' | 'walk' | 'air' | 'attack' | 'slam' | 'slide' | 'swim' | 'swimH' | 'float' | 'dead';
 
 export class HeroRig {
   readonly node: Node;
@@ -19,11 +19,12 @@ export class HeroRig {
   private jump: SpriteFrame[] = [];   // 跳跃 3 帧 64×56（0蹲 1伸展 2屈腿）
   private atk: SpriteFrame[] = [];    // 横斩 4 帧 64×56
   private slam: SpriteFrame[] = [];   // 跳劈 4 帧 72×72
+  private slideF: SpriteFrame[] = []; // 滑铲 3 帧(入蹲→低滑→起身)
   private swim: SpriteFrame[] = [];   // 竖游 3 帧 40×72(收腿→蹬腿→滑行,竖直向上)
   private swimH: SpriteFrame[] = [];  // 横游 3 帧 72×40(收腿→蹬腿→滑行,头朝左)
   private float: SpriteFrame[] = [];  // 水面踩水 2 帧 56×56(双臂开合)
   private readonly HERO_ROW = 1;
-  private readonly S = 2.7;           // 与第一章 SPRITE_SCALE 一致(新主角:原始1.5倍)
+  private readonly S = 1.8;           // 与第一章 SPRITE_SCALE 一致
   jumpRefVy = JUMP.VY;                // 跳跃初速参考(空中挤压拉伸的归一化基准);非屏幕像素坐标系的场景要除以自己的 SCALE
   ambient: Color | null = null;       // 场景环境光染色(井=湿冷青/洞=暖火光,不设=纯白):角色揉进场景色,压"贴纸感"
   private landT = 0;                  // 落地回弹计时(空中→落地时由套件自己触发,压扁→过冲→归位)
@@ -84,6 +85,7 @@ export class HeroRig {
     this.each('zhaoyun-jump', (tex) => { tex.setFilters(Texture2D.Filter.LINEAR, Texture2D.Filter.LINEAR); for (let c = 0; c < 3; c++) { const sf = new SpriteFrame(); sf.texture = tex; sf.rect = new Rect(c * 160, 0, 160, 112); this.jump.push(sf); } });
     this.each('zhaoyun-attack', (tex) => { tex.setFilters(Texture2D.Filter.LINEAR, Texture2D.Filter.LINEAR); for (let c = 0; c < 4; c++) { const sf = new SpriteFrame(); sf.texture = tex; sf.rect = new Rect(c * 192, 0, 192, 112); this.atk.push(sf); } });
     this.each('zhaoyun-slam', (tex) => { tex.setFilters(Texture2D.Filter.LINEAR, Texture2D.Filter.LINEAR); for (let c = 0; c < 4; c++) { const sf = new SpriteFrame(); sf.texture = tex; sf.rect = new Rect(c * 192, 0, 192, 160); this.slam.push(sf); } });
+    this.each('zhaoyun-slide', (tex) => { tex.setFilters(Texture2D.Filter.LINEAR, Texture2D.Filter.LINEAR); for (let c = 0; c < 3; c++) { const sf = new SpriteFrame(); sf.texture = tex; sf.rect = new Rect(c * 192, 0, 192, 112); this.slideF.push(sf); } });
     this.each('fx-slam-impact', (tex) => { tex.setFilters(Texture2D.Filter.LINEAR, Texture2D.Filter.LINEAR); for (let c = 0; c < 4; c++) { const sf = new SpriteFrame(); sf.texture = tex; sf.rect = new Rect(c * 320, 0, 320, 272); this.fxSlamFrames.push(sf); } });   // 紫爆2×高清
     this.each('zhaoyun-swim', (tex) => { for (let c = 0; c < 3; c++) { const sf = new SpriteFrame(); sf.texture = tex; sf.rect = new Rect(c * 40, 0, 40, 72); this.swim.push(sf); } });
     this.each('zhaoyun-swim-h', (tex) => { for (let c = 0; c < 3; c++) { const sf = new SpriteFrame(); sf.texture = tex; sf.rect = new Rect(c * 72, 0, 72, 40); this.swimH.push(sf); } });
@@ -219,6 +221,9 @@ export class HeroRig {
     } else if (mode === 'float' && this.float.length >= 2) {
       this.ut.setContentSize(56, 56); this.ut.setAnchorPoint(0.5, 0.62);   // 锚点在胸口:定位点=水面线时露出整个头+肩,身体沉在水下
       this.sp.spriteFrame = this.float[Math.floor(walkPhase) % 2];      // 踩水:双臂开合慢循环
+    } else if (mode === 'slide' && this.slideF.length >= 3) {
+      this.ut.setContentSize(96, 56); this.ut.setAnchorPoint(0.5, 4 / 56);
+      this.sp.spriteFrame = this.slideF[p < 0.12 ? 0 : p < 0.88 ? 1 : 2];   // 入蹲→低滑(拉长)→起身
     } else if (mode === 'air' && this.jump.length >= 3) {
       this.ut.setContentSize(80, 56); this.ut.setAnchorPoint(0.5, 4 / 56);
       this.sp.spriteFrame = this.jump[vy < 0 ? 1 : 2];             // 上升伸展 / 下落屈腿

@@ -36,6 +36,7 @@ export class Chapter2Cave extends Component {
   private px = 0; private py = 0; private vy = 0; private onG = true; private dir = -1; private walkPh = 0;   // 从右端入,朝左
   private camX = 0; private t = 0;
   private combat!: HeroCombat; private slamJump = false; private slamLandT = 0;   // 跳劈大招:腾空/落地收势
+  private slideT = 0; private slideCd = 0; private slideDir = 1;   // 滑铲(与第一章同参 0.35/0.55)
   private deathFx!: DeathFx; private over = false; private deadT = 0;   // 共用阵亡演出
   private exiting = false;   // 回井转场中(防重复触发)
   private hp = 100; private coins = 0;
@@ -62,8 +63,9 @@ export class Chapter2Cave extends Component {
       onDir: (d) => { this.keys.left = d < 0; this.keys.right = d > 0; },
       onAxis: () => { },
       onJump: () => this.jump(),
+      onDash: (d) => { this.dir = d as 1 | -1; this.slide(); },   // 双击方向=滑铲(全章统一)
       onAttack: () => this.attack(),
-      onSpecial: () => this.special(),
+      onSlide: () => this.slide(),   // 滑铲键(气波招数已下架)
     }, { alpha: 0.5 });   // 布局全局统一(套件内定死):摇杆+跳跃键+攻击+技能
     this.hud = new HeroHUD(this.node);
     this.deathFx = new DeathFx(this.node, () => {   // 点重来复活重开
@@ -84,6 +86,7 @@ export class Chapter2Cave extends Component {
     else if (e.keyCode === KeyCode.KEY_D || e.keyCode === KeyCode.ARROW_RIGHT) this.keys.right = true;
     else if (e.keyCode === KeyCode.SPACE || e.keyCode === KeyCode.KEY_W || e.keyCode === KeyCode.ARROW_UP) this.jump();
     else if (e.keyCode === KeyCode.KEY_J) this.attack();
+    else if (e.keyCode === KeyCode.KEY_K || e.keyCode === KeyCode.KEY_L) this.slide();   // K/L=滑铲
   }
   private onKeyUp(e: EventKeyboard) {
     if (e.keyCode === KeyCode.KEY_A || e.keyCode === KeyCode.ARROW_LEFT) this.keys.left = false;
@@ -95,7 +98,7 @@ export class Chapter2Cave extends Component {
     const type = this.combat.tryAttack();
     if (type === 2 && this.onG) { this.vy = JUMP.SLAM_VY; this.onG = false; this.slamJump = true; }   // 第3段跳劈:真跃起(全章共用 JumpKit),落地结算
   }
-  private special() { if (this.over) return; this.combat.trySpecial(this.dir, this.HERO_SX + this.dir * 20, this.py + 60); }   // 剑气波
+  private slide() { if (this.over || !this.onG || this.slideT > 0 || this.slideCd > 0 || this.slamJump) return; this.slideT = 0.5; this.slideCd = 0.75; this.slideDir = this.dir; }   // 滑铲(与第一章同参)
   /** 受伤(供未来陷阱/敌人调用):掉血,血尽 → 阵亡演出 */
   hurt(dmg: number) { if (this.over) return; this.hp -= dmg; if (this.hp <= 0) { this.hp = 0; this.over = true; this.deadT = 0; this.deathFx.show(); } }
   // 跳劈落地:冲击波+闪电(HeroRig 套件) + 收势帧
@@ -110,17 +113,19 @@ export class Chapter2Cave extends Component {
   update(dt: number) {
     dt = Math.min(dt, 0.05); this.t += dt;
     if (this.slamLandT > 0) this.slamLandT -= dt;
+    if (this.slideCd > 0) this.slideCd -= dt;
     if (this.over) this.deadT += dt;
     const mv = this.over ? 0 : (this.keys.right ? 1 : 0) - (this.keys.left ? 1 : 0);
     if (mv) { this.dir = mv; this.walkPh += dt * 10; }
-    if (this.onG) this.px += mv * this.SPEED * dt;
+    if (this.slideT > 0 && this.onG) { this.slideT -= dt; this.px += this.slideDir * this.SPEED * 1.9 * dt; }   // 滑铲:锁向高速滑行
+    else if (this.onG) this.px += mv * this.SPEED * dt;
     else { this.px += mv * this.SPEED * 0.7 * dt; this.vy -= this.GRAV * dt; this.py += this.vy * dt; if (this.py <= this.GROUND) { this.py = this.GROUND; this.vy = 0; this.onG = true; if (this.slamJump) this.slamImpact(); } }
     this.px = Math.max(-this.DEPTH, Math.min(0, this.px));   // 右端(0)→ 左端(-DEPTH)
     if (!this.over && this.onG && this.px >= 0 && mv > 0) { this.exitToWell(); return; }   // 顶着洞口往右走=回井里
     this.camX = this.px - this.HERO_SX;
     this.combat.update(dt, this.HERO_SX, this.py, this.dir);       // 连招计时 + 刀气弧 + 剑气波
     this.hero.updateFx(dt, this.HERO_SX, this.GROUND);              // 跳劈冲击波/闪电
-    this.controls.setSpecialCd(this.combat.specialCd / this.combat.SPECIAL_CD);
+    this.controls.setSpecialCd(this.slideCd / 0.75);   // 滑铲冷却环
     this.updateHero(); this.redraw();
     this.hud.set(this.hp, 100, this.hp, this.coins, 1);
   }
@@ -150,6 +155,7 @@ export class Chapter2Cave extends Component {
     if (this.slamJump) { mode = 'slam'; p = this.vy > 0 ? 0.1 : 0.5; }   // 腾空跳劈:上升举枪/下落俯冲
     else if (this.slamLandT > 0) { mode = 'slam'; p = 0.95; }            // 落地砸击收势
     else if (a) { mode = a.mode; p = a.p; }
+    else if (this.slideT > 0 && this.onG) { mode = 'slide'; p = 1 - this.slideT / 0.5; }   // 滑铲三帧
     else if (!this.onG) mode = 'air';
     else if (this.keys.left || this.keys.right) mode = 'walk';
     this.hero.apply(this.HERO_SX, this.py, this.dir, mode, p, -this.vy, this.walkPh, 0, this.GROUND);

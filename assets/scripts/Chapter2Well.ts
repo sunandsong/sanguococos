@@ -51,6 +51,7 @@ export class Chapter2Well extends Component {
   private exiting = false;                  // 进洞转场中(防重复触发)
   static returnFromCave = false;            // 洞穴回井:下次 onLoad 按「从洞里回来」出生(洞已开、站洞口台上)
   private slamJump = false; private slamLandT = 0;   // 第3段跳劈:腾空中/落地收势(对齐第一章:蹲→跃起→下劈→落地冲击)
+  private slideT = 0; private slideCd = 0; private slideDir = 1;   // 滑铲(台上,与第一章同参 0.35/0.55)
   private slamFxX = 0;   // 冲击点世界x(镜头动时把最新屏幕坐标喂给套件特效)
   private fxLayer!: Node;
   private combat!: HeroCombat;   // 共用战斗套件(连招+刀气+剑气)
@@ -114,8 +115,9 @@ export class Chapter2Well extends Component {
       onDir: (d) => { this.keys.left = d < 0; this.keys.right = d > 0; },
       onAxis: (_ax, ay) => { this.joyY = ay; },
       onJump: () => this.jump(),
+      onDash: (d) => { this.dir = d as 1 | -1; this.heroSlide(); },   // 双击方向=滑铲(全章统一)
       onAttack: () => this.attack(),
-      onSpecial: () => this.heroSpecial(),
+      onSlide: () => this.heroSlide(),   // 滑铲键(气波招数已下架)
     }, { alpha: this.CTRL_ALPHA });   // 布局全局统一(套件内定死):摇杆+跳跃键+攻击+技能;摇杆上推=游泳
     this.hud = new HeroHUD(this.node);
     // 阵亡演出(灰罩+「阵 亡」+「重来」),点重来复活重开
@@ -204,6 +206,7 @@ export class Chapter2Well extends Component {
     if (this.slamJump) { mode = 'slam'; p = this.pvy < 0 ? 0.1 : 0.5; }        // 腾空跳劈:上升举枪 / 下落俯冲
     else if (this.slamLandT > 0) { mode = 'slam'; p = 0.95; }                  // 落地砸击收势帧
     else if (ca) { mode = ca.mode; p = ca.p; }                                 // 挥砍/跳劈(共用套件)
+    else if (this.slideT > 0) { mode = 'slide'; p = 1 - this.slideT / 0.5; }   // 滑铲三帧
     else if (!this.onG && !this.inWater) mode = 'air';
     else if (this.inWater) {
       // 水性姿势:到水面=踩水(只露头肩);主动下潜=头朝下俯冲(横游帧旋转);有横向分量=横游(斜游倾斜);其余=竖游
@@ -241,7 +244,7 @@ export class Chapter2Well extends Component {
       case KeyCode.SPACE: this.jump(); break;                                  // 空格=专职跳跃(水中=出水鱼跃)
       case KeyCode.KEY_S: case KeyCode.ARROW_DOWN: this.keys.down = true; break;
       case KeyCode.KEY_J: this.attack(); break;
-      case KeyCode.KEY_K: case KeyCode.KEY_L: this.heroSpecial(); break;
+      case KeyCode.KEY_K: case KeyCode.KEY_L: this.heroSlide(); break;   // K/L=滑铲
     }
   }
   private onKeyUp(e: EventKeyboard) {
@@ -304,10 +307,9 @@ export class Chapter2Well extends Component {
     AudioMgr.inst.play('land', 0.9);
   }
 
-  private heroSpecial() {
-    if (this.over) return;
-    if (this.inWater) return;   // 水下不能放剑气
-    this.combat.trySpecial(this.dir, this.SX(this.px) + this.dir * 20, this.SY(this.py) + 55);   // 剑气波(共用套件)
+  private heroSlide() {
+    if (this.over || this.inWater || !this.onG || this.slideT > 0 || this.slideCd > 0 || this.slamJump) return;
+    this.slideT = 0.5; this.slideCd = 0.75; this.slideDir = this.dir;   // 与第一章同参
   }
   private updateFx(dt: number) {
     // 连招计时 + 刀气弧 + 剑气波(共用套件)
@@ -320,7 +322,7 @@ export class Chapter2Well extends Component {
     // (阵亡后的 deadT 推进在 tick 开头的停摆分支里;走到这里必然未阵亡)
     // HUD/技能冷却(套件内部有脏标记,平时零开销)
     this.hud.set(this.hp, 100, this.hp, this.coins, this.breath.air);
-    this.controls.setSpecialCd(this.combat.specialCd / this.combat.SPECIAL_CD);
+    this.controls.setSpecialCd(this.slideCd / 0.75);   // 滑铲冷却环
   }
   private splash(x: number, y: number) {
     this.ripples.push({ x, y, r: 6, life: 1 }); this.ripples.push({ x, y, r: 2, life: 1.3 });
@@ -378,13 +380,17 @@ export class Chapter2Well extends Component {
     }
     this.t += dt; this.ph += dt * 6;
     if (this.slamLandT > 0) this.slamLandT -= dt;   // 连招计时归 HeroCombat.update 管
+    if (this.slideCd > 0) this.slideCd -= dt;
+    if ((!this.onG || this.inWater) && this.slideT > 0) this.slideT = 0;   // 离地/入水即中断滑铲
     const mvx = this.over ? 0 : (this.keys.right ? 1 : 0) - (this.keys.left ? 1 : 0);   // 阵亡后不受操控
     if (mvx) { this.dir = mvx; if (!this.inWater) this.walkPh += dt * 10; }   // 走路相位只在陆上推进(水里由蹬水节奏管)
 
     if (!this.inWater) {
       if (this.onG) {
         // 站在水面上方左台
-        this.px += mvx * 185 * dt; this.py = this.LEDGE_Y;
+        if (this.slideT > 0) { this.slideT -= dt; this.px += this.slideDir * 330 * dt; }   // 滑铲:锁向高速滑行
+        else this.px += mvx * 185 * dt;
+        this.py = this.LEDGE_Y;
         const wallX = this.rockBroken ? this.PASSAGE_X : this.WALL_X;
         if (this.px <= wallX) { if (this.rockBroken) { this.exitToCave(); return; } else this.px = wallX; }
         if (this.px > this.LEDGE_R + 2) this.onG = false;         // 走出右缘 → 掉落

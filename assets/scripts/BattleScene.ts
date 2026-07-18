@@ -90,8 +90,8 @@ export class BattleScene extends Component {
   private readonly JUMP_MOVE_VY = JUMP.VY;      // 普通跳跃：起跳速度(全章共用 JumpKit)
   private readonly GRAVITY_MOVE = JUMP.GRAVITY; // 普通跳跃：重力(全章共用 JumpKit)
   private readonly JUMP_LAND = 0.3;       // 普通跳跃：落地缓冲下蹲时长（长一点看得清弹性）
-  private readonly SLIDE_DUR = 0.35;      // 闪躲滑铲：滑行时长（全程无敌帧）
-  private readonly SLIDE_CD = 0.55;       // 闪躲滑铲：冷却
+  private readonly SLIDE_DUR = 0.5;       // 闪躲滑铲：滑行时长（全程无敌帧,趴下段加长）
+  private readonly SLIDE_CD = 0.75;       // 闪躲滑铲：冷却
   private readonly SLIDE_SPEED = 2.4;     // 闪躲滑铲：起始速度倍率（相对 heroSpeed，滑行中衰减）
   private readonly JUMP_VY = JUMP.SLAM_VY;   // 跳劈起跳速度(全章共用 JumpKit)
   private readonly GRAVITY_J = 2800;      // 跳劈重力
@@ -126,7 +126,7 @@ export class BattleScene extends Component {
 
   // 主角赵云精灵
   private readonly HERO_ROW = 1;          // 骑马赵云：侧面攻击行
-  private readonly SPRITE_SCALE = 2.7;    // 帧放大倍数(新主角:原始1.5倍)
+  private readonly SPRITE_SCALE = 1.8;    // 64px 帧放大倍数
   private heroNode!: Node;
   private headNode!: Node;
   private heroSp!: Sprite;          // 上半身（骑马赵云，带攻击）
@@ -857,10 +857,10 @@ export class BattleScene extends Component {
     // 闪躲滑铲序列帧（AI 生成 3 帧：蹲下→低滑→起身；192×56，每帧 64×56）
     AssetHub.loadSF('zhaoyun-slide', (base) => {
       if (!base) return;
-      const tex = base.texture as Texture2D; tex.setFilters(Texture2D.Filter.NEAREST, Texture2D.Filter.NEAREST);
+      const tex = base.texture as Texture2D; tex.setFilters(Texture2D.Filter.LINEAR, Texture2D.Filter.LINEAR);
       for (let c = 0; c < 3; c++) {
         const sf = new SpriteFrame(); sf.texture = tex;
-        sf.rect = new Rect(c * 64, 0, 64, 56);
+        sf.rect = new Rect(c * 192, 0, 192, 112);   // 新主角:贴图2倍高清,显示 96×56
         this.slideFrames.push(sf);
       }
     });
@@ -996,7 +996,7 @@ export class BattleScene extends Component {
         u.setContentSize(leafSizes[kind][0], leafSizes[kind][1]);
         u.setAnchorPoint(0.5, 0.04);   // 锚在叶柄根部 → 绕柄旋转
         const sp = n.addComponent(Sprite); sp.sizeMode = Sprite.SizeMode.CUSTOM;
-        const sc = (1.15 + ((i * 37) % 60) / 100) * (i % 2 ? -1 : 1);   // 随机大小+镜像，密排成带
+        const sc = (1.3 + ((i * 37) % 60) / 100) * (i % 2 ? -1 : 1);   // 随机大小+镜像，密排成带(整体加大一档)
         n.setScale(sc, Math.abs(sc), 1);
         n.active = false;
         const kk = kind;
@@ -1112,7 +1112,7 @@ export class BattleScene extends Component {
       onJump: () => this.heroJump(),
       onDash: (d) => this.heroSlide(d),
       onAttack: () => this.heroSwing(),
-      onSpecial: () => this.heroSpecial(),
+      onSlide: () => this.heroSlide(this.hero ? this.hero.dir : 1),   // 滑铲键(气波招数已下架)
     }, { alpha: this.CTRL_ALPHA });   // 布局全局统一(套件内定死):摇杆+跳跃键+攻击+技能
 
     // 「重来」：超链接式文字（下划线），点击重开
@@ -1237,7 +1237,7 @@ export class BattleScene extends Component {
       case KeyCode.KEY_A: case KeyCode.ARROW_LEFT: this.leftHeld = true; this.dirTap(-1); break;
       case KeyCode.KEY_D: case KeyCode.ARROW_RIGHT: this.rightHeld = true; this.dirTap(1); break;
       case KeyCode.SPACE: case KeyCode.KEY_J: this.heroSwing(); break;
-      case KeyCode.KEY_K: case KeyCode.KEY_L: this.heroSpecial(); break;
+      case KeyCode.KEY_K: case KeyCode.KEY_L: this.heroSlide(this.hero ? this.hero.dir : 1); break;   // K/L=滑铲
       case KeyCode.KEY_W: case KeyCode.ARROW_UP: this.heroJump(); break;
     }
   }
@@ -2705,7 +2705,7 @@ export class BattleScene extends Component {
     this.updateEnemySprites(drawn);   // 小怪 = 轻步兵精灵（Boss 单独用精灵）
     this.updateBossSprite();
     this.updateBossFx();              // Boss 法术贴图特效（法阵/冲击波）
-    const blink = h.state !== 'dead' && h.invuln > 0 && Math.floor(h.invuln * 20) % 2 === 0;
+    const blink = h.state !== 'dead' && h.slideT <= 0 && h.invuln > 0 && Math.floor(h.invuln * 20) % 2 === 0;   // 滑铲无敌不闪,只有受击无敌才闪
     if (this.DISMOUNT && !blink && h.state !== 'dead') this.drawHeroLegs(g);   // 火柴腿（在上半身之后画=垫腰下）
     this.updateHeroSprite(blink);
     this.drawArrows(g);  // 敌箭（在角色前）
@@ -2856,9 +2856,9 @@ export class BattleScene extends Component {
       if (this.legsFrames.length >= 2) this.legsSp.spriteFrame = this.legsFrames[0];
     } else if (h.slideT > 0 && this.slideFrames.length >= 3) {
       // 闪躲滑铲：进入蹲姿(0) → 低滑保持(1) → 起身收势(2)
-      fu2.setContentSize(64, 56); fu2.setAnchorPoint(0.5, 4 / 56);
+      fu2.setContentSize(96, 56); fu2.setAnchorPoint(0.5, 4 / 56);
       const p = 1 - h.slideT / this.SLIDE_DUR;   // 0→1
-      const idx = p < 0.16 ? 0 : p < 0.74 ? 1 : 2;
+      const idx = p < 0.12 ? 0 : p < 0.88 ? 1 : 2;   // 低滑段拉长
       this.footSp.spriteFrame = this.slideFrames[idx];
     } else if (useJumpSheet) {
       // 蓄力/落地 → 蹲帧(0)；上升到顶点 → 伸展帧(1)；过顶点稍落一点(降到78%高度) → 屈腿帧(2)
@@ -4507,11 +4507,10 @@ export class BattleScene extends Component {
     g.fillColor = new Color(255, 240, 168, 255); g.circle(cx - 3.2, cy + 3.2, 3); g.fill();
   }
 
-  // 剑气冷却环:委托给操控套件(内部自带48级量化脏标记)
+  // 滑铲冷却环:委托给操控套件(内部自带48级量化脏标记)
   private updateSkillCd() {
     if (!this.controls || !this.hero) return;
-    const total = this.specialCdCur || this.SPECIAL_CD;
-    this.controls.setSpecialCd(this.hero.specialCd / total);
+    this.controls.setSpecialCd(this.hero.slideCd / this.SLIDE_CD);
   }
 
   // 小怪攻击预警：起手到命中前，头顶弹出脉动的红黄感叹号（公平感）
