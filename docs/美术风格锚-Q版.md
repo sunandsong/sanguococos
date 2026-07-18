@@ -46,6 +46,13 @@ one-point perspective, vanishing point, tunnel into screen, isometric, 3/4 view,
 neon, sci-fi, modern, text, watermark, seams
 ```
 
+**▶ 光泽感(2026-07-18 定版,角色/怪/道具类提示词都带):**
+> 平涂图进游戏显得干瘪没质感,提示词一律加光泽配方(光源统一左上,与程序打光同向):
+```
+soft volumetric shading with glossy highlights, light from the upper left, subtle rim light on the edges
+```
+> 负向加:`flat dull colors, matte lifeless surface`
+
 **▶ 像素感(2026-07-18 定版):**
 > **提示词不加像素关键词**(AI 原生像素块太大太糙,试过效果差)——照常出平滑Q版图,
 > 像素感全靠**接图时的统一后处理**:半分辨率重采样 → NEAREST 放大(≈1显示像素脆颗粒) + 量化 64~96 色。

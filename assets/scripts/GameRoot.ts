@@ -27,7 +27,7 @@ const { ccclass } = _decorator;
 
 // 临时开关(从上往下,开哪个进哪个):洞穴 > 第二章 > 正常第一章
 const START_CAVE = false;      // true = 直接进第二章「地下坑道」场景(开发中)
-const START_CHAPTER2 = true;   // true = 直接进第二章「投井下降」关(砸石开洞→转场进洞穴)
+const START_CHAPTER2 = false;  // true = 直接进第二章「投井下降」关(砸石开洞→转场进洞穴)
 
 // 一键引导：挂在 Canvas 下的一个空节点上，运行时自动创建并配好整页。
 // 这样你只需建「一个」节点，省去手动逐个创建。
