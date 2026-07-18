@@ -51,6 +51,7 @@ export class Chapter2Cave extends Component {
 
     const fx = new Node('cave-fx'); fx.layer = Layers.Enum.UI_2D; fx.parent = this.node; fx.addComponent(UITransform);
     this.hero = new HeroRig(this.node, fx);
+    this.hero.ambient = new Color(255, 234, 212, 255);   // 洞内暖火光环境光(压贴纸感)
     this.combat = new HeroCombat(fx, this.hero);   // 共用战斗套件(连招+刀气+剑气)
 
     // 近景前景层:排在角色/特效之上,画快视差巨柱框景

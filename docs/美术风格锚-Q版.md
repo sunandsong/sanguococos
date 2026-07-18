@@ -18,6 +18,18 @@ rounded soft shapes, clean outlines, bright warm soft shading, limited cozy pale
 transparent background PNG, side view
 ```
 
+**▶ 角色·丑萌怪诞修饰(2026-07-18 定版,主角定妆采用;出"人物/生物"时叠加在上面片段之后):**
+> 关键词:**busaiku kawaii(不细工可爱)+ 怪诞感**。大头占全身 70%、五官挤在下半脸、
+> 一大一小眼、歪嘴、身体小豆芽、武器比人大、线条简单微抖的手绘感。
+```
+ugly-cute (busaiku kawaii), quirky grotesque charm, simple clean lines,
+gigantic round-ish lumpy head taking up 70% of the whole body,
+facial features squeezed into the lower half of the face,
+one big round eye and one smaller eye slightly apart, tiny crooked smile,
+tiny sprout-like body, weapon much taller than the character,
+flat colors, bold simple outlines, slightly wobbly hand-drawn feel but clean silhouette
+```
+
 **▶ 横版背景(场景):**
 ```
 cute chibi kawaii pixel art storybook, side-scrolling platformer level background,

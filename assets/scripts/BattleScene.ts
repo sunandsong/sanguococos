@@ -126,7 +126,7 @@ export class BattleScene extends Component {
 
   // 主角赵云精灵
   private readonly HERO_ROW = 1;          // 骑马赵云：侧面攻击行
-  private readonly SPRITE_SCALE = 1.8;    // 64px 帧放大倍数
+  private readonly SPRITE_SCALE = 2.7;    // 帧放大倍数(新主角:原始1.5倍)
   private heroNode!: Node;
   private headNode!: Node;
   private heroSp!: Sprite;          // 上半身（骑马赵云，带攻击）
@@ -263,6 +263,7 @@ export class BattleScene extends Component {
   private readonly ZONE_INTRO_DUR = 1.6;
   private slowMoT = 0;             // 胜利慢动作剩余时间
   private deadRedT = 0;            // 阵亡红闪剩余
+  private slamDimT = 0;            // 大招落地全屏压黑剩余(衬爆发)
   private deadT2 = 0;              // 阵亡计时(不受慢动作缩放，用于演出)
   private dusts: { x: number; y: number; vx: number; vy: number; r: number; life: number; max: number }[] = [];
   private walkDustT = 0;           // 跑动扬尘节流
@@ -652,14 +653,14 @@ export class BattleScene extends Component {
       this.fxCreSF = sf;
       if (this.slashSp) this.slashSp.spriteFrame = sf;
     });
-    // 跳劈落地冲击波：640×136 横排 4 帧，切成 160×136 的帧序列
+    // 跳劈落地冲击波：1280×272 横排 4 帧(紫爆2×高清),切成 320×272,显示仍 160×136
     AssetHub.loadSF('fx-slam-impact', (base) => {
       if (!base) return;
       const tex = base.texture as Texture2D;
-      tex.setFilters(Texture2D.Filter.NEAREST, Texture2D.Filter.NEAREST);
+      tex.setFilters(Texture2D.Filter.LINEAR, Texture2D.Filter.LINEAR);
       for (let i = 0; i < 4; i++) {
         const sf = new SpriteFrame(); sf.texture = tex;
-        sf.rect = new Rect(i * 160, 0, 160, 136);
+        sf.rect = new Rect(i * 320, 0, 320, 272);
         this.slamFxFrames.push(sf);
       }
     });
@@ -846,10 +847,10 @@ export class BattleScene extends Component {
     // 跳跃序列帧（AI 生成 3 帧，只用 0=蹲、2=屈腿下落；192×56，每帧 64×56）
     AssetHub.loadSF('zhaoyun-jump', (base) => {
       if (!base) return;
-      const tex = base.texture as Texture2D; tex.setFilters(Texture2D.Filter.NEAREST, Texture2D.Filter.NEAREST);
+      const tex = base.texture as Texture2D; tex.setFilters(Texture2D.Filter.LINEAR, Texture2D.Filter.LINEAR);
       for (let c = 0; c < 3; c++) {
         const sf = new SpriteFrame(); sf.texture = tex;
-        sf.rect = new Rect(c * 64, 0, 64, 56);
+        sf.rect = new Rect(c * 160, 0, 160, 112);   // 新主角:贴图2倍高清,显示仍 80×56
         this.jumpFrames.push(sf);
       }
     });
@@ -866,37 +867,37 @@ export class BattleScene extends Component {
     // 攻击序列帧（AI 生成 4 帧：举刀预备→横斩拖影→前刺→收势；256×56，每帧 64×56）
     AssetHub.loadSF('zhaoyun-attack', (base) => {
       if (!base) return;
-      const tex = base.texture as Texture2D; tex.setFilters(Texture2D.Filter.NEAREST, Texture2D.Filter.NEAREST);
+      const tex = base.texture as Texture2D; tex.setFilters(Texture2D.Filter.LINEAR, Texture2D.Filter.LINEAR);
       for (let c = 0; c < 4; c++) {
         const sf = new SpriteFrame(); sf.texture = tex;
-        sf.rect = new Rect(c * 64, 0, 64, 56);
+        sf.rect = new Rect(c * 192, 0, 192, 112);   // 新主角:贴图2倍高清,显示仍 96×56
         this.atkFrames.push(sf);
       }
     });
     // 跳劈序列帧（AI 生成 4 帧：腾空举枪→俯冲下刺→砸地扬尘→蹲姿收势；288×72，每帧 72×72）
     AssetHub.loadSF('zhaoyun-slam', (base) => {
       if (!base) return;
-      const tex = base.texture as Texture2D; tex.setFilters(Texture2D.Filter.NEAREST, Texture2D.Filter.NEAREST);
+      const tex = base.texture as Texture2D; tex.setFilters(Texture2D.Filter.LINEAR, Texture2D.Filter.LINEAR);
       for (let c = 0; c < 4; c++) {
         const sf = new SpriteFrame(); sf.texture = tex;
-        sf.rect = new Rect(c * 72, 0, 72, 72);
+        sf.rect = new Rect(c * 192, 0, 192, 160);   // 新主角:贴图2倍高清,显示仍 96×80
         this.slamFrames.push(sf);
       }
     });
     // 步战赵云腿（第1行下半身；x8~40,y30~58）
     AssetHub.loadSF('zhaoyun-foot', (base) => {
-      if (!base) { console.warn('步战赵云加载失败'); return; }
-      const tex = base.texture as Texture2D; tex.setFilters(Texture2D.Filter.NEAREST, Texture2D.Filter.NEAREST);
+      if (!base) { console.warn('步战主角加载失败'); return; }
+      const tex = base.texture as Texture2D; tex.setFilters(Texture2D.Filter.LINEAR, Texture2D.Filter.LINEAR);   // 平滑卡通风
       for (let c = 0; c < 2; c++) {
         const sf = new SpriteFrame(); sf.texture = tex;
-        sf.rect = new Rect(c * 48 + 11, this.HERO_ROW * 64 + 30, 32, 28);   // 居中于腿(x27)
+        sf.rect = new Rect(c * 160 + 52, 56, 56, 56);   // 新表:格内腿部区域(仅老式攻击兜底用)
         this.legsFrames.push(sf);
       }
       this.legsSp.spriteFrame = this.legsFrames[0];
-      // 完整身体 4 帧（x4~44,y13~57；走路循环）
+      // 完整身体 4 帧(新主角走路表:4格×160×112,贴图2倍高清,显示仍 80×56)
       for (let c = 0; c < 4; c++) {
         const sf = new SpriteFrame(); sf.texture = tex;
-        sf.rect = new Rect(c * 48 + 4, this.HERO_ROW * 64 + 13, 40, 44);
+        sf.rect = new Rect(c * 160, 0, 160, 112);
         this.footFullFrames.push(sf);
       }
       this.footSp.spriteFrame = this.footFullFrames[0];
@@ -1211,6 +1212,8 @@ export class BattleScene extends Component {
       case '清晨': r = 255; g = 246; b = 226; break;
       case '黄昏': r = 255; g = 226; b = 200; break;
     }
+    // 环境反光:草原场景淡淡的绿色环境光揉进角色(8%),压掉"贴纸感"
+    r = Math.round(r * 0.92 + 232 * 0.08); g = Math.round(g * 0.92 + 248 * 0.08); b = Math.round(b * 0.92 + 224 * 0.08);
     const rc = this.realmOf(this.zone).char;   // 叠加界色（地府发青 / 天庭鎏金）
     this._charTintC.set(Math.round(r * rc[0] / 255), Math.round(g * rc[1] / 255), Math.round(b * rc[2] / 255), 255);
     return this._charTintC;
@@ -1335,6 +1338,7 @@ export class BattleScene extends Component {
     this.lastRealDt = dt;   // 真实帧间隔（未 clamp/未慢动作缩放）——给 FPS 统计用
     dt = Math.min(dt, 0.05);
     if (this.deadRedT > 0) this.deadRedT -= dt;
+    if (this.slamDimT > 0) this.slamDimT -= dt;    // 大招压黑衰减
     if (this.over && this.hero.state === 'dead') this.deadT2 += dt;
     if (this.slowMoT > 0) { this.slowMoT -= dt; dt *= 0.35; }   // 慢动作(胜利/坠落)
     this.animT += dt;
@@ -1750,6 +1754,7 @@ export class BattleScene extends Component {
     this.spawnDust(this.hero.x, this.groundY + 4, 10, 300);   // 跳劈落地大尘圈
     this.genSlamBolt(this.sX(h.x), this.groundY + 6);   // 天降一道闪电劈在落点
     this.slamFxT = this.SLAM_FX_DUR; this.slamFxX = h.x;   // 落地冲击波序列帧开播
+    this.slamDimT = 0.5;                                  // 全屏压黑一闪,衬紫爆
     // 冲击波掀草：范围内草株向外猛压（弹簧会自己甩回震荡），并溅起草屑
     {
       const hx = this.sX(h.x);
@@ -2687,7 +2692,7 @@ export class BattleScene extends Component {
 
     // 阴影垫底
     const h = this.hero;
-    if (h.state !== 'dead') this.drawShadow(g, h.x, h.lane, 14, h.jumpY);   // 主角影子（步战赵云，窄）
+    if (h.state !== 'dead') this.drawShadow(g, h.x, h.lane, 24, h.jumpY, 1.3);   // 主角影子(新主角胖大头:加宽加厚,hf>1=永远居中脚下)
     for (const m of this.monsters) if (m.state !== 'dead') this.drawShadow(g, m.x, m.lane, (m.kind === 'boss' ? 68 : 14) * m.scale, m.jumpY, m.kind === 'boss' ? 2.6 : 1);   // Boss 影更宽更厚,不然像贴画(和 BOSS_SCALE 同比)
 
     this.drawBossWarning(g);   // Boss 重击预警红圈（画在地面、角色之下）
@@ -2833,13 +2838,13 @@ export class BattleScene extends Component {
     this.footNode.active = (!attacking || useSheet) && this.footFullFrames.length >= 4;
     const fu2 = this.footNode.getComponent(UITransform)!;
     if (useAtkSheet) {
-      fu2.setContentSize(64, 56); fu2.setAnchorPoint(0.5, 4 / 56);
+      fu2.setContentSize(96, 56); fu2.setAnchorPoint(0.5, 4 / 56);
       // 非均匀节奏：预备慢(0~0.32) → 斩击快(0.32~0.5) → 前刺(0.5~0.75) → 收势
       const p = h.swing;
       const idx = p < 0.32 ? 0 : p < 0.5 ? 1 : p < 0.75 ? 2 : 3;
       this.footSp.spriteFrame = this.atkFrames[idx];
     } else if (useSlamSheet) {
-      fu2.setContentSize(72, 72); fu2.setAnchorPoint(0.5, 4 / 72);
+      fu2.setContentSize(96, 80); fu2.setAnchorPoint(0.5, 4 / 80);
       // 按跳劈物理选帧：上升举枪 → 下落俯冲 → 砸地(与冲击波同步) → 收势
       const p = h.slamProg;
       const idx = p <= 0.15 ? 0 : p < 0.9 ? 1 : (this.slamFxT > this.SLAM_FX_DUR * 0.45 ? 2 : 3);
@@ -2857,13 +2862,13 @@ export class BattleScene extends Component {
       this.footSp.spriteFrame = this.slideFrames[idx];
     } else if (useJumpSheet) {
       // 蓄力/落地 → 蹲帧(0)；上升到顶点 → 伸展帧(1)；过顶点稍落一点(降到78%高度) → 屈腿帧(2)
-      fu2.setContentSize(64, 56); fu2.setAnchorPoint(0.5, 4 / 56);
+      fu2.setContentSize(80, 56); fu2.setAnchorPoint(0.5, 4 / 56);
       const airborne = h.jumpY > 0 && h.jmpLand <= 0 && h.jmpPre <= 0;
       const maxJH = this.JUMP_MOVE_VY * this.JUMP_MOVE_VY / (2 * this.GRAVITY_MOVE);
       const idx = !airborne ? 0 : (h.jumpVy > 0 || h.jumpY > maxJH * 0.78 ? 1 : 2);
       this.footSp.spriteFrame = this.jumpFrames[idx];
     } else if (this.footFullFrames.length >= 4) {
-      fu2.setContentSize(40, 44); fu2.setAnchorPoint(0.5, 0);
+      fu2.setContentSize(80, 56); fu2.setAnchorPoint(0.5, 4 / 56);   // 锚点上提=人下沉,脚踩进路里
       // 走路循环 4 帧，待机固定帧0
       const fi = h.state === 'walk' ? Math.floor(this.animT * 8) % 4 : 0;
       this.footSp.spriteFrame = this.footFullFrames[fi];
@@ -3739,7 +3744,7 @@ export class BattleScene extends Component {
     if (this.slamBoltT <= 0 || this.slamBolt.length < 2) return;
     const a = (this.slamBoltT / 0.26) * (0.7 + 0.3 * Math.sin(this.animT * 60));   // 快速衰减 + 高频抖闪
     const path = () => { g.moveTo(this.slamBolt[0][0], this.slamBolt[0][1]); for (let i = 1; i < this.slamBolt.length; i++) g.lineTo(this.slamBolt[i][0], this.slamBolt[i][1]); };
-    g.strokeColor = this._scratchC.set(150, 195, 255, Math.round(150 * a)); g.lineWidth = 12;   // 外发光
+    g.strokeColor = this._scratchC.set(196, 132, 255, Math.round(150 * a)); g.lineWidth = 12;   // 外发光(紫电)
     path(); g.stroke();
     g.strokeColor = this._scratchC.set(250, 252, 255, Math.round(250 * a)); g.lineWidth = 4;    // 亮芯
     path(); g.stroke();
@@ -3761,7 +3766,7 @@ export class BattleScene extends Component {
     const fi = Math.min(3, Math.floor(p * 4));
     n.active = true;
     n.setPosition(this.sX(this.slamFxX), this.groundY + 2, 0);
-    n.setScale(2.5, 1.2, 1);                                 // 横向拉宽、纵向压扁 → 光环贴地的透视感（宽约 400px）
+    n.setScale(3.75, 1.8, 1);                                // 横向拉宽、纵向压扁(冲击环再放大1.5倍)
     this.slamFxSp!.spriteFrame = this.slamFxFrames[fi];
     this._scratchC.set(255, 255, 255, fi === 3 ? 200 : 255); // 尾帧稍淡，收得更柔
     this.slamFxSp!.color = this._scratchC;
@@ -3846,9 +3851,9 @@ export class BattleScene extends Component {
       g.rect(-W / 2, -H / 2, W, H); g.fill();
       if (this.bolt.length > 1) {
         const path = (pts: number[][]) => { g.moveTo(pts[0][0], pts[0][1]); for (let i = 1; i < pts.length; i++) g.lineTo(pts[i][0], pts[i][1]); };
-        g.strokeColor = this._scratchC.set(150, 195, 255, Math.round(130 * a)); g.lineWidth = 13;  // 外发光
+        g.strokeColor = this._scratchC.set(196, 132, 255, Math.round(130 * a)); g.lineWidth = 13;  // 外发光(紫电)
         path(this.bolt); for (const b of this.boltBranches) path(b); g.stroke();
-        g.strokeColor = this._scratchC.set(248, 251, 255, Math.round(248 * a)); g.lineWidth = 4;   // 亮芯
+        g.strokeColor = this._scratchC.set(252, 238, 255, Math.round(248 * a)); g.lineWidth = 4;   // 亮芯(粉白)
         path(this.bolt); for (const b of this.boltBranches) path(b); g.stroke();
       }
     }
@@ -3968,6 +3973,12 @@ export class BattleScene extends Component {
       g.fillColor = new Color(140, 12, 10, a);
       g.rect(-DESIGN_W / 2, -DESIGN_H / 2, DESIGN_W, DESIGN_H); g.fill();
     }
+    // 大招落地全屏压黑一闪(快速淡出,衬紫爆)
+    if (this.slamDimT > 0) {
+      const a = Math.round(110 * Math.min(1, this.slamDimT / 0.5));
+      g.fillColor = new Color(8, 4, 16, a);
+      g.rect(-DESIGN_W / 2, -DESIGN_H / 2, DESIGN_W, DESIGN_H); g.fill();
+    }
 
     // 赵云挥砍大刀气（新月贴图精灵：随挥砍进度旋转 + 淡出，不再每帧 hArc 描边）
     const h = this.hero;
@@ -3976,7 +3987,7 @@ export class BattleScene extends Component {
       const s = h.atkType === 2 ? h.slamProg : h.swing;
       const a = 1 - Math.abs(s - 0.4) / 0.6;   // 中段最亮
       if (a > 0.05) {
-        const cx = this.sX(h.x) + h.dir * 34, cy = this.groundY + 74 + h.jumpY;   // 前移到刀上（原 22）
+        const cx = this.sX(h.x) + h.dir * 55, cy = this.groundY + 74 + h.jumpY;   // 前移到刀上(刀气加大后再前推)
         const c0 = h.dir > 0 ? 0 : Math.PI;
         // 顺刀方向：vert>0 朝下、<0 朝上；随挥砍进度 s 旋转，刀气跟着刀扫
         let vert: number;
@@ -3987,7 +3998,7 @@ export class BattleScene extends Component {
         this.slashN.active = true;
         this.slashN.setPosition(cx, cy, 0);
         this.slashN.angle = ca * 57.29578;                   // 弧度→角度（贴图开口朝右=0°）
-        this.slashN.setScale(1.7, 1.7, 1);                   // 贴图内弧 r≈44 → 44*1.7 ≈ 原 R74
+        this.slashN.setScale(2.55, 2.55, 1);                 // 刀气=原始1.5倍(紫焰新月)
         this._scratchC.set(255, 255, 255, Math.round(230 * a));
         this.slashSp.color = this._scratchC;
         slashOn = true;

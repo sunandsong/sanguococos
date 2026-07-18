@@ -1,4 +1,5 @@
 import { Node, Sprite, SpriteFrame, UITransform, Texture2D, Rect, Layers, Graphics, Color } from 'cc';
+import { DESIGN_W, DESIGN_H } from './Constants';
 import { AssetHub } from './AssetHub';
 import { AudioMgr } from './AudioMgr';
 import { JUMP } from './JumpKit';
@@ -22,8 +23,9 @@ export class HeroRig {
   private swimH: SpriteFrame[] = [];  // 横游 3 帧 72×40(收腿→蹬腿→滑行,头朝左)
   private float: SpriteFrame[] = [];  // 水面踩水 2 帧 56×56(双臂开合)
   private readonly HERO_ROW = 1;
-  private readonly S = 1.8;           // 与第一章 SPRITE_SCALE 一致
+  private readonly S = 2.7;           // 与第一章 SPRITE_SCALE 一致(新主角:原始1.5倍)
   jumpRefVy = JUMP.VY;                // 跳跃初速参考(空中挤压拉伸的归一化基准);非屏幕像素坐标系的场景要除以自己的 SCALE
+  ambient: Color | null = null;       // 场景环境光染色(井=湿冷青/洞=暖火光,不设=纯白):角色揉进场景色,压"贴纸感"
   private landT = 0;                  // 落地回弹计时(空中→落地时由套件自己触发,压扁→过冲→归位)
   private wasAir = false;             // 上一帧是否腾空(检测起跳/落地瞬间)
   private airJump = false;            // 本次腾空是"跳起来的"(走下台边的下坠不放大,与第一章一致)
@@ -34,6 +36,7 @@ export class HeroRig {
   private fxSlamN: Node | null = null; private fxSlamSp: Sprite | null = null; private fxSlamFrames: SpriteFrame[] = [];
   private boltG: Graphics | null = null;
   private slamFxT = 0; private readonly SLAM_FX_DUR = 0.34;
+  private dimG: Graphics | null = null; private slamDimT = 0;   // 大招落地全屏压黑一闪(衬爆发)
   private bolt: number[][] = [];      // 相对冲击点的偏移折线
   private boltT = 0; private fxX = 0; private fxY = 0; private fxClock = 0;
 
@@ -56,6 +59,10 @@ export class HeroRig {
     const bn = new Node('rig-slambolt'); bn.layer = Layers.Enum.UI_2D; bn.parent = fxP;
     bn.addComponent(UITransform);
     this.boltG = bn.addComponent(Graphics);
+    // 大招压黑罩(全屏,平时空)
+    const dn = new Node('rig-slamdim'); dn.layer = Layers.Enum.UI_2D; dn.parent = fxP;
+    dn.addComponent(UITransform);
+    this.dimG = dn.addComponent(Graphics);
     this.load();
   }
 
@@ -67,15 +74,17 @@ export class HeroRig {
     });
   }
   private load() {
+    // 新主角四套帧:贴图是显示尺寸的2倍(高清防糊),显示 contentSize 不变;平滑卡通风用 LINEAR 采样
     this.each('zhaoyun-foot', (tex) => {
-      for (let c = 0; c < 4; c++) { const sf = new SpriteFrame(); sf.texture = tex; sf.rect = new Rect(c * 48 + 4, this.HERO_ROW * 64 + 13, 40, 44); this.foot.push(sf); }
+      tex.setFilters(Texture2D.Filter.LINEAR, Texture2D.Filter.LINEAR);
+      for (let c = 0; c < 4; c++) { const sf = new SpriteFrame(); sf.texture = tex; sf.rect = new Rect(c * 160, 0, 160, 112); this.foot.push(sf); }
       if (!this.sp.spriteFrame) this.sp.spriteFrame = this.foot[0];
       this.ready = true;
     });
-    this.each('zhaoyun-jump', (tex) => { for (let c = 0; c < 3; c++) { const sf = new SpriteFrame(); sf.texture = tex; sf.rect = new Rect(c * 64, 0, 64, 56); this.jump.push(sf); } });
-    this.each('zhaoyun-attack', (tex) => { for (let c = 0; c < 4; c++) { const sf = new SpriteFrame(); sf.texture = tex; sf.rect = new Rect(c * 64, 0, 64, 56); this.atk.push(sf); } });
-    this.each('zhaoyun-slam', (tex) => { for (let c = 0; c < 4; c++) { const sf = new SpriteFrame(); sf.texture = tex; sf.rect = new Rect(c * 72, 0, 72, 72); this.slam.push(sf); } });
-    this.each('fx-slam-impact', (tex) => { for (let c = 0; c < 4; c++) { const sf = new SpriteFrame(); sf.texture = tex; sf.rect = new Rect(c * 160, 0, 160, 136); this.fxSlamFrames.push(sf); } });
+    this.each('zhaoyun-jump', (tex) => { tex.setFilters(Texture2D.Filter.LINEAR, Texture2D.Filter.LINEAR); for (let c = 0; c < 3; c++) { const sf = new SpriteFrame(); sf.texture = tex; sf.rect = new Rect(c * 160, 0, 160, 112); this.jump.push(sf); } });
+    this.each('zhaoyun-attack', (tex) => { tex.setFilters(Texture2D.Filter.LINEAR, Texture2D.Filter.LINEAR); for (let c = 0; c < 4; c++) { const sf = new SpriteFrame(); sf.texture = tex; sf.rect = new Rect(c * 192, 0, 192, 112); this.atk.push(sf); } });
+    this.each('zhaoyun-slam', (tex) => { tex.setFilters(Texture2D.Filter.LINEAR, Texture2D.Filter.LINEAR); for (let c = 0; c < 4; c++) { const sf = new SpriteFrame(); sf.texture = tex; sf.rect = new Rect(c * 192, 0, 192, 160); this.slam.push(sf); } });
+    this.each('fx-slam-impact', (tex) => { tex.setFilters(Texture2D.Filter.LINEAR, Texture2D.Filter.LINEAR); for (let c = 0; c < 4; c++) { const sf = new SpriteFrame(); sf.texture = tex; sf.rect = new Rect(c * 320, 0, 320, 272); this.fxSlamFrames.push(sf); } });   // 紫爆2×高清
     this.each('zhaoyun-swim', (tex) => { for (let c = 0; c < 3; c++) { const sf = new SpriteFrame(); sf.texture = tex; sf.rect = new Rect(c * 40, 0, 40, 72); this.swim.push(sf); } });
     this.each('zhaoyun-swim-h', (tex) => { for (let c = 0; c < 3; c++) { const sf = new SpriteFrame(); sf.texture = tex; sf.rect = new Rect(c * 72, 0, 72, 40); this.swimH.push(sf); } });
     this.each('zhaoyun-float', (tex) => { for (let c = 0; c < 2; c++) { const sf = new SpriteFrame(); sf.texture = tex; sf.rect = new Rect(c * 56, 0, 56, 56); this.float.push(sf); } });
@@ -98,12 +107,23 @@ export class HeroRig {
     }
     pts[steps] = [0, 0];   // 末端钉在冲击点
     this.bolt = pts; this.boltT = 0.26;
+    this.slamDimT = 0.5;   // 全屏压黑一闪,衬紫爆
   }
 
   /** 每帧推进跳劈特效;镜头会动的场景把冲击点的最新屏幕坐标传进来(不传则用触发时坐标) */
   updateFx(dt: number, x?: number, y?: number) {
     this.fxClock += dt;
     if (this.landT > 0) this.landT -= dt;   // 落地回弹计时(视觉专用,不影响物理)
+    // 大招落地全屏压黑一闪(快速淡出;脏标记:只在激活期间重画,平时零开销)
+    if (this.dimG && this.slamDimT > 0) {
+      this.slamDimT -= dt;
+      this.dimG.clear();
+      if (this.slamDimT > 0) {
+        const da = Math.round(110 * Math.max(0, Math.min(1, this.slamDimT / 0.5)));
+        this.dimG.fillColor = new Color(8, 4, 16, da);
+        this.dimG.rect(-DESIGN_W / 2, -DESIGN_H / 2, DESIGN_W, DESIGN_H); this.dimG.fill();
+      }
+    }
     if (x !== undefined) this.fxX = x;
     if (y !== undefined) this.fxY = y;
     // 冲击波:计时选帧,横宽纵扁贴地
@@ -116,7 +136,7 @@ export class HeroRig {
         const fi = Math.min(3, Math.floor(p * 4));
         this.fxSlamN.active = true;
         this.fxSlamN.setPosition(this.fxX, this.fxY + 2, 0);
-        this.fxSlamN.setScale(2.5, 1.2, 1);
+        this.fxSlamN.setScale(3.75, 1.8, 1);   // 冲击环再放大1.5倍
         this.fxSlamSp.spriteFrame = this.fxSlamFrames[fi];
         this.fxSlamSp.color = new Color(255, 255, 255, fi === 3 ? 200 : 255);
       }
@@ -132,8 +152,8 @@ export class HeroRig {
           g.moveTo(this.fxX + this.bolt[0][0], this.fxY + this.bolt[0][1]);
           for (let i = 1; i < this.bolt.length; i++) g.lineTo(this.fxX + this.bolt[i][0], this.fxY + this.bolt[i][1]);
         };
-        g.strokeColor = new Color(150, 195, 255, Math.round(130 * a)); g.lineWidth = 13; path(); g.stroke();
-        g.strokeColor = new Color(248, 251, 255, Math.round(248 * a)); g.lineWidth = 4; path(); g.stroke();
+        g.strokeColor = new Color(196, 132, 255, Math.round(130 * a)); g.lineWidth = 13; path(); g.stroke();   // 紫电外发光
+        g.strokeColor = new Color(252, 238, 255, Math.round(248 * a)); g.lineWidth = 4; path(); g.stroke();   // 粉白亮芯
       }
     }
   }
@@ -147,17 +167,17 @@ export class HeroRig {
       if (shadowY !== undefined) {
         const hgt = Math.max(0, y - shadowY);
         const k = Math.max(0.3, 1 - hgt / 320);
-        g.fillColor = new Color(0, 0, 0, Math.round(95 * k));
-        g.ellipse(x, shadowY - 2, 22 * k, 6.5 * k); g.fill();
-        g.fillColor = new Color(0, 0, 0, Math.round(150 * k));
-        g.ellipse(x, shadowY - 2, 11 * k, 3.4 * k); g.fill();
+        g.fillColor = new Color(0, 0, 0, Math.round(100 * k));
+        g.ellipse(x, shadowY - 2, 34 * k, 9 * k); g.fill();     // 新主角胖大头:影子加宽加厚,居中脚下
+        g.fillColor = new Color(0, 0, 0, Math.round(155 * k));
+        g.ellipse(x, shadowY - 2, 17 * k, 4.6 * k); g.fill();
       }
     }
     this.node.setScale((dir >= 0 ? -this.S : this.S), this.S, 1);   // 默认朝左 → 朝右翻转（对齐第一章）
     this.node.angle = tilt === 0 ? 0 : (dir >= 0 ? tilt : -tilt);   // 抬头为正(斜游身体顺着运动方向倾)
     // 阵亡演出(与第一章一致):缓缓倒地(90°) + 下沉 + 灰化 + 溶解;p = 阵亡秒数
     if (mode === 'dead') {
-      this.ut.setContentSize(40, 44); this.ut.setAnchorPoint(0.5, 0);
+      this.ut.setContentSize(80, 56); this.ut.setAnchorPoint(0.5, 4 / 56);
       if (this.foot.length) this.sp.spriteFrame = this.foot[0];
       const d = p;
       this.node.angle = (dir >= 0 ? 1 : -1) * Math.min(90, d * 72);
@@ -167,7 +187,8 @@ export class HeroRig {
       this.sp.color = new Color(v, v, v, a2);
       return;
     }
-    if (this.sp.color.r !== 255 || this.sp.color.a !== 255) this.sp.color = new Color(255, 255, 255, 255);   // 复活恢复本色
+    const tr = this.ambient ? this.ambient.r : 255, tg = this.ambient ? this.ambient.g : 255, tb = this.ambient ? this.ambient.b : 255;
+    if (this.sp.color.r !== tr || this.sp.color.g !== tg || this.sp.color.b !== tb || this.sp.color.a !== 255) this.sp.color = new Color(tr, tg, tb, 255);   // 复活恢复本色+环境光
     const grounded = mode === 'walk' || mode === 'idle';
     const airborne = mode === 'air' || (mode === 'slam' && p < 0.9);   // 跳劈收势帧(p≥0.9)已落地:立即还原,不再按"速度0=最高点"误放大
     if (this.wasAir && grounded) this.landT = this.LAND_DUR;   // 腾空→落地瞬间:触发回弹(套件自检,场景零接线)
@@ -179,12 +200,12 @@ export class HeroRig {
     const hNorm = Math.max(0, 1 - (vy / ref) * (vy / ref));
     const boost = airborne && this.airJump ? 1 + 0.5 * hNorm : 1;
     if (mode === 'slam' && this.slam.length >= 4) {
-      this.ut.setContentSize(72, 72); this.ut.setAnchorPoint(0.5, 4 / 72);
+      this.ut.setContentSize(96, 80); this.ut.setAnchorPoint(0.5, 4 / 80);
       const idx = p <= 0.15 ? 0 : p < 0.9 ? 1 : 2;
       this.sp.spriteFrame = this.slam[idx];
       this.node.setScale((dir >= 0 ? -this.S : this.S) * boost, this.S * boost, 1);   // 跳劈腾空同样随高度放大
     } else if (mode === 'attack' && this.atk.length >= 4) {
-      this.ut.setContentSize(64, 56); this.ut.setAnchorPoint(0.5, 4 / 56);
+      this.ut.setContentSize(96, 56); this.ut.setAnchorPoint(0.5, 4 / 56);
       const idx = p < 0.32 ? 0 : p < 0.5 ? 1 : p < 0.75 ? 2 : 3;   // 预备→斩→刺→收
       this.sp.spriteFrame = this.atk[idx];
     } else if (mode === 'swim' && this.swim.length >= 3) {
@@ -199,7 +220,7 @@ export class HeroRig {
       this.ut.setContentSize(56, 56); this.ut.setAnchorPoint(0.5, 0.62);   // 锚点在胸口:定位点=水面线时露出整个头+肩,身体沉在水下
       this.sp.spriteFrame = this.float[Math.floor(walkPhase) % 2];      // 踩水:双臂开合慢循环
     } else if (mode === 'air' && this.jump.length >= 3) {
-      this.ut.setContentSize(64, 56); this.ut.setAnchorPoint(0.5, 4 / 56);
+      this.ut.setContentSize(80, 56); this.ut.setAnchorPoint(0.5, 4 / 56);
       this.sp.spriteFrame = this.jump[vy < 0 ? 1 : 2];             // 上升伸展 / 下落屈腿
       // 跳跃挤压拉伸(从第一章提取):上升越快越拉长 → 顶点缩短(0.72) → 下落回正;
       // 跳跃帧姿态已画在图里,程序挤压只留 40%(与第一章同参)
@@ -212,7 +233,7 @@ export class HeroRig {
       if (this.landT > 0 && grounded && this.jump.length >= 3) {
         // 落地回弹(从第一章提取,同参):前段蹲帧压扁 → 后段弹性过冲拉高 → 归位;程序挤压只留40%
         const l = Math.max(0, this.landT) / this.LAND_DUR;   // 1→0
-        this.ut.setContentSize(64, 56); this.ut.setAnchorPoint(0.5, 4 / 56);
+        this.ut.setContentSize(80, 56); this.ut.setAnchorPoint(0.5, 4 / 56);
         this.sp.spriteFrame = this.jump[0];                  // 落地蹲帧
         const overshoot = l < 0.45 ? Math.sin((0.45 - l) / 0.45 * Math.PI) * 0.13 : 0;
         const ry = (1 - l * 0.34) * (1 + overshoot);
@@ -220,7 +241,7 @@ export class HeroRig {
         const cx = Math.max(0.7, 1 - (ry - 1) * 0.2);
         this.node.setScale((dir >= 0 ? -this.S : this.S) * cx, this.S * cy, 1);
       } else {
-        this.ut.setContentSize(40, 44); this.ut.setAnchorPoint(0.5, 0);
+        this.ut.setContentSize(80, 56); this.ut.setAnchorPoint(0.5, 4 / 56);   // 锚点上提=人下沉,脚踩进路里
         const idx = mode === 'walk' ? (Math.floor(walkPhase) % 4) : 0;
         this.sp.spriteFrame = this.foot[idx];
       }
@@ -231,6 +252,7 @@ export class HeroRig {
     if (this.node && this.node.isValid) this.node.destroy();
     if (this.fxSlamN && this.fxSlamN.isValid) this.fxSlamN.destroy();
     if (this.boltG && this.boltG.node.isValid) this.boltG.node.destroy();
+    if (this.dimG && this.dimG.node.isValid) this.dimG.node.destroy();
     if (this.shadowG && this.shadowG.node.isValid) this.shadowG.node.destroy();
   }
 }

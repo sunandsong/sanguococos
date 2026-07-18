@@ -99,6 +99,7 @@ export class Chapter2Well extends Component {
     this.fxLayer = new Node('c2-fx'); this.fxLayer.layer = Layers.Enum.UI_2D; this.fxLayer.parent = this.node; this.fxLayer.addComponent(UITransform);
     this.hero = new HeroRig(this.node, this.fxLayer);   // 角色套件(跳劈冲击波/闪电已内置)
     this.hero.jumpRefVy = JUMP.VY / this.SCALE;         // 井关喂给套件的是 demo 坐标速度,拉伸归一化同步换算
+    this.hero.ambient = new Color(228, 240, 242, 255);  // 井下湿冷青环境光(压贴纸感)
     this.combat = new HeroCombat(this.fxLayer, this.hero);   // 共用战斗套件(连招+刀气+剑气)
 
     const ln = new Node('c2-depth'); ln.layer = Layers.Enum.UI_2D; ln.parent = this.node;

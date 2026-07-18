@@ -73,14 +73,14 @@ export class HeroCombat {
     if (this.atkTimer > 0 && this.slashSp.spriteFrame) {
       const s = 1 - this.atkTimer / this.atkDur, a = 1 - Math.abs(s - 0.4) / 0.6;
       if (a > 0.05) {
-        const cx = heroSX + dir * 34, cy = heroSY + 74;
+        const cx = heroSX + dir * 55, cy = heroSY + 74;   // 刀气加大后再前推
         const c0 = dir > 0 ? 0 : Math.PI;
         const vert = this.atkType === 1 ? 0.9 - 1.9 * s : this.atkType === 2 ? 0.15 + 0.5 * s : -0.9 + 1.9 * s;
         this.slashN.active = true;
         this.slashN.setPosition(cx, cy, 0);
         this.slashN.angle = (c0 - dir * vert) * 57.29578;
-        this.slashN.setScale(1.7, 1.7, 1);
-        this.slashSp.color = new Color(255, 245, 210, Math.round(230 * a));
+        this.slashN.setScale(2.55, 2.55, 1);   // 刀气=原始1.5倍(紫焰新月)
+        this.slashSp.color = new Color(255, 255, 255, Math.round(230 * a));   // 纯白不染色,保紫焰本色
         slashOn = true;
       }
     }
