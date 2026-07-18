@@ -87,9 +87,9 @@ export class HeroRig {
     this.each('zhaoyun-slam', (tex) => { tex.setFilters(Texture2D.Filter.LINEAR, Texture2D.Filter.LINEAR); for (let c = 0; c < 4; c++) { const sf = new SpriteFrame(); sf.texture = tex; sf.rect = new Rect(c * 192, 0, 192, 160); this.slam.push(sf); } });
     this.each('zhaoyun-slide', (tex) => { tex.setFilters(Texture2D.Filter.LINEAR, Texture2D.Filter.LINEAR); for (let c = 0; c < 3; c++) { const sf = new SpriteFrame(); sf.texture = tex; sf.rect = new Rect(c * 192, 0, 192, 112); this.slideF.push(sf); } });
     this.each('fx-slam-impact', (tex) => { tex.setFilters(Texture2D.Filter.LINEAR, Texture2D.Filter.LINEAR); for (let c = 0; c < 4; c++) { const sf = new SpriteFrame(); sf.texture = tex; sf.rect = new Rect(c * 320, 0, 320, 272); this.fxSlamFrames.push(sf); } });   // 紫爆2×高清
-    this.each('zhaoyun-swim', (tex) => { for (let c = 0; c < 3; c++) { const sf = new SpriteFrame(); sf.texture = tex; sf.rect = new Rect(c * 40, 0, 40, 72); this.swim.push(sf); } });
-    this.each('zhaoyun-swim-h', (tex) => { for (let c = 0; c < 3; c++) { const sf = new SpriteFrame(); sf.texture = tex; sf.rect = new Rect(c * 72, 0, 72, 40); this.swimH.push(sf); } });
-    this.each('zhaoyun-float', (tex) => { for (let c = 0; c < 2; c++) { const sf = new SpriteFrame(); sf.texture = tex; sf.rect = new Rect(c * 56, 0, 56, 56); this.float.push(sf); } });
+    this.each('zhaoyun-swim', (tex) => { tex.setFilters(Texture2D.Filter.LINEAR, Texture2D.Filter.LINEAR); for (let c = 0; c < 3; c++) { const sf = new SpriteFrame(); sf.texture = tex; sf.rect = new Rect(c * 88, 0, 88, 92); this.swim.push(sf); } });   // 新主角:2×高清(竖直版)
+    this.each('zhaoyun-swim-h', (tex) => { tex.setFilters(Texture2D.Filter.LINEAR, Texture2D.Filter.LINEAR); for (let c = 0; c < 3; c++) { const sf = new SpriteFrame(); sf.texture = tex; sf.rect = new Rect(c * 136, 0, 136, 96); this.swimH.push(sf); } });   // 新主角:2×高清
+    this.each('zhaoyun-float', (tex) => { tex.setFilters(Texture2D.Filter.LINEAR, Texture2D.Filter.LINEAR); for (let c = 0; c < 2; c++) { const sf = new SpriteFrame(); sf.texture = tex; sf.rect = new Rect(c * 104, 0, 104, 92); this.float.push(sf); } });   // 新主角:2×高清
   }
 
   hasAttack() { return this.atk.length >= 4; }
@@ -211,15 +211,15 @@ export class HeroRig {
       const idx = p < 0.32 ? 0 : p < 0.5 ? 1 : p < 0.75 ? 2 : 3;   // 预备→斩→刺→收
       this.sp.spriteFrame = this.atk[idx];
     } else if (mode === 'swim' && this.swim.length >= 3) {
-      this.ut.setContentSize(40, 72); this.ut.setAnchorPoint(0.5, 0.5);   // 水下泳姿锚在身体中心:浮近水面时身体渐露,不会整个蹦到水线上
+      this.ut.setContentSize(44, 46); this.ut.setAnchorPoint(0.5, 0.5);   // 水下泳姿锚在身体中心:浮近水面时身体渐露,不会整个蹦到水线上
       const c = walkPhase % 3;
       this.sp.spriteFrame = this.swim[c < 0.8 ? 0 : c < 1.7 ? 1 : 2];   // 收腿短拍 → 蹬腿 → 滑行长拍
     } else if (mode === 'swimH' && this.swimH.length >= 3) {
-      this.ut.setContentSize(72, 40); this.ut.setAnchorPoint(0.5, 0.5);
+      this.ut.setContentSize(68, 48); this.ut.setAnchorPoint(0.5, 0.5);
       const c = walkPhase % 3;
       this.sp.spriteFrame = this.swimH[c < 0.8 ? 0 : c < 1.7 ? 1 : 2];  // 横游同节奏
     } else if (mode === 'float' && this.float.length >= 2) {
-      this.ut.setContentSize(56, 56); this.ut.setAnchorPoint(0.5, 0.62);   // 锚点在胸口:定位点=水面线时露出整个头+肩,身体沉在水下
+      this.ut.setContentSize(52, 46); this.ut.setAnchorPoint(0.5, 0.62);   // 锚点在胸口:定位点=水面线时露出整个头+肩,身体沉在水下
       this.sp.spriteFrame = this.float[Math.floor(walkPhase) % 2];      // 踩水:双臂开合慢循环
     } else if (mode === 'slide' && this.slideF.length >= 3) {
       this.ut.setContentSize(96, 56); this.ut.setAnchorPoint(0.5, 4 / 56);
