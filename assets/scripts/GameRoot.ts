@@ -23,11 +23,13 @@ import { HUD } from './HUD';
 import { TitleScreen } from './TitleScreen';
 import { Chapter2Well } from './Chapter2Well';
 import { Chapter2Cave } from './Chapter2Cave';
+import { Chapter2City } from './Chapter2City';
 const { ccclass } = _decorator;
 
-// 临时开关(从上往下,开哪个进哪个):洞穴 > 第二章 > 正常第一章
-const START_CAVE = false;      // true = 直接进第二章「地下坑道」场景(开发中)
-const START_CHAPTER2 = false;  // true = 直接进第二章「投井下降」关(砸石开洞→转场进洞穴)
+// 临时开关(从上往下,开哪个进哪个):空城 > 洞穴 > 井关 > 正常第一章
+const START_CITY = true;       // true = 直接进第二章「空城」跑酷 Demo(街尾跳井接井关)
+const START_CAVE = false;      // true = 直接进第三章「地下坑道」场景(开发中)
+const START_CHAPTER2 = false;  // true = 直接进第三章「投井下降」关(砸石开洞→转场进洞穴)
 
 // 一键引导：挂在 Canvas 下的一个空节点上，运行时自动创建并配好整页。
 // 这样你只需建「一个」节点，省去手动逐个创建。
@@ -83,6 +85,10 @@ export class GameRoot extends Component {
     // hud.getComponent(UITransform)!.setAnchorPoint(0, 1);
     // hud.setPosition(-DESIGN_W / 2 + 16, DESIGN_H / 2 - 12, 0);
 
+    if (START_CITY) {
+      make('Chapter2City', Chapter2City);  // 第二章「空城」跑酷 Demo
+      return;
+    }
     if (START_CAVE) {
       make('Chapter2Cave', Chapter2Cave);  // 第二章「地下坑道」场景（开发中）
       return;
