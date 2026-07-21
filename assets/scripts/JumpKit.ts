@@ -6,7 +6,18 @@
 // ─────────────────────────────────────────────────────────────
 export const JUMP = {
   VY: 900,          // 普通跳跃起跳速度
+  AIR_VY: 828,      // 二段跳(空中连跳)起跳速度 = VY×0.92
+  MAX_JUMPS: 2,     // 连跳段数:地面起跳 + 空中再跳一次
   GRAVITY: 2500,    // 跳跃重力(跳高 = VY²/2G ≈ 162px)
   SLAM_VY: 980,     // 第3段跳劈起跳速度(比普通跳更高,与第一章一致)
   FALL_CAP: 1150,   // 最大下落速度(第一章无封顶,井关下落/入水需要)
 };
+
+/** 连跳判定(全章共用):地面=正常起跳;空中(含走落悬空)还有段数=二段跳。
+ *  场景自己维护 jumpsUsed 计数(落地清零),把返回的 used 写回去;不能跳返回 null。
+ *  非屏幕像素坐标系的场景照旧自己 ÷SCALE。 */
+export function tryJump(onGround: boolean, jumpsUsed: number): { vy: number; used: number } | null {
+  if (onGround) return { vy: JUMP.VY, used: 1 };
+  if (jumpsUsed < JUMP.MAX_JUMPS) return { vy: JUMP.AIR_VY, used: JUMP.MAX_JUMPS };
+  return null;
+}

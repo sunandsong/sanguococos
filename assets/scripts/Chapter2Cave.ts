@@ -9,7 +9,7 @@ import { TouchControls } from './TouchControls';
 import { HeroHUD } from './HeroHUD';
 import { DeathFx } from './DeathFx';
 import { Chapter2Well } from './Chapter2Well';
-import { JUMP } from './JumpKit';
+import { JUMP, tryJump } from './JumpKit';
 
 const { ccclass } = _decorator;
 
@@ -30,13 +30,14 @@ export class Chapter2Cave extends Component {
   private readonly GROUND = -H * 0.16;      // 脚线 Cocos y
   private readonly CEIL_H = 360;            // 走廊净高
   private readonly HERO_SX = W * 0.16;      // 角色固定屏幕 x(右侧,朝左走)
-  private readonly SPEED = 290; private readonly JUMP_VY = JUMP.VY; private readonly GRAV = JUMP.GRAVITY;   // 跳跃物理全章共用 JumpKit
+  private readonly SPEED = 290; private readonly GRAV = JUMP.GRAVITY;   // 跳跃物理全章共用 JumpKit
   private readonly DEPTH = 3200;            // 通道往左的深度(px 从 0 走到 -DEPTH)
 
   private px = 0; private py = 0; private vy = 0; private onG = true; private dir = -1; private walkPh = 0;   // 从右端入,朝左
   private camX = 0; private t = 0;
   private combat!: HeroCombat; private slamJump = false; private slamLandT = 0;   // 跳劈大招:腾空/落地收势
   private slideT = 0; private slideCd = 0; private slideDir = 1;   // 滑铲(与第一章同参 0.35/0.55)
+  private jumpsUsed = 0;   // 连跳计数(落地清零,全章共用 JumpKit)
   private deathFx!: DeathFx; private over = false; private deadT = 0;   // 共用阵亡演出
   private exiting = false;   // 回井转场中(防重复触发)
   private hp = 100; private coins = 0;
@@ -92,7 +93,12 @@ export class Chapter2Cave extends Component {
     if (e.keyCode === KeyCode.KEY_A || e.keyCode === KeyCode.ARROW_LEFT) this.keys.left = false;
     else if (e.keyCode === KeyCode.KEY_D || e.keyCode === KeyCode.ARROW_RIGHT) this.keys.right = false;
   }
-  private jump() { if (this.over || !this.onG) return; this.vy = this.JUMP_VY; this.onG = false; }
+  private jump() {
+    if (this.over) return;
+    const j = tryJump(this.onG, this.jumpsUsed);   // 连跳判定全章共用 JumpKit(空中可再跳一次)
+    if (!j) return;
+    this.vy = j.vy; this.onG = false; this.jumpsUsed = j.used;
+  }
   private attack() {
     if (this.over || this.slamJump) return;
     const type = this.combat.tryAttack();
@@ -119,7 +125,7 @@ export class Chapter2Cave extends Component {
     if (mv) { this.dir = mv; this.walkPh += dt * 10; }
     if (this.slideT > 0 && this.onG) { this.slideT -= dt; this.px += this.slideDir * this.SPEED * 1.9 * dt; }   // 滑铲:锁向高速滑行
     else if (this.onG) this.px += mv * this.SPEED * dt;
-    else { this.px += mv * this.SPEED * 0.7 * dt; this.vy -= this.GRAV * dt; this.py += this.vy * dt; if (this.py <= this.GROUND) { this.py = this.GROUND; this.vy = 0; this.onG = true; if (this.slamJump) this.slamImpact(); } }
+    else { this.px += mv * this.SPEED * 0.7 * dt; this.vy -= this.GRAV * dt; this.py += this.vy * dt; if (this.py <= this.GROUND) { this.py = this.GROUND; this.vy = 0; this.onG = true; this.jumpsUsed = 0; if (this.slamJump) this.slamImpact(); } }
     this.px = Math.max(-this.DEPTH, Math.min(0, this.px));   // 右端(0)→ 左端(-DEPTH)
     if (!this.over && this.onG && this.px >= 0 && mv > 0) { this.exitToWell(); return; }   // 顶着洞口往右走=回井里
     this.camX = this.px - this.HERO_SX;

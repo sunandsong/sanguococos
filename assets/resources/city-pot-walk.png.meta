@@ -1,0 +1,134 @@
+{
+  "ver": "1.0.27",
+  "importer": "image",
+  "imported": true,
+  "uuid": "7f05e56c-4785-46ca-abc4-7a789797a1a4",
+  "files": [
+    ".json",
+    ".png"
+  ],
+  "subMetas": {
+    "6c48a": {
+      "importer": "texture",
+      "uuid": "7f05e56c-4785-46ca-abc4-7a789797a1a4@6c48a",
+      "displayName": "city-pot-walk",
+      "id": "6c48a",
+      "name": "texture",
+      "userData": {
+        "wrapModeS": "clamp-to-edge",
+        "wrapModeT": "clamp-to-edge",
+        "imageUuidOrDatabaseUri": "7f05e56c-4785-46ca-abc4-7a789797a1a4",
+        "isUuid": true,
+        "visible": false,
+        "minfilter": "linear",
+        "magfilter": "linear",
+        "mipfilter": "none",
+        "anisotropy": 0
+      },
+      "ver": "1.0.22",
+      "imported": true,
+      "files": [
+        ".json"
+      ],
+      "subMetas": {}
+    },
+    "f9941": {
+      "importer": "sprite-frame",
+      "uuid": "7f05e56c-4785-46ca-abc4-7a789797a1a4@f9941",
+      "displayName": "city-pot-walk",
+      "id": "f9941",
+      "name": "spriteFrame",
+      "userData": {
+        "trimThreshold": 1,
+        "rotated": false,
+        "offsetX": 0,
+        "offsetY": 1,
+        "trimX": 6,
+        "trimY": 6,
+        "width": 1596,
+        "height": 254,
+        "rawWidth": 1608,
+        "rawHeight": 268,
+        "borderTop": 0,
+        "borderBottom": 0,
+        "borderLeft": 0,
+        "borderRight": 0,
+        "packable": true,
+        "pixelsToUnit": 100,
+        "pivotX": 0.5,
+        "pivotY": 0.5,
+        "meshType": 0,
+        "vertices": {
+          "rawPosition": [
+            -798,
+            -127,
+            0,
+            798,
+            -127,
+            0,
+            -798,
+            127,
+            0,
+            798,
+            127,
+            0
+          ],
+          "indexes": [
+            0,
+            1,
+            2,
+            2,
+            1,
+            3
+          ],
+          "uv": [
+            6,
+            262,
+            1602,
+            262,
+            6,
+            8,
+            1602,
+            8
+          ],
+          "nuv": [
+            0.0037313432835820895,
+            0.029850746268656716,
+            0.996268656716418,
+            0.029850746268656716,
+            0.0037313432835820895,
+            0.9776119402985075,
+            0.996268656716418,
+            0.9776119402985075
+          ],
+          "minPos": [
+            -798,
+            -127,
+            0
+          ],
+          "maxPos": [
+            798,
+            127,
+            0
+          ]
+        },
+        "isUuid": true,
+        "imageUuidOrDatabaseUri": "7f05e56c-4785-46ca-abc4-7a789797a1a4@6c48a",
+        "atlasUuid": "",
+        "trimType": "auto"
+      },
+      "ver": "1.0.12",
+      "imported": true,
+      "files": [
+        ".json"
+      ],
+      "subMetas": {}
+    }
+  },
+  "userData": {
+    "type": "sprite-frame",
+    "fixAlphaTransparencyArtifacts": false,
+    "hasAlpha": true,
+    "redirect": "7f05e56c-4785-46ca-abc4-7a789797a1a4@6c48a"
+  }
+}

@@ -11,7 +11,7 @@ import { DeathFx } from './DeathFx';
 import { AudioMgr } from './AudioMgr';
 import { HeroCombat } from './HeroCombat';
 import { Breath } from './Breath';
-import { JUMP } from './JumpKit';
+import { JUMP, tryJump } from './JumpKit';
 import { Chapter2Cave } from './Chapter2Cave';
 
 const { ccclass } = _decorator;
@@ -52,6 +52,7 @@ export class Chapter2Well extends Component {
   static returnFromCave = false;            // 洞穴回井:下次 onLoad 按「从洞里回来」出生(洞已开、站洞口台上)
   private slamJump = false; private slamLandT = 0;   // 第3段跳劈:腾空中/落地收势(对齐第一章:蹲→跃起→下劈→落地冲击)
   private slideT = 0; private slideCd = 0; private slideDir = 1;   // 滑铲(台上,与第一章同参 0.35/0.55)
+  private jumpsUsed = 0;   // 连跳计数(落地/入水清零,全章共用 JumpKit)
   private slamFxX = 0;   // 冲击点世界x(镜头动时把最新屏幕坐标喂给套件特效)
   private fxLayer!: Node;
   private combat!: HeroCombat;   // 共用战斗套件(连招+刀气+剑气)
@@ -257,8 +258,13 @@ export class Chapter2Well extends Component {
   }
   private jump() {
     if (this.over) return;
-    if (this.onG) { this.pvy = -JUMP.VY / this.SCALE; this.onG = false; }   // 全章共用 JumpKit(井关 demo 坐标÷SCALE)
-    else if (this.inWater && this.py <= this.SURFACE + 30) { this.pvy = Math.min(this.pvy, -580); }   // 只有在水面(踩水区)才能鱼跃;深水按跳无效
+    if (this.inWater) {   // 只有在水面(踩水区)才能鱼跃;深水按跳无效
+      if (this.py <= this.SURFACE + 30) this.pvy = Math.min(this.pvy, -580);
+      return;
+    }
+    const j = tryJump(this.onG, this.jumpsUsed);   // 连跳判定全章共用 JumpKit(井关 demo 坐标÷SCALE)
+    if (!j) return;
+    this.pvy = -j.vy / this.SCALE; this.onG = false; this.jumpsUsed = j.used;
   }
   private attack() {
     if (this.over) return;
@@ -400,11 +406,11 @@ export class Chapter2Well extends Component {
         if (this.pvy > 0) {
           const pf = this.py - this.pvy * dt;
           if (pf <= this.LEDGE_Y && this.py >= this.LEDGE_Y && this.px >= this.LEDGE_L && this.px <= this.LEDGE_R) {
-            this.py = this.LEDGE_Y; this.pvy = 0; this.onG = true;
+            this.py = this.LEDGE_Y; this.pvy = 0; this.onG = true; this.jumpsUsed = 0;
             if (this.slamJump) this.slamImpact();   // 跳劈落地冲击
           }
         }
-        if (!this.onG && this.py >= this.SURFACE) { this.inWater = true; this.splash(this.px, this.SURFACE); this.pvy *= 0.4; this.slamJump = false; this.slamLandT = 0; }   // 劈进水里=大水花,冲击取消
+        if (!this.onG && this.py >= this.SURFACE) { this.inWater = true; this.splash(this.px, this.SURFACE); this.pvy *= 0.4; this.slamJump = false; this.slamLandT = 0; this.jumpsUsed = 0; }   // 劈进水里=大水花,冲击取消;连跳计数清零
       }
     } else {
       // 水下浮力阻尼潜行

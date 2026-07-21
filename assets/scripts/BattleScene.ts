@@ -9,7 +9,7 @@ import { DESIGN_W, DESIGN_H } from './Constants';
 import { AudioMgr } from './AudioMgr';
 import { AssetHub } from './AssetHub';
 import { hLine, hArc } from './HandDraw';
-import { JUMP } from './JumpKit';
+import { JUMP, tryJump } from './JumpKit';
 import { TouchControls } from './TouchControls';
 const { ccclass, property } = _decorator;
 
@@ -1270,13 +1270,22 @@ export class BattleScene extends Component {
 
   private airborne(): boolean { return this.hero.jumpY > 0 || this.hero.jumpVy !== 0; }
 
-  // 普通跳跃：先蹲蓄力 → 起身拉直腾空 → 下降 → 落地缓冲下蹲
+  // 普通跳跃：先蹲蓄力 → 起身拉直腾空 → 下降 → 落地缓冲下蹲;空中可再跳一次(连跳全章共用 JumpKit)
+  private jumpsUsed = 0;   // 连跳计数(落地清零)
   private heroJump() {
     AudioMgr.inst.play('jump', 0.7);
     if (this.over || this.zoneState === 'scroll' || this.choosing) return;
     const h = this.hero;
-    if (h.jumping || h.attacking || h.preJump > 0 || h.landT > 0 || h.slideT > 0 || this.airborne()) return;
-    h.jumping = true; h.jmpPre = this.JUMP_PRE; h.jmpLand = 0;
+    if (h.attacking || h.preJump > 0 || h.slideT > 0) return;
+    // 腾空中(普通跳飞行段)再按跳 → 二段跳:空中蹲不了,直接给速度
+    if (h.jumping && h.jmpPre <= 0 && h.jmpLand <= 0) {
+      const j = tryJump(false, this.jumpsUsed);
+      if (!j) return;
+      h.jumpVy = j.vy; this.jumpsUsed = j.used;
+      return;
+    }
+    if (h.jumping || h.landT > 0 || this.airborne()) return;   // 跳劈腾空/落地缓冲不接连跳
+    h.jumping = true; h.jmpPre = this.JUMP_PRE; h.jmpLand = 0; this.jumpsUsed = 1;
   }
 
   // 双击方向检测（键盘）：0.28 秒内同方向按两次 → 滑铲
@@ -1655,7 +1664,7 @@ export class BattleScene extends Component {
         h.jumpY += h.jumpVy * dt;
         h.jumpVy -= this.GRAVITY_MOVE * dt;
         if (h.jumpY <= 0) {
-          h.jumpY = 0; h.jumpVy = 0; h.jmpLand = this.JUMP_LAND;
+          h.jumpY = 0; h.jumpVy = 0; h.jmpLand = this.JUMP_LAND; this.jumpsUsed = 0;
           AudioMgr.inst.play('land', 0.6);
           this.spawnDust(h.x, this.groundY + 4, 6, 190);   // 落地尘圈
           this.sparks.push({ x: h.x, y: this.groundY + 8, life: 0, max: 0.16 });   // 落地小尘星
@@ -1668,7 +1677,7 @@ export class BattleScene extends Component {
       h.jumpY += h.jumpVy * dt;
       h.jumpVy -= this.GRAVITY_J * dt;
       if (h.jumpY <= 0) {                 // 落地
-        h.jumpY = 0; h.jumpVy = 0;
+        h.jumpY = 0; h.jumpVy = 0; this.jumpsUsed = 0;
         if (h.attacking && h.atkType === 2) {
           if (!h.hitApplied) { h.hitApplied = true; this.slamHit(); }
           h.attacking = false;
