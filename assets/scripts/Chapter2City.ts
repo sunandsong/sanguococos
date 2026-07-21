@@ -12,7 +12,7 @@ import { DeathFx } from './DeathFx';
 import { AudioMgr } from './AudioMgr';
 import { JUMP, tryJump } from './JumpKit';
 import { CamZoom } from './CamZoom';
-import { Chapter2Well } from './Chapter2Well';
+import { Chapter2Arena } from './Chapter2Arena';
 
 const { ccclass } = _decorator;
 
@@ -460,6 +460,7 @@ export class Chapter2City extends Component {
       // 紧挨宽缝的两栋不设岗:跳缝滞空挨扫射=冤死(试玩阵亡点)
       if (cx === 5475) continue;   // 5294-5656,挨 5100 宽缝
       if (cx === 6405) continue;   // 6241-6569,挨 6050 星河巨缝
+      if (cx === 12530) continue;  // 井前最后一栋:泡在浓雾里,不设岗(雾里放冷枪=冤死)
       this.foes.push({
         kind: 'guard', x: cx, y: this.GROUND + hs.h + 28, anchor: cx, dir: -1,
         t: this.rnd(cx) * 4, alive: true, state: 0, cd: 0.8 + this.rnd(cx * 3),
@@ -1308,8 +1309,8 @@ g.fillColor = new Color(28, 20, 42, 70); g.ellipse(ox, gy - 2, 9, 3); g.fill();
     const op = fade.addComponent(UIOpacity); op.opacity = 0;
     tween(op).to(0.5, { opacity: 255 }).call(() => {
       this.node.destroy();
-      const n = new Node('Chapter2'); n.layer = Layers.Enum.UI_2D; n.addComponent(UITransform); n.parent = parent;
-      n.addComponent(Chapter2Well);
+      const n = new Node('Chapter2Arena'); n.layer = Layers.Enum.UI_2D; n.addComponent(UITransform); n.parent = parent;
+      n.addComponent(Chapter2Arena);   // 走进浓雾 → 铁心兽竞技场;打赢跳井才接井关
       fade.setSiblingIndex(parent.children.length - 1);
       tween(op).delay(0.1).to(0.45, { opacity: 0 }).call(() => fade.destroy()).start();
     }).start();
