@@ -10,6 +10,7 @@ import { HeroHUD } from './HeroHUD';
 import { DeathFx } from './DeathFx';
 import { Chapter2Well } from './Chapter2Well';
 import { JUMP, tryJump } from './JumpKit';
+import { CamZoom } from './CamZoom';
 
 const { ccclass } = _decorator;
 
@@ -21,6 +22,8 @@ const { ccclass } = _decorator;
 // ─────────────────────────────────────────────────────────────
 @ccclass('Chapter2Cave')
 export class Chapter2Cave extends Component {
+  private world!: Node;         // 游戏世界容器(UI 在外):跳跃镜头套件缩它
+  private cam!: CamZoom;        // 腾空拉远/落地恢复(全章共用)
   private g!: Graphics;         // 背景/中景/结构(角色之下)
   private fg!: Graphics;        // 近景前景层(角色之上)
   private hero!: HeroRig;
@@ -48,16 +51,20 @@ export class Chapter2Cave extends Component {
     const ut = this.node.getComponent(UITransform) || this.node.addComponent(UITransform);
     ut.setContentSize(W, H); ut.setAnchorPoint(0.5, 0.5);
 
-    const gn = new Node('cave-gfx'); gn.layer = Layers.Enum.UI_2D; gn.parent = this.node; gn.addComponent(UITransform);
+    // 世界容器(背景/角色/特效进来;按钮/HUD/死亡演出在外)
+    this.world = new Node('cave-world'); this.world.layer = Layers.Enum.UI_2D; this.world.parent = this.node; this.world.addComponent(UITransform);
+    this.cam = new CamZoom(this.world);
+    const gn = new Node('cave-gfx'); gn.layer = Layers.Enum.UI_2D; gn.parent = this.world; gn.addComponent(UITransform);
     this.g = gn.addComponent(Graphics);
 
-    const fx = new Node('cave-fx'); fx.layer = Layers.Enum.UI_2D; fx.parent = this.node; fx.addComponent(UITransform);
-    this.hero = new HeroRig(this.node, fx);
+    const fx = new Node('cave-fx'); fx.layer = Layers.Enum.UI_2D; fx.parent = this.world; fx.addComponent(UITransform);
+    this.hero = new HeroRig(this.world, fx);
     this.hero.ambient = new Color(255, 234, 212, 255);   // 洞内暖火光环境光(压贴纸感)
     this.combat = new HeroCombat(fx, this.hero);   // 共用战斗套件(连招+刀气+剑气)
 
     // 近景前景层:排在角色/特效之上,画快视差巨柱框景
-    const fgn = new Node('cave-fg'); fgn.layer = Layers.Enum.UI_2D; fgn.parent = this.node; fgn.addComponent(UITransform);
+    const fgn = new Node('cave-fg'); fgn.layer = Layers.Enum.UI_2D; fgn.parent = this.world; fgn.addComponent(UITransform);
+    CamZoom.edgeFog(this.node, new Color(12, 9, 6, 255), 130);   // 洞窟:暗色边框兜住拉远后的四缘
     this.fg = fgn.addComponent(Graphics);
 
     this.controls = new TouchControls(this.node, {
@@ -129,6 +136,7 @@ export class Chapter2Cave extends Component {
     this.px = Math.max(-this.DEPTH, Math.min(0, this.px));   // 右端(0)→ 左端(-DEPTH)
     if (!this.over && this.onG && this.px >= 0 && mv > 0) { this.exitToWell(); return; }   // 顶着洞口往右走=回井里
     this.camX = this.px - this.HERO_SX;
+    this.cam.update(dt, !this.onG, this.HERO_SX, this.GROUND + 80);   // 跳跃镜头(套件)
     this.combat.update(dt, this.HERO_SX, this.py, this.dir);       // 连招计时 + 刀气弧 + 剑气波
     this.hero.updateFx(dt, this.HERO_SX, this.GROUND);              // 跳劈冲击波/闪电
     this.controls.setSpecialCd(this.slideCd / 0.75);   // 滑铲冷却环

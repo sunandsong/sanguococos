@@ -28,6 +28,7 @@ export class HeroRig {
   jumpRefVy = JUMP.VY;                // 跳跃初速参考(空中挤压拉伸的归一化基准);非屏幕像素坐标系的场景要除以自己的 SCALE
   ambient: Color | null = null;       // 场景环境光染色(井=湿冷青/洞=暖火光,不设=纯白):角色揉进场景色,压"贴纸感"
   private landT = 0;                  // 落地回弹计时(空中→落地时由套件自己触发,压扁→过冲→归位)
+  private hurtT = 0;                  // 挨揍表现计时(后仰42°+红闪,0.3s回正,对齐第一章)
   private wasAir = false;             // 上一帧是否腾空(检测起跳/落地瞬间)
   private airJump = false;            // 本次腾空是"跳起来的"(走下台边的下坠不放大,与第一章一致)
   private readonly LAND_DUR = 0.3;    // 落地缓冲时长(与第一章 JUMP_LAND 同参)
@@ -97,6 +98,9 @@ export class HeroRig {
   /** 攻击起手音效(与第一章一致):type 2=跳劈 swing2,其余=平斩 swing */
   sndSwing(type: number) { AudioMgr.inst.play(type === 2 ? 'swing2' : 'swing', 0.9); }
 
+  /** 挨揍表现(套件统一,对齐第一章):身体后仰42°随0.3s回正 + 红闪。音效/喷血/击退仍由场景管 */
+  hurtFx() { this.hurtT = 0.3; }
+
   /** 跳劈落地特效(屏幕坐标触发):x/y=冲击点,topY=闪电起点高度(一般传画面顶);自带落地闷响 */
   slamImpactFx(x: number, y: number, topY: number) {
     AudioMgr.inst.play('land', 0.7);
@@ -116,6 +120,7 @@ export class HeroRig {
   updateFx(dt: number, x?: number, y?: number) {
     this.fxClock += dt;
     if (this.landT > 0) this.landT -= dt;   // 落地回弹计时(视觉专用,不影响物理)
+    if (this.hurtT > 0) this.hurtT -= dt;   // 挨揍后仰/红闪回正
     // 大招落地全屏压黑一闪(快速淡出;脏标记:只在激活期间重画,平时零开销)
     if (this.dimG && this.slamDimT > 0) {
       this.slamDimT -= dt;
@@ -191,6 +196,12 @@ export class HeroRig {
     }
     const tr = this.ambient ? this.ambient.r : 255, tg = this.ambient ? this.ambient.g : 255, tb = this.ambient ? this.ambient.b : 255;
     if (this.sp.color.r !== tr || this.sp.color.g !== tg || this.sp.color.b !== tb || this.sp.color.a !== 255) this.sp.color = new Color(tr, tg, tb, 255);   // 复活恢复本色+环境光
+    // 挨揍中:后仰42°随时间回正 + 红闪(叠加在任何姿势上;scaleX翻转抵消,朝左朝右都是"向后倒")
+    if (this.hurtT > 0) {
+      const hk = this.hurtT / 0.3;
+      this.node.angle += 42 * hk;
+      this.sp.color = new Color(tr, Math.round(tg * (1 - 0.5 * hk)), Math.round(tb * (1 - 0.5 * hk)), 255);
+    }
     const grounded = mode === 'walk' || mode === 'idle';
     const airborne = mode === 'air' || (mode === 'slam' && p < 0.9);   // 跳劈收势帧(p≥0.9)已落地:立即还原,不再按"速度0=最高点"误放大
     if (this.wasAir && grounded) this.landT = this.LAND_DUR;   // 腾空→落地瞬间:触发回弹(套件自检,场景零接线)

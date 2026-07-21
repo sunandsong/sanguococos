@@ -12,6 +12,7 @@ import { AudioMgr } from './AudioMgr';
 import { HeroCombat } from './HeroCombat';
 import { Breath } from './Breath';
 import { JUMP, tryJump } from './JumpKit';
+import { CamZoom } from './CamZoom';
 import { Chapter2Cave } from './Chapter2Cave';
 
 const { ccclass } = _decorator;
@@ -39,6 +40,7 @@ export class Chapter2Well extends Component {
   private readonly DH = 760;        // demo 高
 
   // 图层 / 真图
+  private world!: Node; private cam!: CamZoom;   // 世界容器+跳跃镜头套件(腾空/坠落拉远)
   private wallRoot!: Node; private decorRoot!: Node; private wallNodes: Node[] = []; private wallAR = 1.8;
   private mouthNode: Node | null = null; private mouthAR = 1.4;
   private ledgeNode: Node | null = null; private ledgeAR = 0.6;
@@ -84,22 +86,25 @@ export class Chapter2Well extends Component {
     const ut = this.node.getComponent(UITransform) || this.node.addComponent(UITransform);
     ut.setContentSize(W, H); ut.setAnchorPoint(0.5, 0.5);
 
-    this.wallRoot = new Node('c2-wall'); this.wallRoot.layer = Layers.Enum.UI_2D; this.wallRoot.parent = this.node;
+    // 世界容器(井壁/装饰/水体/角色/特效进来;label/按钮/HUD/死亡演出在外)
+    this.world = new Node('c2-world'); this.world.layer = Layers.Enum.UI_2D; this.world.parent = this.node; this.world.addComponent(UITransform);
+    this.cam = new CamZoom(this.world);
+    this.wallRoot = new Node('c2-wall'); this.wallRoot.layer = Layers.Enum.UI_2D; this.wallRoot.parent = this.world;
     this.wallRoot.addComponent(UITransform);
     // 井口/井台放独立容器：固定排在井壁之上、水之下（避免异步加载顺序把它们埋进井壁）
-    this.decorRoot = new Node('c2-decor'); this.decorRoot.layer = Layers.Enum.UI_2D; this.decorRoot.parent = this.node;
+    this.decorRoot = new Node('c2-decor'); this.decorRoot.layer = Layers.Enum.UI_2D; this.decorRoot.parent = this.world;
     this.decorRoot.addComponent(UITransform);
     AssetHub.loadSF('c2-wall', (sf) => { if (sf) this.buildWall(sf); });
     AssetHub.loadSF('c2-mouth', (sf) => { if (sf) this.buildMouth(sf); });
     AssetHub.loadSF('c2-plat-ledge', (sf) => { if (sf) this.buildLedge(sf); });
 
-    const gn = new Node('c2-gfx'); gn.layer = Layers.Enum.UI_2D; gn.parent = this.node;
+    const gn = new Node('c2-gfx'); gn.layer = Layers.Enum.UI_2D; gn.parent = this.world;
     gn.addComponent(UITransform);
     this.g = gn.addComponent(Graphics);
 
     // 特效层（跳劈冲击波/刀气/剑气），排在角色之上
-    this.fxLayer = new Node('c2-fx'); this.fxLayer.layer = Layers.Enum.UI_2D; this.fxLayer.parent = this.node; this.fxLayer.addComponent(UITransform);
-    this.hero = new HeroRig(this.node, this.fxLayer);   // 角色套件(跳劈冲击波/闪电已内置)
+    this.fxLayer = new Node('c2-fx'); this.fxLayer.layer = Layers.Enum.UI_2D; this.fxLayer.parent = this.world; this.fxLayer.addComponent(UITransform);
+    this.hero = new HeroRig(this.world, this.fxLayer);   // 角色套件(跳劈冲击波/闪电已内置)
     this.hero.jumpRefVy = JUMP.VY / this.SCALE;         // 井关喂给套件的是 demo 坐标速度,拉伸归一化同步换算
     this.hero.ambient = new Color(228, 240, 242, 255);  // 井下湿冷青环境光(压贴纸感)
     this.combat = new HeroCombat(this.fxLayer, this.hero);   // 共用战斗套件(连招+刀气+剑气)
@@ -111,6 +116,7 @@ export class Chapter2Well extends Component {
     ln.setPosition(0, H / 2 - 60, 0);
     ln.active = false;   // 顶部深度黄字已隐藏(报错时 update 的 catch 会重新打开兜底显示)
 
+    CamZoom.edgeFog(this.node, new Color(8, 7, 10, 255), 130);   // 井下:暗色边框兜住拉远后的四缘
     // 操作/HUD 套件(与第一章同款):摇杆+攻击/技能钮、顶部头像血条金币
     this.controls = new TouchControls(this.node, {
       onDir: (d) => { this.keys.left = d < 0; this.keys.right = d > 0; },
@@ -477,6 +483,7 @@ export class Chapter2Well extends Component {
     for (const s of this.sparks) { s.life -= dt; s.x += s.vx * dt; s.y += s.vy * dt; s.vy += 500 * dt; } this.sparks = this.sparks.filter(s => s.life > 0);
     if (this.py >= this.GOAL) this.reset();
 
+    this.cam.update(dt, !this.onG && !this.inWater && !this.over, this.SX(this.px), this.SY(this.py));   // 跳跃/坠井镜头(套件)
     this.updateFx(dt);
     this.updateWall(); this.updateMouth(); this.updateLedge(); this.updateHero(); this.redraw();
   }

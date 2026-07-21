@@ -11,6 +11,7 @@ import { HeroHUD } from './HeroHUD';
 import { DeathFx } from './DeathFx';
 import { AudioMgr } from './AudioMgr';
 import { JUMP, tryJump } from './JumpKit';
+import { CamZoom } from './CamZoom';
 import { Chapter2Well } from './Chapter2Well';
 
 const { ccclass } = _decorator;
@@ -31,6 +32,9 @@ type Foe = {
   alive: boolean; state: number; cd: number; hitSw: number;
   x0: number; y0: number; tx: number; ty: number;
   hp: number; flash: number;   // hp=砍击血(瓦罐2刀);flash=受击弹缩计时
+  hitT?: number; hitDir?: number;   // 受击后仰计时/方向(对齐第一章 HIT_DUR=0.3,身体后仰回正)
+  dead?: boolean; deadT?: number; cvx?: number; cvy?: number;   // 尸体演出:击飞→倒地翻倒→淡出(对齐第一章)
+  gunSp?: Sprite; aimA?: number;   // 机枪妖分体枪:独立旋转瞄准角色;aimA=开火瞬间锁定的瞄准角(弧度)
   sp?: Sprite;   // 有真图的怪(瓦罐走路帧)用精灵节点显示,无图的仍程序画
 };
 
@@ -103,8 +107,8 @@ export class Chapter2City extends Component {
   ];
   private coinsArr: { x: number; y: number }[] = [];
   private got = new Set<number>();
-  private gapNodes: { n: Node; x: number }[] = [];   // 裂缝贴图节点
   private obstHalf = new Map<number, number>();      // 障碍x → 碰撞半宽(=贴图半宽×0.95,严丝合缝)
+  private obstTopHalf = new Map<number, number>();   // 断墙x → 塔顶可站半宽(窄于底座:站立判定用它,不悬空)
   private cartNodes: { n: Node; x: number; v: number }[] = [];  // 板车贴图节点(v=变体号)
   // 板车贴图变体(六辆轮换,辆辆不重样),宽高比接图时实测,显示高统一 85
   private readonly CART_VARIANTS = [
@@ -117,14 +121,16 @@ export class Chapter2City extends Component {
     { res: 'city-cart7', ar: 2.2 },
   ];
   private ruinNodes: { n: Node; x: number; v: number }[] = [];  // 断墙贴图节点(v=变体号)
+  private gapNodes: { n: Node; x: number }[] = [];   // 裂缝贴图节点
   // 断墙贴图变体(九堵轮换免单调),宽高比接图时实测,显示高统一 240
+  // topR = 塔顶可站宽 / 画布宽(按贴图顶部1/4不透明内容实测):底座碎石摊得宽,能站的只有砖柱顶
   private readonly RUIN_VARIANTS = [
-    { res: 'city-ruin', ar: 0.751 },
-    { res: 'city-ruin2', ar: 0.662 },
-    { res: 'city-ruin3', ar: 0.743 },
-    { res: 'city-ruin4', ar: 0.872 },
-    { res: 'city-ruin5', ar: 0.823 },
-    { res: 'city-ruin6', ar: 0.767 },
+    { res: 'city-ruin', ar: 0.751, topR: 0.56 },
+    { res: 'city-ruin2', ar: 0.662, topR: 0.55 },
+    { res: 'city-ruin3', ar: 0.743, topR: 0.59 },
+    { res: 'city-ruin4', ar: 0.872, topR: 0.43 },
+    { res: 'city-ruin5', ar: 0.823, topR: 0.51 },
+    { res: 'city-ruin6', ar: 0.767, topR: 0.47 },
   ];
   private houseNodes: { n: Node; x: number; v: number }[] = []; // 小房贴图节点(v=变体号)
   // 小房贴图变体(七栋轮换免单调):各自的宽高比/顶沿占比接图时实测
@@ -143,29 +149,42 @@ export class Chapter2City extends Component {
   private potRoot!: Node;    // 瓦罐走路帧精灵容器(压在 foeG 之上)
   private potFrames: SpriteFrame[] = [];   // 瓦罐走路 8 帧(city-pot-walk 横排切格)
   private readonly POT_DISP_H = 104;       // 瓦罐显示高(帧 268 等比缩)
-  private guardFrames: SpriteFrame[] = [];   // 机枪妖4姿态帧
+  private guardFrames: SpriteFrame[] = [];   // 机枪妖4姿态帧(旧连体图,分体图缺失时兜底)
+  private guardBodyFrame: SpriteFrame | null = null;   // 分体:身体(空手抱持,不带枪)
+  private guardGunFrame: SpriteFrame | null = null;    // 分体:枪(管朝右,握把为旋转轴)
   private readonly GUARD_DISP_H = 132;
   private kiteFrame: SpriteFrame | null = null;
   private readonly KITE_DISP_H = 120;
   private foes: Foe[] = [];
   // 敌人布点:全避开障碍与小房(战斗段与跑酷段交替,不混叠——设计文档节奏原则)
+  // 瓦罐一律单只:巡逻圈(锚±120)彼此不相接,不出现双罐/三罐扎堆
   private readonly FOE_SPOTS: { kind: 'pot' | 'kite'; x: number }[] = [
     { kind: 'pot', x: 1380 },                            // 教学:第一只瓦罐,开阔地单挑
-    { kind: 'pot', x: 1870 }, { kind: 'pot', x: 1990 },  // 双罐小群
+    { kind: 'pot', x: 1870 },                            // 缝后再来一只
     { kind: 'kite', x: 3250 },                           // 教学:第一只纸鸢(三连板车后抬头)
-    { kind: 'pot', x: 5680 }, { kind: 'pot', x: 5800 },  // 星河巨缝前夹道
+    { kind: 'pot', x: 5680 },                            // 星河巨缝前
     { kind: 'kite', x: 6630 },                           // ⑥墙阵前俯冲扰跳
-    { kind: 'pot', x: 9180 }, { kind: 'pot', x: 9300 },  // ⑧⑨之间开阔地:三罐一鸢混战
-    { kind: 'pot', x: 9420 }, { kind: 'kite', x: 9380 },
+    { kind: 'pot', x: 9400 }, { kind: 'kite', x: 9380 }, // ⑧⑨之间开阔地:单罐+一鸢
   ];
   // 石狮滚球:终段冲刺(⑩)的移动障碍,无敌只能跳;到触发点从前方滚来
-  private lions: { x: number; y: number; vy: number; onG: boolean; rot: number }[] = [];
+  private lions: { x: number; y: number; vy: number; onG: boolean; rot: number; sp?: Sprite }[] = [];
+  private lionFrame: SpriteFrame | null = null;   // 石狮滚球真图(Q版抱球狮)
+  private readonly STAR_CRACKS = [980, 4480, 7830];   // 路面星缝装饰位(避开障碍/房子,纯装饰)
+  private world!: Node;   // 游戏世界容器(背景/怪/主角/特效全在里面;UI 在外)
+  private cam!: CamZoom;  // 跳跃镜头套件:腾空拉远/落地恢复(全章共用)
+  private readonly FOE_TINT = new Color(236, 230, 244, 255);   // 怪统一染空城暮色环境光(与主角同款,压贴纸感)
   private readonly LION_TRIGGERS = [{ x: 10440, done: false }, { x: 11520, done: false }];
   // 檐上机枪妖射出的曳光弹(直线飞,落街皮扬尘消失)
   private bullets: { x: number; y: number; vx: number; vy: number }[] = [];
   private swingId = 0;      // 挥砍编号:一刀对一敌只结算一次
   private invulnT = 0;      // 受击无敌帧
   private parts: { x: number; y: number; vx: number; vy: number; life: number; max: number; r: number; col: Color }[] = [];
+  // 打击感三板斧(对齐第一章 hitMonster):顿帧 + 震屏 + 冲击白光
+  private hitStop = 0; private shakeT = 0; private shakeMag = 0;
+  private flashes: { x: number; y: number; life: number; max: number }[] = [];
+  private addHitStop(t: number) { this.hitStop = Math.max(this.hitStop, t); }
+  private addShake(mag: number) { this.shakeT = 0.18; this.shakeMag = Math.max(this.shakeMag, mag); }
+  private hitFlash(x: number, y: number) { this.flashes.push({ x, y, life: 0, max: 0.16 }); }
 
   onLoad() {
     this.node.layer = Layers.Enum.UI_2D;
@@ -173,7 +192,10 @@ export class Chapter2City extends Component {
     ut.setContentSize(W, H); ut.setAnchorPoint(0.5, 0.5);
 
     // 五层 AI 背景图(空城概念:歪楼/亮窗/石板街),视差滚动;垫在 Graphics 结构层之下
-    const bgRoot = new Node('city-bgimg'); bgRoot.layer = Layers.Enum.UI_2D; bgRoot.parent = this.node; bgRoot.addComponent(UITransform);
+    // 世界容器:跳跃拉远镜头=缩它;UI(按钮/HUD/死亡演出)不进来,不受缩放影响
+    this.world = new Node('city-world'); this.world.layer = Layers.Enum.UI_2D; this.world.parent = this.node; this.world.addComponent(UITransform);
+    this.cam = new CamZoom(this.world);
+    const bgRoot = new Node('city-bgimg'); bgRoot.layer = Layers.Enum.UI_2D; bgRoot.parent = this.world; bgRoot.addComponent(UITransform);
     this.makeLayer('bg-far-city', 845, 0.25, this.GROUND, bgRoot);    // 远景:灰紫薄荷天+停摆钟楼天际线
     this.makeLayer('bg-mid-city', 400, 0.62, this.GROUND, bgRoot);    // 中景:亮窗歪楼一条街
     // 中层雾幕(寂静岭氛围):压在远/中景上、近景下,楼影半隐半现
@@ -189,7 +211,7 @@ export class Chapter2City extends Component {
     this.makeLayer('bg-ground-city', 470, 1.0, -H / 2, bgRoot);       // 地面横截面:图内街皮线在 7.4% 处,470*(1-0.074)≈435=脚线到屏底,石板面正好对齐脚线
 
     // 星空裂缝贴图:每条缝一个节点,从街皮插到屏底(闪星在 Graphics 层继续叠)
-    const gapRoot = new Node('city-gaps'); gapRoot.layer = Layers.Enum.UI_2D; gapRoot.parent = this.node; gapRoot.addComponent(UITransform);
+    const gapRoot = new Node('city-gaps'); gapRoot.layer = Layers.Enum.UI_2D; gapRoot.parent = this.world; gapRoot.addComponent(UITransform);
     for (const o of this.OBST) {
       if (o.type !== 'gap') continue;
       const gw = o.w ?? this.GAP_W;
@@ -206,11 +228,11 @@ export class Chapter2City extends Component {
       for (const gp of this.gapNodes) gp.n.getComponent(Sprite)!.spriteFrame = sf;
     });
 
-    const gn = new Node('city-gfx'); gn.layer = Layers.Enum.UI_2D; gn.parent = this.node; gn.addComponent(UITransform);
+    const gn = new Node('city-gfx'); gn.layer = Layers.Enum.UI_2D; gn.parent = this.world; gn.addComponent(UITransform);
     this.g = gn.addComponent(Graphics);
 
     // 障碍贴图层(板车等):压在 Graphics 之上、角色之下——电线杆/小屋内墙都在它后面
-    const obstRoot = new Node('city-obst'); obstRoot.layer = Layers.Enum.UI_2D; obstRoot.parent = this.node; obstRoot.addComponent(UITransform);
+    const obstRoot = new Node('city-obst'); obstRoot.layer = Layers.Enum.UI_2D; obstRoot.parent = this.world; obstRoot.addComponent(UITransform);
     let cartIdx = 0;
     for (const o of this.OBST) {
       if (o.type !== 'low') continue;
@@ -237,7 +259,8 @@ export class Chapter2City extends Component {
       n.addComponent(UITransform).setAnchorPoint(0.5, 0);
       const sp = n.addComponent(Sprite); sp.sizeMode = Sprite.SizeMode.CUSTOM;
       n.getComponent(UITransform)!.setContentSize(240 * this.RUIN_VARIANTS[v].ar, 240);   // 高200必须二段跳
-      this.obstHalf.set(o.x, 240 * this.RUIN_VARIANTS[v].ar / 2 * 0.95);   // 碰撞=贴图宽,严丝合缝
+      this.obstHalf.set(o.x, 240 * this.RUIN_VARIANTS[v].ar / 2 * 0.95);   // 侧撞/挡子弹=底座宽,严丝合缝
+      this.obstTopHalf.set(o.x, 240 * this.RUIN_VARIANTS[v].ar * this.RUIN_VARIANTS[v].topR / 2 * 0.92);   // 站立=塔顶实宽
       this.ruinNodes.push({ n, x: o.x, v });
     }
     this.RUIN_VARIANTS.forEach((va, k) => {
@@ -270,9 +293,9 @@ export class Chapter2City extends Component {
     });
 
     // 敌人层:压在障碍贴图之上、角色之下(瓦罐在板车/断墙前跑动不穿帮)
-    const foeGn = new Node('city-foes'); foeGn.layer = Layers.Enum.UI_2D; foeGn.parent = this.node; foeGn.addComponent(UITransform);
+    const foeGn = new Node('city-foes'); foeGn.layer = Layers.Enum.UI_2D; foeGn.parent = this.world; foeGn.addComponent(UITransform);
     this.foeG = foeGn.addComponent(Graphics);
-    const potRootN = new Node('city-pots'); potRootN.layer = Layers.Enum.UI_2D; potRootN.parent = this.node; potRootN.addComponent(UITransform);
+    const potRootN = new Node('city-pots'); potRootN.layer = Layers.Enum.UI_2D; potRootN.parent = this.world; potRootN.addComponent(UITransform);
     this.potRoot = potRootN;
     // 瓦罐走路帧:横排 8 格(201×268/格)切成序列帧
     AssetHub.loadSF('city-pot-walk', (sf) => {
@@ -288,7 +311,26 @@ export class Chapter2City extends Component {
       const tex = sf.texture as Texture2D; tex.setFilters(Texture2D.Filter.LINEAR, Texture2D.Filter.LINEAR);
       const cw = Math.round(tex.width / 4), ch = tex.height;
       for (let k = 0; k < 4; k++) { const f = new SpriteFrame(); f.texture = tex; f.rect = new Rect(k * cw, 0, cw, ch); this.guardFrames.push(f); }
-      for (const e of this.foes) if (e.kind === 'guard' && e.sp) e.sp.spriteFrame = this.guardFrames[0];
+      for (const e of this.foes) if (e.kind === 'guard' && e.sp && !this.guardBodyFrame) e.sp.spriteFrame = this.guardFrames[0];
+    });
+    // 分体图:身体不动 + 枪独立旋转瞄准角色
+    AssetHub.loadSF('city-guard-body', (sf) => {
+      if (!sf) return;
+      (sf.texture as Texture2D).setFilters(Texture2D.Filter.LINEAR, Texture2D.Filter.LINEAR);
+      this.guardBodyFrame = sf;
+      for (const e of this.foes) if (e.kind === 'guard' && e.sp) e.sp.spriteFrame = sf;
+    });
+    AssetHub.loadSF('city-guard-gun', (sf) => {
+      if (!sf) return;
+      (sf.texture as Texture2D).setFilters(Texture2D.Filter.LINEAR, Texture2D.Filter.LINEAR);
+      this.guardGunFrame = sf;
+      for (const e of this.foes) if (e.kind === 'guard' && e.gunSp) e.gunSp.spriteFrame = sf;
+    });
+    AssetHub.loadSF('city-lion', (sf) => {
+      if (!sf) return;
+      (sf.texture as Texture2D).setFilters(Texture2D.Filter.LINEAR, Texture2D.Filter.LINEAR);
+      this.lionFrame = sf;
+      for (const li of this.lions) if (li.sp) li.sp.spriteFrame = sf;
     });
     // 纸鸢妖单帧
     AssetHub.loadSF('city-kite', (sf) => {
@@ -299,18 +341,20 @@ export class Chapter2City extends Component {
     });
     this.initFoes();
 
-    const fx = new Node('city-fx'); fx.layer = Layers.Enum.UI_2D; fx.parent = this.node; fx.addComponent(UITransform);
-    this.hero = new HeroRig(this.node, fx);
+    const fx = new Node('city-fx'); fx.layer = Layers.Enum.UI_2D; fx.parent = this.world; fx.addComponent(UITransform);
+    this.hero = new HeroRig(this.world, fx);
     this.hero.ambient = new Color(236, 230, 244, 255);   // 空城淡紫暮色环境光
     this.combat = new HeroCombat(fx, this.hero);
 
     // 前景野草布条层:压在角色之上、按键之下
-    const fgRoot = new Node('city-fgimg'); fgRoot.layer = Layers.Enum.UI_2D; fgRoot.parent = this.node; fgRoot.addComponent(UITransform);
+    const fgRoot = new Node('city-fgimg'); fgRoot.layer = Layers.Enum.UI_2D; fgRoot.parent = this.world; fgRoot.addComponent(UITransform);
     this.makeLayer('bg-fg-city', 330, 1.15, -H / 2, fgRoot);
     // 顶层氛围 Graphics(角色之上):飘尘/纸片/暗角
-    const fgGn = new Node('city-atmo'); fgGn.layer = Layers.Enum.UI_2D; fgGn.parent = this.node; fgGn.addComponent(UITransform);
+    const fgGn = new Node('city-atmo'); fgGn.layer = Layers.Enum.UI_2D; fgGn.parent = this.world; fgGn.addComponent(UITransform);
     this.fgG = fgGn.addComponent(Graphics);
 
+    // 边缘雾框(套件,UI 层不随缩放):拉远时四缘有雾兜着,不露世界边
+    CamZoom.edgeFog(this.node);
     this.controls = new TouchControls(this.node, {
       onDir: (d) => { this.keys.left = d < 0; this.keys.right = d > 0; },
       onAxis: () => { },
@@ -325,7 +369,9 @@ export class Chapter2City extends Component {
       this.px = 120; this.py = this.GROUND; this.vy = 0; this.onG = true; this.dir = 1;
       this.slideT = 0; this.stunT = 0; this.fallT = 0; this.combat.reset();
       this.coins = 0; this.got.clear();
-      this.invulnT = 0; this.lions.length = 0; this.parts.length = 0; this.bullets.length = 0;
+      this.invulnT = 0;
+      for (const li of this.lions) if (li.sp && li.sp.node.isValid) li.sp.node.destroy();   // 清尸滚球精灵
+      this.lions.length = 0; this.parts.length = 0; this.bullets.length = 0;
       for (const lt of this.LION_TRIGGERS) lt.done = false;
       this.initFoes();   // 敌人满血复位(整关重来)
     });
@@ -362,7 +408,10 @@ export class Chapter2City extends Component {
     if (this.over || this.slamJump || this.fallT > 0 || this.stunT > 0) return;
     const type = this.combat.tryAttack();
     if (type >= 0) this.swingId++;   // 新的一刀:每敌重新允许结算一次
-    if (type === 2 && this.onG) { this.vy = JUMP.SLAM_VY; this.onG = false; this.slamJump = true; }
+    if (type === 2) {
+      if (this.onG) { this.vy = JUMP.SLAM_VY; this.onG = false; this.slamJump = true; }   // 地面第3段:跃起下劈
+      else { this.vy = Math.min(this.vy, -760); this.slamJump = true; }                    // 空中第3段:直接俯冲下劈,落地照样炸
+    }
   }
   private slide() {
     if (this.over || !this.onG || this.slideT > 0 || this.slideCd > 0 || this.slamJump || this.fallT > 0 || this.stunT > 0) return;
@@ -389,7 +438,8 @@ export class Chapter2City extends Component {
     for (const o of this.OBST) {
       if (o.type === 'gap') continue;
       const top = this.GROUND + (o.type === 'low' ? this.CART_TOP : this.RUIN_TOP);
-      const half = this.obstHalf.get(o.x) ?? 0;
+      // 断墙站立按「塔顶实宽」判(底座碎石摊得宽,不能踩空气);板车顶是平的仍用全宽
+      const half = (o.type === 'high' ? this.obstTopHalf.get(o.x) : undefined) ?? this.obstHalf.get(o.x) ?? 0;
       if (Math.abs(x - o.x) <= half && top <= yRef + 2 && top > s) s = top;
     }
     return s;
@@ -432,9 +482,17 @@ export class Chapter2City extends Component {
       const n = new Node('guard' + e.x); n.layer = Layers.Enum.UI_2D; n.parent = this.potRoot;
       const ut = n.addComponent(UITransform); ut.setContentSize(gdw, this.GUARD_DISP_H); ut.setAnchorPoint(0.5, 0.05);
       const sp = n.addComponent(Sprite); sp.sizeMode = Sprite.SizeMode.CUSTOM;
-      if (this.guardFrames.length) sp.spriteFrame = this.guardFrames[0];
+      if (this.guardBodyFrame) sp.spriteFrame = this.guardBodyFrame;
+      else if (this.guardFrames.length) sp.spriteFrame = this.guardFrames[0];
       n.active = false;   // guard未上屏先隐藏
       e.sp = sp;
+      // 分体枪:独立节点(不做身体子节点,免得翻转把旋转镜像了),握把为旋转轴
+      const gn2 = new Node('guardgun' + e.x); gn2.layer = Layers.Enum.UI_2D; gn2.parent = this.potRoot;
+      const gu2 = gn2.addComponent(UITransform); gu2.setContentSize(96, 26); gu2.setAnchorPoint(0.3, 0.5);
+      const gs2 = gn2.addComponent(Sprite); gs2.sizeMode = Sprite.SizeMode.CUSTOM;
+      if (this.guardGunFrame) gs2.spriteFrame = this.guardGunFrame;
+      gn2.active = false;
+      e.gunSp = gs2;
     }
     const kdw = this.KITE_DISP_H * 640 / 672;
     for (const e of this.foes) {
@@ -454,17 +512,38 @@ export class Chapter2City extends Component {
     e.hp--;
     if (e.hp <= 0) { this.killFoe(e); return; }
     e.flash = 0.16;                       // 弹缩一下
-    e.x += this.dir * 20;                 // 被砍击退
-    e.x = Math.max(e.anchor - 120, Math.min(e.anchor + 120, e.x));
+    e.hitT = 0.3; e.hitDir = this.dir;    // 受击后仰(0.3s 回正,对齐第一章)
+    // 被砍击退:击退路径只要碰到深渊就绝不越过——原地栽进缝里摔死
+    const kx0 = e.x; e.x += this.dir * 34;
+    const lo = Math.min(kx0, e.x), hi = Math.max(kx0, e.x);
+    const gp = this.OBST.find(o => o.type === 'gap' && (o.x + ((o.w ?? this.GAP_W) / 2) > lo - 18) && (o.x - ((o.w ?? this.GAP_W) / 2) < hi + 18));
+    if (gp) {
+      e.x = gp.x;                         // 钉在缝心正上方,竖直栽下去
+      e.dead = true; e.deadT = 0; e.cvx = 0; e.cvy = 60;
+      this.coins += 1; AudioMgr.inst.play('coin', 0.4);
+      this.spark(e.x, e.y + 10, new Color(226, 214, 255, 255), 5, this.dir, 1);
+      return;
+    }
     AudioMgr.inst.play('hit', 0.55);
-    this.spark(e.x + this.dir * 10, e.y + 12, new Color(210, 150, 100, 255), 5, this.dir, 1.1);   // 顺挥向喷一撮陶片
+    this.addHitStop(0.045); this.addShake(6);              // 顿帧+震屏(对齐第一章普通命中)
+    this.hitFlash(e.x + this.dir * 10, e.y + 14);          // 冲击白光
+    this.spark(e.x + this.dir * 10, e.y + 12, new Color(210, 150, 100, 255), 10, this.dir, 1.3);   // 顺挥向喷陶片(加量)
+    this.spark(e.x + this.dir * 8, e.y + 14, new Color(206, 44, 38, 255), 8, this.dir, 1.4);       // 喷血(挨揍就喷)
+    this.spark(e.x, e.y + 10, new Color(226, 214, 255, 255), 5, this.dir, 1.1);                    // 星屑
   }
 
   private killFoe(e: Foe) {
-    e.alive = false;
-    if (e.sp) e.sp.node.active = false;   // 瓦罐碎了:走路精灵收起
+    // 尸体演出:被击飞弹起 → 倒地翻倒 → 淡出(对齐第一章"尸体弹飞");淡完才真正移除
+    e.dead = true; e.deadT = 0; e.hp = 0; e.state = 0;
+    e.hitDir = this.dir;
+    e.cvy = 300 + Math.random() * 150;                        // 上抛
+    e.cvx = this.dir * (150 + Math.random() * 90);            // 顺砍向飞
     this.coins += e.kind === 'pot' ? 1 : 2;   // 瓦罐=存钱罐碎铜钱;纸鸢掉双币
     AudioMgr.inst.play('hit', 0.75); AudioMgr.inst.play('coin', 0.5);
+    this.addHitStop(0.085); this.addShake(13);   // 击杀:更狠的顿帧+震屏(对齐第一章)
+    this.hitFlash(e.x, e.y + 14);                // 冲击白光
+    this.spark(e.x, e.y + 14, new Color(206, 44, 38, 255), 14, this.dir, 1.7);   // 喷血(击杀大蓬,对齐第一章+12)
+    this.spark(e.x, e.y + 12, new Color(150, 24, 22, 255), 6, this.dir, 1.2);    // 深色血点
     const body = e.kind === 'pot' ? new Color(198, 138, 92, 255)
       : e.kind === 'kite' ? new Color(236, 224, 200, 255) : new Color(222, 192, 122, 255);
     const heavy = e.kind === 'pot';       // 瓦罐=陶罐炸裂,喷得猛
@@ -490,7 +569,8 @@ export class Chapter2City extends Component {
     this.invulnT = 1.1; this.stunT = Math.max(this.stunT, 0.2);
     this.px += this.px < fromX ? -56 : 56;   // 击退
     AudioMgr.inst.play('hurt', 0.8);
-    this.spark(this.px, this.py + 60, new Color(255, 130, 110, 255), 6);
+    this.hero.hurtFx();   // 套件:后仰42°+红闪(对齐第一章)
+    this.spark(this.px, this.py + 60, new Color(206, 44, 38, 255), 10, 0, 1.3);   // 喷血(加量)
     this.hurt(dmg);
   }
 
@@ -502,7 +582,23 @@ export class Chapter2City extends Component {
     for (const e of this.foes) {
       if (!e.alive) continue;
       if (e.flash > 0) e.flash -= dt;
+      if (e.hitT !== undefined && e.hitT > 0) e.hitT -= dt;   // 受击后仰回正
+      if (e.dead) {   // 尸体演出:抛物线击飞→落街面滑停→翻倒淡出;期间无 AI/无判定
+        e.deadT = (e.deadT ?? 0) + dt;
+        const py0 = e.y;   // 本帧起点(判断"是否刚穿过地面线",掉进坑里不再被拽回街面)
+        e.cvy = (e.cvy ?? 0) - 1500 * dt;
+        e.x += (e.cvx ?? 0) * dt; e.y += (e.cvy ?? 0) * dt;
+        // 坑口上方没有地面:直接坠进坑里;只有"从上方刚落到地面线"才落街面
+        const overGap = this.OBST.some(o => o.type === 'gap' && Math.abs(e.x - o.x) < ((o.w ?? this.GAP_W) / 2) + 18);
+        const gy0 = this.GROUND + (e.kind === 'pot' ? 0 : 6);
+        if (!overGap && py0 >= gy0 && e.y <= gy0 && (e.cvy ?? 0) < 0) { e.y = gy0; e.cvy = 0; e.cvx = (e.cvx ?? 0) * 0.5; this.spark(e.x, gy0 + 4, new Color(190, 182, 170, 255), 3); }
+        if ((e.deadT ?? 0) > 1.4 || e.y < this.GROUND - 620) { e.alive = false; if (e.sp) e.sp.node.active = false; }
+        continue;
+      }
       if (e.kind === 'pot') {
+        // 受击硬直:后仰期间不走位、不被巡逻圈/坑沿拉回——连砍的击退才能攒着把它逼进坑
+        if (e.hitT !== undefined && e.hitT > 0) { /* 硬直中 */ }
+        else {
         // 瓦罐小妖:小步巡逻;见人倒腾短腿扑上来(拴在锚点附近,不追出格)
         if (Math.abs(e.x - e.anchor) > 100) e.dir = e.x > e.anchor ? -1 : 1;
         e.x += e.dir * 55 * dt; e.t += dt;   // 只巡逻,不追角色
@@ -512,10 +608,13 @@ export class Chapter2City extends Component {
         for (const o of this.OBST) {
           if (o.type !== 'gap') continue;
           const gh = (o.w ?? this.GAP_W) / 2 + MG;
-          if (e.x > o.x - gh && e.x < o.x + gh) { e.x = e.dir > 0 ? o.x - gh : o.x + gh; e.dir = e.dir > 0 ? -1 : 1; }
+          // 吸回「最近的一侧」并掉头背离坑口——绝不按行走朝向吸到对岸(那会瞬移过渊)
+          if (e.x > o.x - gh && e.x < o.x + gh) { if (e.x < o.x) { e.x = o.x - gh; e.dir = -1; } else { e.x = o.x + gh; e.dir = 1; } }
         }
         for (const hs of this.HOUSES) {
-          if (e.x > hs.x1 - MG && e.x < hs.x2 + MG) { e.x = e.dir > 0 ? hs.x1 - MG : hs.x2 + MG; e.dir = e.dir > 0 ? -1 : 1; }
+          const hc = (hs.x1 + hs.x2) / 2;
+          if (e.x > hs.x1 - MG && e.x < hs.x2 + MG) { if (e.x < hc) { e.x = hs.x1 - MG; e.dir = -1; } else { e.x = hs.x2 + MG; e.dir = 1; } }
+        }
         }
         if (this.slideT > 0 && Math.abs(e.x - this.px) < 54) { this.killFoe(e); continue; }   // 滑铲铲翻
         // 踩头:下落中脚踩罐顶 → 踩碎+弹起(马里奥式;踩弹后还留一段空中跳可接)
@@ -531,14 +630,18 @@ export class Chapter2City extends Component {
         if (e.state === 0) {
           if (e.cd > 0) e.cd -= dt;
           else if (Math.abs(this.px - e.x) < 520) { e.state = 1; e.t = 0; }
-        } else if (e.state === 1) {   // 瞄准 0.5s,枪口红点渐亮
-          if (e.t >= 0.5) { e.state = 2; e.t = 0; e.ty = 0; }
-        } else {   // 点射 0.55s:朝面向前下方喷一梭子(不逐帧追玩家,免得随跳动乱扫)
+        } else if (e.state === 1) {   // 瞄准 0.5s,枪口红点渐亮(枪管实时追着角色转)
+          if (e.t >= 0.5) {
+            e.state = 2; e.t = 0; e.ty = 0;
+            // 扣扳机瞬间锁定瞄准角(整梭子沿此角,不逐帧追玩家,免得随跳动乱扫)
+            e.aimA = Math.atan2((this.py + 60) - (e.y + 26), this.px - (e.x + e.dir * 14));
+          }
+        } else {   // 点射 0.55s:沿锁定瞄准角喷一梭子
           if (e.t >= e.ty) {
             e.ty += 0.11;
-            const mx = e.x + e.dir * 30, my = e.y + 6;   // 枪口≈新帧枪管
-            const ang = -0.35 + (this.rnd(e.x + e.ty * 51) - 0.5) * 0.14;   // 前下~20°,小散布
-            this.bullets.push({ x: mx, y: my, vx: e.dir * Math.cos(ang) * 720, vy: Math.sin(ang) * 720 });
+            const ga = (e.aimA ?? -0.35) + (this.rnd(e.x + e.ty * 51) - 0.5) * 0.1;   // 小散布
+            const gx = e.x + e.dir * 14, gy = e.y + 26;                                // 枪轴(握把)
+            this.bullets.push({ x: gx + Math.cos(ga) * 66, y: gy + Math.sin(ga) * 66, vx: Math.cos(ga) * 720, vy: Math.sin(ga) * 720 });
             AudioMgr.inst.play('hit', 0.22);
           }
           if (e.t >= 0.55) { e.state = 0; e.cd = 2.2; }
@@ -566,7 +669,8 @@ export class Chapter2City extends Component {
       // 挥砍命中:身前一刀的弧内(纸鸢巡航高度要跳起来够,俯冲时地面就能斩)
       if (canSlash && e.hitSw !== this.swingId) {
         const fdx = (e.x - this.px) * this.dir;
-        if (fdx > -30 && fdx < 140 && Math.abs(e.y - (this.py + 64)) < 100) { e.hitSw = this.swingId; this.slashFoe(e); continue; }
+        // 命中窗对齐紫焰刀气视觉:弧心在身前55、半径~163 → 锋芒实际探到 ~218,竖向也放宽到弧高
+        if (fdx > -30 && fdx < 210 && Math.abs(e.y - (this.py + 64)) < 125) { e.hitSw = this.swingId; this.slashFoe(e); continue; }
       }
       // 碰到掉血(滑铲/无敌帧在 hurtFrom 里免)
       if (Math.abs(e.x - this.px) < (e.kind === 'pot' ? 42 : 44) && Math.abs(e.y - (this.py + 50)) < 74)
@@ -575,7 +679,18 @@ export class Chapter2City extends Component {
 
     // 石狮滚球:到触发点从前方滚来,遇障碍/裂缝自己蹦过去(它也懂跑酷);无敌,只能跳
     for (const lt of this.LION_TRIGGERS)
-      if (!lt.done && this.px > lt.x) { lt.done = true; this.lions.push({ x: this.px + 1280, y: this.GROUND, vy: 0, onG: true, rot: 0 }); }
+      if (!lt.done && this.px > lt.x) {
+        lt.done = true;
+        const li: { x: number; y: number; vy: number; onG: boolean; rot: number; sp?: Sprite } = { x: this.px + 1280, y: this.GROUND, vy: 0, onG: true, rot: 0 };
+        // 真图精灵:锚点=球心(0.54,0.36),滚动整体绕球心转
+        const n = new Node('lion'); n.layer = Layers.Enum.UI_2D; n.parent = this.potRoot;
+        const ut2 = n.addComponent(UITransform); ut2.setContentSize(76, 88); ut2.setAnchorPoint(0.54, 0.36);
+        const sp2 = n.addComponent(Sprite); sp2.sizeMode = Sprite.SizeMode.CUSTOM;
+        if (this.lionFrame) sp2.spriteFrame = this.lionFrame;
+        n.active = false;
+        li.sp = sp2;
+        this.lions.push(li);
+      }
     for (let i = this.lions.length - 1; i >= 0; i--) {
       const li = this.lions[i];
       li.x -= 430 * dt; li.rot += 430 * dt / 34;
@@ -589,7 +704,7 @@ export class Chapter2City extends Component {
         if (li.y <= this.GROUND && li.vy <= 0) { li.y = this.GROUND; li.vy = 0; li.onG = true; this.spark(li.x, this.GROUND + 6, new Color(180, 176, 168, 255), 4); }
       }
       if (Math.abs(li.x - this.px) < 54 && Math.abs(li.y + 34 - (this.py + 50)) < 76) this.hurtFrom(18, li.x);
-      if (li.x < this.px - 720) this.lions.splice(i, 1);
+      if (li.x < this.px - 720) { if (li.sp && li.sp.node.isValid) li.sp.node.destroy(); this.lions.splice(i, 1); }
     }
 
     // 曳光弹:直线飞;命中掉血;撞墙/障碍被挡(不穿墙);落街皮扬小尘
@@ -617,14 +732,28 @@ export class Chapter2City extends Component {
       p.life += dt; p.vy -= 1400 * dt; p.x += p.vx * dt; p.y += p.vy * dt;
       if (p.life >= p.max) this.parts.splice(i, 1);
     }
+    // 冲击白光计时
+    for (let i = this.flashes.length - 1; i >= 0; i--) {
+      this.flashes[i].life += dt;
+      if (this.flashes[i].life >= this.flashes[i].max) this.flashes.splice(i, 1);
+    }
   }
 
   update(dt: number) {
     dt = Math.min(dt, 0.05); this.t += dt;
+    if (this.hitStop > 0) { this.hitStop -= dt; return; }   // 顿帧:命中瞬间全场定格(打击感灵魂)
+    if (this.shakeT > 0) {   // 震屏:随时间衰减的随机抖动
+      this.shakeT -= dt;
+      const s = this.shakeMag * Math.max(0, this.shakeT / 0.18);
+      this.node.setPosition((Math.random() - 0.5) * s, (Math.random() - 0.5) * s, 0);
+      if (this.shakeT <= 0) { this.shakeMag = 0; this.node.setPosition(0, 0, 0); }
+    }
     if (this.slamLandT > 0) this.slamLandT -= dt;
     if (this.slideCd > 0) this.slideCd -= dt;
     if (this.stunT > 0) this.stunT -= dt;
     if (this.invulnT > 0) this.invulnT -= dt;
+    // 跳跃镜头(套件):腾空拉远,落地平滑恢复;轴心=主角附近,UI 不受影响
+    this.cam.update(dt, !this.onG || this.fallT > 0, this.HERO_SX, this.GROUND + 90);
     if (this.over) { this.deadT += dt; this.updateHero(); this.redraw(); return; }
 
     // 裂缝跌落演出:掉进星空 → 直接死(从暗检查点复活)
@@ -695,8 +824,8 @@ export class Chapter2City extends Component {
       }
     }
 
-    // 街尾老井:走到井边 → 跳井转场接井关(第三章)
-    if (this.px > this.LENGTH - 140 && !this.exiting) { this.exitToWell(); return; }
+    // 街尾浓雾:井藏在雾里不用看见,走进雾就转场接井关(第三章)
+    if (this.px > this.LENGTH - 280 && !this.exiting) { this.exitToWell(); return; }
 
     // 屋顶金币拾取
     for (let i = 0; i < this.coinsArr.length; i++) {
@@ -711,10 +840,10 @@ export class Chapter2City extends Component {
 
     this.camX = this.px - this.HERO_SX;
     for (const L of this.layers) this.placeLayer(L);   // 视差贴图层跟随镜头
-    for (const gp of this.gapNodes) gp.n.setPosition(this.sx(gp.x), this.GROUND + 18, 0);   // 裂缝贴图随世界滚动(口沿略高出街皮)
     for (const cn of this.cartNodes) cn.n.setPosition(this.sx(cn.x), this.GROUND - 38, 0);   // 板车贴图(沉进路中,与角色同基准)
     for (const rn of this.ruinNodes) rn.n.setPosition(this.sx(rn.x), this.GROUND - 34, 0);   // 竖立断墙贴图(沉进路中)
     for (const hn of this.houseNodes) hn.n.setPosition(this.sx(hn.x), this.GROUND - 40, 0);  // 小房贴图(沉到路边)
+    for (const gp of this.gapNodes) gp.n.setPosition(this.sx(gp.x), this.GROUND + 18, 0);   // 裂缝贴图随世界滚动(口沿略高出街皮)
     this.combat.update(dt, this.HERO_SX, this.py + this.HERO_DY, this.dir);
     this.hero.updateFx(dt, this.HERO_SX, this.surfaceAt(this.px, this.py) + this.HERO_DY);
     this.controls.setSpecialCd(this.slideCd / 0.75);
@@ -741,7 +870,7 @@ export class Chapter2City extends Component {
   private layers: { tiles: Node[]; w: number; par: number; y: number; h: number }[] = [];
   private makeLayer(res: string, dispH: number, par: number, bottomY: number, parent: Node) {
     const L = { tiles: [] as Node[], w: 0, par, y: bottomY, h: dispH };
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < 4; i++) {   // 4 块:镜头拉远(0.9)后仍盖满加宽的可视区
       const n = new Node('bg-' + res + i); n.layer = Layers.Enum.UI_2D; n.parent = parent;
       n.addComponent(UITransform).setAnchorPoint(0, 0);
       n.addComponent(Sprite).sizeMode = Sprite.SizeMode.CUSTOM;
@@ -759,7 +888,7 @@ export class Chapter2City extends Component {
   private placeLayer(L: { tiles: Node[]; w: number; par: number; y: number }) {
     if (!L.w) return;
     const off = (((this.camX * L.par) % L.w) + L.w) % L.w;
-    for (let i = 0; i < L.tiles.length; i++) L.tiles[i].setPosition(-W / 2 - off + i * L.w, L.y, 0);
+    for (let i = 0; i < L.tiles.length; i++) L.tiles[i].setPosition(-W / 2 - 64 - off + i * L.w, L.y, 0);   // 左移64:拉远后左缘不露
   }
 
   // 棉絮雾团:底晕一层 + 4 圆错落呼吸(轻量版:5 次填充/团,原 12 次)
@@ -845,6 +974,24 @@ export class Chapter2City extends Component {
       if (x2 < -W / 2 - 60 || x1 > W / 2 + 60) continue;
       g.fillColor = new Color(28, 20, 42, 70); g.ellipse((x1 + x2) / 2, gy - 41, (x2 - x1) / 2 + 30, 9); g.fill();
     }
+    // 路面星缝装饰:街皮裂了几道小口,往外渗星光(纯装饰不掉落)——深渊主题渗进路面
+    for (const wx of this.STAR_CRACKS) {
+      const cx = this.sx(wx);
+      if (cx < -W / 2 - 60 || cx > W / 2 + 60) continue;
+      const tw = 0.5 + 0.5 * Math.sin(this.t * 2.4 + wx);
+      // 只裂在路面表面:一道细锯齿裂纹(下面仍是石头,不往砖面延伸)
+      g.strokeColor = new Color(13, 9, 26, 235); g.lineWidth = 3;
+      g.moveTo(cx - 26, gy + 1); g.lineTo(cx - 10, gy + 3); g.lineTo(cx + 4, gy + 1);
+      g.lineTo(cx + 18, gy + 3); g.lineTo(cx + 30, gy + 1); g.stroke();
+      // 贴地一层淡淡星光(浮在表面上方一点点)
+      g.fillColor = new Color(150, 130, 220, Math.round(20 + 26 * tw));
+      g.ellipse(cx + 2, gy + 4, 30, 5); g.fill();
+      // 两颗小闪星贴缝眨
+      g.fillColor = new Color(226, 230, 255, Math.round(150 + 100 * tw));
+      g.circle(cx + 5 - tw * 7, gy + 5, 1.6 + tw * 0.8); g.fill();
+      g.fillColor = new Color(226, 230, 255, Math.round(90 + 90 * (1 - tw)));
+      g.circle(cx - 11 + tw * 5, gy + 4, 1.1); g.fill();
+    }
     // 障碍四件套
     for (const o of this.OBST) {
       const ox = this.sx(o.x);
@@ -913,11 +1060,25 @@ export class Chapter2City extends Component {
           const on = ox > -W / 2 - 90 && ox < W / 2 + 90;
           sp.node.active = on;
           if (on) {
-g.fillColor = new Color(28, 20, 42, 60); g.ellipse(ox, gy - 2, 22, 6); g.fill();
-            sp.node.setPosition(ox, gy, 0);
+g.fillColor = new Color(28, 20, 42, 52); g.ellipse(ox, gy - 2, 26, 7); g.fill();
+g.fillColor = new Color(28, 20, 42, 105); g.ellipse(ox, gy - 2, 14, 4); g.fill();
             const k = e.flash > 0 ? 1 + e.flash * 1.1 : 1;   // 受击弹缩(打击感)
             sp.node.setScale(e.dir * k, k, 1);   // dir=-1 朝左=水平翻
-            const fr = Math.floor(e.t * 8) % 8;   // 帧速固定,不随玩家
+            if (e.dead) {
+              // 尸体:随抛物线飞,身体快速翻倒(→80°),落定后淡出
+              const dk = Math.min(1, (e.deadT ?? 0) * 3.3);
+              sp.node.setPosition(ox, e.y, 0);
+              sp.node.angle = 80 * dk * (e.hitDir ?? 1) * e.dir;
+              const al = (e.deadT ?? 0) > 0.55 ? Math.max(0, 1 - ((e.deadT ?? 0) - 0.55) / 0.45) : 1;
+              sp.color = new Color(this.FOE_TINT.r, this.FOE_TINT.g, this.FOE_TINT.b, Math.round(255 * al));
+            } else {
+              sp.node.setPosition(ox, gy, 0);
+              // 受击后仰:顶部顺击退方向倒 38°,随 hitT 回正(scaleX 翻转会镜像旋转,乘 e.dir 校正到世界方向)
+              const hk = e.hitT !== undefined && e.hitT > 0 ? e.hitT / 0.3 : 0;
+              sp.node.angle = hk > 0 ? 38 * hk * (e.hitDir ?? 1) * e.dir : 0;
+              sp.color = new Color(this.FOE_TINT.r, this.FOE_TINT.g, this.FOE_TINT.b, 255);
+            }
+            const fr = Math.floor(e.t * 8) % 8;   // 帧速固定,不随玩家(死亡时 e.t 冻结=定格帧)
             if (this.potFrames.length) sp.spriteFrame = this.potFrames[fr];
           }
         }
@@ -928,24 +1089,51 @@ g.fillColor = new Color(28, 20, 42, 60); g.ellipse(ox, gy - 2, 22, 6); g.fill();
         const sp = e.sp;
         const on = ox > -W / 2 - 90 && ox < W / 2 + 90;
         if (sp) sp.node.active = on;
+        if (e.gunSp) e.gunSp.node.active = on && !e.dead && !!this.guardGunFrame;   // 尸体/屏外藏枪
         if (!on) continue;
         const fy = e.y - 28;
         if (sp) {
-g.fillColor = new Color(28, 20, 42, 58); g.ellipse(ox, fy - 2, 20, 6); g.fill();
-          sp.node.setPosition(ox, fy, 0);
-          sp.node.setScale(e.dir, 1, 1);
-          if (this.guardFrames.length) {
+g.fillColor = new Color(28, 20, 42, 52); g.ellipse(ox, fy - 2, 24, 7); g.fill();
+g.fillColor = new Color(28, 20, 42, 105); g.ellipse(ox, fy - 2, 13, 4); g.fill();
+          // 呼吸(scaleY 微起伏,活着才喘) + 点射后座(身体被枪蹬得往后抖)
+          const brth = e.dead ? 1 : 1 + 0.02 * Math.sin(this.t * 2.6 + e.anchor);
+          const recoil = !e.dead && e.state === 2 ? e.dir * (2.5 + 1.5 * Math.sin(this.t * 55)) : 0;
+          sp.node.setPosition(ox - recoil, fy, 0);
+          sp.node.setScale(e.dir, brth, 1);
+          if (e.dead) {
+            // 尸体:从屋檐摔下翻倒,落定淡出
+            const dk = Math.min(1, (e.deadT ?? 0) * 3.3);
+            sp.node.angle = 80 * dk * (e.hitDir ?? 1) * e.dir;
+            const al = (e.deadT ?? 0) > 0.55 ? Math.max(0, 1 - ((e.deadT ?? 0) - 0.55) / 0.45) : 1;
+            sp.color = new Color(this.FOE_TINT.r, this.FOE_TINT.g, this.FOE_TINT.b, Math.round(255 * al));
+          } else { sp.node.angle = 0; sp.color = new Color(this.FOE_TINT.r, this.FOE_TINT.g, this.FOE_TINT.b, 255); }
+          // 分体:身体固定一帧(不动);没分体图时退回旧4姿态
+          if (this.guardBodyFrame) sp.spriteFrame = this.guardBodyFrame;
+          else if (this.guardFrames.length) {
             const gf = e.state === 2 ? 1 + Math.floor(this.t * 12) % 3 : 0;
             sp.spriteFrame = this.guardFrames[Math.min(gf, this.guardFrames.length - 1)];
           }
         }
-        const mx = ox + e.dir * 30, my = fy + 34;   // 枪口≈新帧枪管
+        // 枪:握把钉在肩点,枪管实时旋转指向角色;点射期间锁在开火角上
+        const gpx = ox + e.dir * 14, gpy = fy + 54;
+        let aimDeg: number;
+        if (e.state === 2 && e.aimA !== undefined) aimDeg = e.aimA * 57.29578;
+        else aimDeg = Math.atan2((this.py + 60) - gpy, this.sx(this.px) - gpx) * 57.29578;
+        if (e.gunSp && e.gunSp.node.active) {
+          e.gunSp.node.setPosition(gpx, gpy, 0);
+          e.gunSp.node.angle = aimDeg;
+          e.gunSp.node.setScale(1, Math.abs(aimDeg) > 90 ? -1 : 1, 1);   // 指向左半边时竖直翻面,枪不倒挂
+          e.gunSp.color = this.FOE_TINT;   // 同款环境光
+        }
+        // 枪口特效(红点/火舌)跟着枪管方向走
+        const ar = aimDeg / 57.29578;
+        const mx = gpx + Math.cos(ar) * 66, my = gpy + Math.sin(ar) * 66;
         if (e.state === 1) {
           const k = Math.min(1, e.t / 0.5);
           g.fillColor = new Color(255, 90, 70, Math.round(90 + 165 * k)); g.circle(mx, my, 2.5 + k * 2); g.fill();
         } else if (e.state === 2) {
           const fl = 0.6 + 0.4 * Math.sin(this.t * 60);
-          g.fillColor = new Color(255, 210, 120, 230); g.circle(mx + e.dir * 4, my, 5 + fl * 3); g.fill();
+          g.fillColor = new Color(255, 210, 120, 230); g.circle(mx + Math.cos(ar) * 4, my + Math.sin(ar) * 4, 5 + fl * 3); g.fill();
           g.fillColor = new Color(255, 245, 200, 255); g.circle(mx, my, 3 + fl * 2); g.fill();
         }
         continue;
@@ -957,21 +1145,38 @@ g.fillColor = new Color(28, 20, 42, 58); g.ellipse(ox, fy - 2, 20, 6); g.fill();
         if (sp) sp.node.active = on;
         if (!on) continue;
         if (sp) {
-g.fillColor = new Color(28, 20, 42, 40); g.ellipse(ox, e.y - this.KITE_DISP_H * 0.44, 15, 5); g.fill();
+g.fillColor = new Color(28, 20, 42, 36); g.ellipse(ox, gy - 2, 18, 5); g.fill();
+g.fillColor = new Color(28, 20, 42, 70); g.ellipse(ox, gy - 2, 9, 3); g.fill();
           sp.node.setPosition(ox, e.y, 0);
           const face = this.px < e.x ? -1 : 1;
-          const tilt = e.state === 1 ? face * 32 : Math.sin(this.t * 3 + e.anchor) * 6;
           sp.node.setScale(-face, 1, 1);   // 朝向翻转(图默认反向)
-          sp.node.angle = tilt;
+          if (e.dead) {
+            // 被斩落:纸鸢打着转往下坠,落定淡出
+            sp.node.angle = (e.deadT ?? 0) * 430 * (e.hitDir ?? 1);
+            const al = (e.deadT ?? 0) > 0.55 ? Math.max(0, 1 - ((e.deadT ?? 0) - 0.55) / 0.45) : 1;
+            sp.color = new Color(this.FOE_TINT.r, this.FOE_TINT.g, this.FOE_TINT.b, Math.round(255 * al));
+          } else {
+            sp.node.angle = e.state === 1 ? face * 32 : Math.sin(this.t * 3 + e.anchor) * 6;
+            sp.color = new Color(this.FOE_TINT.r, this.FOE_TINT.g, this.FOE_TINT.b, 255);
+          }
         }
       }
     }
-    // 石狮滚球:石球+一圈石鬃(随滚动转)+凶脸朝滚向
+    // 石狮滚球:真图(整体绕球心滚转);缺图退回程序画(石球+石鬃+凶脸)
     for (const li of this.lions) {
       const ox = this.sx(li.x);
-      if (ox < -W / 2 - 90 || ox > W / 2 + 90) continue;
+      const onScr = ox >= -W / 2 - 90 && ox <= W / 2 + 90;
+      if (li.sp) li.sp.node.active = onScr && !!this.lionFrame;
+      if (!onScr) continue;
       const cy = li.y + 34;
-      g.fillColor = new Color(28, 20, 42, 66); g.ellipse(ox, gy - 2, 30, 6); g.fill();   // 影留地面
+      g.fillColor = new Color(28, 20, 42, 55); g.ellipse(ox, gy - 2, 34, 8); g.fill();   // 影留地面(软影)
+      g.fillColor = new Color(28, 20, 42, 110); g.ellipse(ox, gy - 2, 19, 4.6); g.fill();   // 浓核
+      if (li.sp && this.lionFrame) {
+        li.sp.node.setPosition(ox, cy, 0);
+        li.sp.node.angle = (li.rot * 57.29578) % 360;   // 向左滚=逆时针
+        li.sp.color = this.FOE_TINT;   // 同款环境光
+        continue;
+      }
       g.fillColor = new Color(148, 148, 158, 255); g.circle(ox, cy, 34); g.fill();
       g.fillColor = new Color(124, 124, 136, 255);
       for (let k = 0; k < 8; k++) { const a = li.rot * 0.9 + k * Math.PI / 4; g.circle(ox + Math.cos(a) * 29, cy + Math.sin(a) * 29, 6.5); }
@@ -1005,6 +1210,16 @@ g.fillColor = new Color(28, 20, 42, 40); g.ellipse(ox, e.y - this.KITE_DISP_H * 
       g.fillColor = new Color(p.col.r, p.col.g, p.col.b, Math.round(235 * a));
       g.circle(ox, p.y, p.r * (0.6 + a * 0.5)); g.fill();
     }
+    // 冲击白光:命中点炸开的白圈(快速扩散淡出,对齐第一章)
+    for (const f of this.flashes) {
+      const ox = this.sx(f.x);
+      if (ox < -W / 2 - 40 || ox > W / 2 + 40) continue;
+      const p = f.life / f.max, a = 1 - p;
+      g.fillColor = new Color(255, 255, 255, Math.round(215 * a));
+      g.circle(ox, f.y, 8 + 30 * p); g.fill();
+      g.strokeColor = new Color(255, 250, 230, Math.round(240 * a)); g.lineWidth = 3;
+      g.circle(ox, f.y, 14 + 52 * p); g.stroke();
+    }
   }
 
   // 顶层氛围(角色之上):前景雾团 + 飘尘微光 + 打旋纸片 + 冷紫暗角
@@ -1025,6 +1240,34 @@ g.fillColor = new Color(28, 20, 42, 40); g.ellipse(ox, e.y - this.KITE_DISP_H * 
       g.fillColor = new Color(218, 217, 228, 18);
       g.ellipse(cx, -H / 2 + 240 + sd * H * 0.5, 480 + sd * 240, 26 + sd * 16); g.fill();
     }
+    // 街尾浓雾墙:整团大雾裹住尽头(井在雾里看不见),走进去就是下一个场景
+    {
+      const fogX = this.sx(this.LENGTH - 150);
+      if (fogX < W / 2 + 520) {
+        for (let i = 0; i < 10; i++) {   // 满高一列翻涌雾团
+          const sd = this.rnd(i * 7.7 + 880);
+          const fx3 = fogX + (sd - 0.35) * 260 + Math.sin(this.t * (0.3 + sd * 0.4) + i * 1.7) * 24;
+          const fy3 = -H / 2 + (i / 9) * H;
+          this.fogBank(g, fx3, fy3, 200 + sd * 160, 40, i + 880);
+        }
+        // 雾芯:完全不透(里面什么都看不见,井彻底藏死)——纯代码,无需出图
+        const solidL = this.sx(this.LENGTH - 210);
+        g.fillColor = new Color(214, 213, 226, 255);
+        g.rect(solidL, -H / 2, W + 600, H); g.fill();   // 从雾芯到屏幕右缘全糊死
+        for (let k = 0; k < 16; k++) {   // 前缘羽化:16 层细条平滑衰减(不见台阶)
+          const a = Math.round(235 * Math.pow(1 - k / 16, 1.6));
+          g.fillColor = new Color(214, 213, 226, a);
+          g.rect(solidL - (k + 1) * 20, -H / 2, 21, H); g.fill();
+        }
+        for (let i = 0; i < 12; i++) {   // 一列翻涌大雾团骑在边界上,把残余直边彻底吃掉
+          const sd = this.rnd(i * 11.3 + 940);
+          const ex = solidL - 60 - sd * 240 + Math.sin(this.t * (0.35 + sd * 0.5) + i * 2.2) * 30;
+          const ey = -H / 2 + (i / 11) * H + Math.sin(this.t * 0.6 + i) * 20;
+          g.fillColor = new Color(215, 214, 227, Math.round(120 + sd * 70));
+          g.ellipse(ex, ey, 110 + sd * 90, 80 + sd * 60); g.fill();
+        }
+      }
+    }
     const SPAN = W + 160;
     for (let i = 0; i < 22; i++) {   // 飘尘:缓慢横漂的微光尘
       const sd = this.rnd(i + 500);
@@ -1034,7 +1277,7 @@ g.fillColor = new Color(28, 20, 42, 40); g.ellipse(ox, e.y - this.KITE_DISP_H * 
       g.fillColor = new Color(238, 232, 248, Math.round(26 + 58 * tw));
       g.circle(px, py, 1.4 + sd * 1.8); g.fill();
     }
-    for (let i = 0; i < 6; i++) {   // 纸片:打着旋往下飘(全城人消失时没来得及收的纸)
+    for (let i = 0; i < 14; i++) {   // 纸片:打着旋往下飘(全城人消失时没来得及收的纸)
       const sd = this.rnd(i + 540);
       const fy = H / 2 - ((this.t * (30 + sd * 26) + sd * 900) % (H + 240)) + 120;
       const fx2 = ((i * 1160 + sd * 500 - this.camX * 1.05) % SPAN + SPAN) % SPAN - SPAN / 2 + Math.sin(this.t * 1.1 + i * 2) * 34;
