@@ -11,7 +11,7 @@ import { DeathFx } from './DeathFx';
 import { CamZoom } from './CamZoom';
 import { AudioMgr } from './AudioMgr';
 import { AssetHub } from './AssetHub';
-import { Sprite, SpriteFrame } from 'cc';
+import { Sprite, SpriteFrame, Rect, Texture2D } from 'cc';
 import { Chapter2Well } from './Chapter2Well';
 
 const { ccclass } = _decorator;
@@ -33,6 +33,10 @@ export class Chapter2Arena extends Component {
   private world!: Node; private cam!: CamZoom;
   private bgG!: Graphics;      // 背景+地面(每帧重画,含动效)
   private bossG!: Graphics;    // Boss 本体(独立节点,参与与主角的前后排序)
+  private bossFrames: SpriteFrame[] = [];   // 铁心兽2帧:闭嘴待机/张嘴吼
+  private bossSp: Sprite | null = null;
+  private bossOK = false;
+  private readonly BOSS_H = 240;   // Boss显示高(帧712等比缩)
   private heroWrap!: Node;     // 主角容器(按深度缩放/定位,HeroRig 挂里面)
   private fxG!: Graphics;      // 子弹/炸弹/火区/粒子/白光(最上层)
   private hero!: HeroRig; private combat!: HeroCombat;
@@ -142,6 +146,17 @@ export class Chapter2Arena extends Component {
     this.propsG = propsN.addComponent(Graphics);
     const bossN = new Node('ar-boss'); bossN.layer = Layers.Enum.UI_2D; bossN.parent = this.world; bossN.addComponent(UITransform);
     this.bossG = bossN.addComponent(Graphics);
+    // Boss 本体真图:切2帧,精灵挂 bossN(与阴影同节点→深度排序一致)
+    AssetHub.loadSF('arena-boss', (sf) => {
+      if (!sf) return;
+      const tex = sf.texture as Texture2D; tex.setFilters(Texture2D.Filter.LINEAR, Texture2D.Filter.LINEAR);
+      const cw = Math.round(tex.width / 2), ch = tex.height;
+      for (let i = 0; i < 2; i++) { const f = new SpriteFrame(); f.texture = tex; f.rect = new Rect(i * cw, 0, cw, ch); this.bossFrames.push(f); }
+      const n = new Node('ar-boss-sp'); n.layer = Layers.Enum.UI_2D; n.parent = bossN;
+      const u = n.addComponent(UITransform); u.setContentSize(this.BOSS_H * cw / ch, this.BOSS_H); u.setAnchorPoint(0.5, 0.02);
+      const sp = n.addComponent(Sprite); sp.sizeMode = Sprite.SizeMode.CUSTOM; sp.spriteFrame = this.bossFrames[0];
+      this.bossSp = sp; this.bossOK = true;
+    });
 
     this.heroWrap = new Node('ar-herowrap'); this.heroWrap.layer = Layers.Enum.UI_2D; this.heroWrap.parent = this.world; this.heroWrap.addComponent(UITransform);
     const fxLayer = new Node('ar-fx'); fxLayer.layer = Layers.Enum.UI_2D; fxLayer.parent = this.world; fxLayer.addComponent(UITransform);
@@ -589,10 +604,22 @@ export class Chapter2Arena extends Component {
   }
   private drawBoss() {
     const g = this.bossG; g.clear();
-    if (this.bDead && this.bDeadT > 1.7) return;
+    if (this.bDead && this.bDeadT > 1.7) { if (this.bossSp) this.bossSp.node.active = false; return; }
     const s = this.dsc(this.bd) * 1.05, x = this.bx, gy = this.dy(this.bd);
     const fade = this.bDead ? Math.max(0, 1 - Math.max(0, this.bDeadT - 1.2) / 0.5) : 1;
     const A = (v: number) => Math.round(v * fade);
+    if (this.bossOK && this.bossSp) {
+      g.fillColor = new Color(20, 14, 30, A(115)); g.ellipse(x, gy - 6, 86 * s, 16 * s); g.fill();   // 影
+      const br = 1 + Math.sin(this.bph * 2.2) * 0.02 + (this.charging ? Math.sin(this.t * 40) * 0.02 : 0);
+      const S = s * br;
+      const n = this.bossSp.node; n.active = true;
+      const face = this.px < this.bx ? 1 : -1;   // 朝玩家(图默认朝左)
+      n.setScale(face * S, S, 1); n.setPosition(x, gy, 0);
+      this.bossSp.spriteFrame = this.bossFrames[this.charging ? 1 : 0];   // 蓄力冲撞=张嘴吼
+      const hot = this.phase() === 3 || this.charging || this.coreOpen;   // 过热/蓄力/核心开=染红
+      this.bossSp.color = hot ? new Color(255, 150, 138, A(255)) : new Color(255, 255, 255, A(255));
+      return;
+    }
     // 影
     g.fillColor = new Color(20, 14, 30, A(115)); g.ellipse(x, gy - 6, 86 * s, 16 * s); g.fill();
     const br = 1 + Math.sin(this.bph * 2.2) * 0.02 + (this.charging ? Math.sin(this.t * 40) * 0.02 : 0);

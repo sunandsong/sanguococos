@@ -1,0 +1,134 @@
+{
+  "ver": "1.0.27",
+  "importer": "image",
+  "imported": true,
+  "uuid": "84d463ee-fb4a-4158-9f91-4f4a9b99f932",
+  "files": [
+    ".json",
+    ".png"
+  ],
+  "subMetas": {
+    "6c48a": {
+      "importer": "texture",
+      "uuid": "84d463ee-fb4a-4158-9f91-4f4a9b99f932@6c48a",
+      "displayName": "arena-boss",
+      "id": "6c48a",
+      "name": "texture",
+      "userData": {
+        "wrapModeS": "clamp-to-edge",
+        "wrapModeT": "clamp-to-edge",
+        "imageUuidOrDatabaseUri": "84d463ee-fb4a-4158-9f91-4f4a9b99f932",
+        "isUuid": true,
+        "visible": false,
+        "minfilter": "linear",
+        "magfilter": "linear",
+        "mipfilter": "none",
+        "anisotropy": 0
+      },
+      "ver": "1.0.22",
+      "imported": true,
+      "files": [
+        ".json"
+      ],
+      "subMetas": {}
+    },
+    "f9941": {
+      "importer": "sprite-frame",
+      "uuid": "84d463ee-fb4a-4158-9f91-4f4a9b99f932@f9941",
+      "displayName": "arena-boss",
+      "id": "f9941",
+      "name": "spriteFrame",
+      "userData": {
+        "trimThreshold": 1,
+        "rotated": false,
+        "offsetX": -0.5,
+        "offsetY": 0,
+        "trimX": 10,
+        "trimY": 10,
+        "width": 1221,
+        "height": 692,
+        "rawWidth": 1242,
+        "rawHeight": 712,
+        "borderTop": 0,
+        "borderBottom": 0,
+        "borderLeft": 0,
+        "borderRight": 0,
+        "packable": true,
+        "pixelsToUnit": 100,
+        "pivotX": 0.5,
+        "pivotY": 0.5,
+        "meshType": 0,
+        "vertices": {
+          "rawPosition": [
+            -610.5,
+            -346,
+            0,
+            610.5,
+            -346,
+            0,
+            -610.5,
+            346,
+            0,
+            610.5,
+            346,
+            0
+          ],
+          "indexes": [
+            0,
+            1,
+            2,
+            2,
+            1,
+            3
+          ],
+          "uv": [
+            10,
+            702,
+            1231,
+            702,
+            10,
+            10,
+            1231,
+            10
+          ],
+          "nuv": [
+            0.008051529790660225,
+            0.014044943820224719,
+            0.9911433172302737,
+            0.014044943820224719,
+            0.008051529790660225,
+            0.9859550561797753,
+            0.9911433172302737,
+            0.9859550561797753
+          ],
+          "minPos": [
+            -610.5,
+            -346,
+            0
+          ],
+          "maxPos": [
+            610.5,
+            346,
+            0
+          ]
+        },
+        "isUuid": true,
+        "imageUuidOrDatabaseUri": "84d463ee-fb4a-4158-9f91-4f4a9b99f932@6c48a",
+        "atlasUuid": "",
+        "trimType": "auto"
+      },
+      "ver": "1.0.12",
+      "imported": true,
+      "files": [
+        ".json"
+      ],
+      "subMetas": {}
+    }
+  },
+  "userData": {
+    "type": "sprite-frame",
+    "fixAlphaTransparencyArtifacts": false,
+    "hasAlpha": true,
+    "redirect": "84d463ee-fb4a-4158-9f91-4f4a9b99f932@6c48a"
+  }
+}
