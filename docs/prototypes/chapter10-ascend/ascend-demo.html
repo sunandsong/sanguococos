@@ -20,11 +20,13 @@
 'use strict';
 const cv=document.getElementById('cv'), g=cv.getContext('2d');
 const W=720,H=1280;
-const TOP=15600;
-// 分区(y向上): 光柱0..1200 → 冥空..4200 → 云海..7800 → 天兵..11200 → 力竭→飞行 → 南天门
-const Z1=1200,Z2=4200,Z3=7800,Z4=11200,GATE_Y=15000;
+const TOP=22600;
+// 分区(y向上): 光柱0..1200 → 冥空..5400 → 云海..10200 → 风暴带..13400 → 天兵..17600 → 力竭→飞行 → 南天门
+const Z1=1200,Z2=5400,ZS0=10200,Z3=13400,Z4=17600,GATE_Y=21600;
 
 const plats=[],chains=[],drafts=[],bounces=[],rings=[],cps=[];
+const LGTS=[];   // 雷击柱
+const WINDS=[{y0:6300,y1:7600,dir:1},{y0:8600,y1:9900,dir:-1},{y0:11000,y1:12300,dir:-1}];
 {
   const rnd=s=>((Math.sin(s*127.1)*43758.5)%1+1)%1;
   // 起点台+光柱(0..Z1 自动上托)
@@ -46,12 +48,13 @@ const plats=[],chains=[],drafts=[],bounces=[],rings=[],cps=[];
       else plats.push({x:nx,y,w:130+rnd(i*3)*60,t:'stone'});
       cx2=nx;y+=step;i++;
     }
+    plats.push({x:360,y:3300,w:320,t:'stone',cp:1});
     plats.push({x:360,y:Z2,w:340,t:'cloud',cp:1});
   }
   // 云海段:云台+云蹦床+风
   {
     let y=Z2+170,cx2=360,i=0;
-    while(y<Z3-120){
+    while(y<ZS0-120){
       const step=155+rnd(i*2.9)*65;
       const dxm=Math.max(130,330-step);
       let nx=cx2+(rnd(i*6.7)-0.5)*2*dxm;
@@ -61,7 +64,23 @@ const plats=[],chains=[],drafts=[],bounces=[],rings=[],cps=[];
       if(rnd(i*9)<0.14)drafts.push({x:Math.max(80,Math.min(W-80,nx+120)),y0:y,y1:y+560,w:110});
       cx2=nx;y+=step;i++;
     }
-    plats.push({x:360,y:Z3,w:340,t:'cloud',cp:1});
+    plats.push({x:360,y:7800,w:320,t:'cloud',cp:1});   // 云海中点
+    plats.push({x:360,y:ZS0,w:340,t:'cloud',cp:1});
+  }
+  // 风暴带:黑云台+雷击柱
+  {
+    let y=ZS0+170,cx2=360,i=0;
+    while(y<Z3-120){
+      const step=165+rnd(i*3.3)*70;
+      const dxm=Math.max(120,320-step);
+      let nx=cx2+(rnd(i*9.1)-0.5)*2*dxm;
+      nx=Math.max(90,Math.min(W-90,nx));
+      if(i%4===2)drafts.push({x:nx,y0:y-30,y1:y+520,w:120});
+      else plats.push({x:nx,y,w:130+rnd(i*4)*50,t:'storm'});
+      cx2=nx;y+=step;i++;
+    }
+    plats.push({x:360,y:Z3,w:340,t:'storm',cp:1});
+    for(let k=0;k<9;k++)LGTS.push({x:100+rnd(k*13)*(W-200),y:ZS0+320+k*320,ph:rnd(k*7)*3});
   }
   // 天兵段:更稀的云台+气流,矛从两侧飞
   {
@@ -77,10 +96,11 @@ const plats=[],chains=[],drafts=[],bounces=[],rings=[],cps=[];
       if(i%3===0)rings.push({x:Math.max(110,Math.min(W-110,nx+(rnd(i*4)-0.5)*260)),y:y+90,got:0});
       cx2=nx;y+=step;i++;
     }
+    plats.push({x:360,y:15400,w:320,t:'cloud',cp:1});
     plats.push({x:360,y:Z4,w:380,t:'gold',cp:1});
   }
   // 飞行区金环引路(之字往上)
-  for(let k=0;k<10;k++){
+  for(let k=0;k<12;k++){
     rings.push({x:360+Math.sin(k*1.1)*220,y:Z4+500+k*330,got:0});
   }
   for(const p of plats)if(p.cp)cps.push({x:p.x,y:p.y,on:0});
@@ -93,7 +113,7 @@ let camY=0,coins=0,GOD=1,shake=0,T=0,lock=0,cpi=0,flyT=0;
 let msg='',msgT=0;
 const spears=[];
 let spearT=1.4, exhaust=0;   // exhaust: 力竭演出 0=未播
-const FLAGS={col:0,z1:0,z2:0,z3:0};
+const FLAGS={col:0,z1:0,z2:0,zs:0,z3:0};
 function msgQ(t,d){msg=t;msgT=d||2.6;}
 const keys={};
 onkeydown=e=>{keys[e.code]=1;
@@ -215,6 +235,15 @@ function step(dt){
       }
     }
   }
+  // 横风带
+  if(!P.fly)for(const wz of WINDS){
+    if(P.y>wz.y0&&P.y<wz.y1){P.x+=wz.dir*95*dt;break;}
+  }
+  // 雷击柱
+  for(const lg of LGTS){
+    const cyc=(T+lg.ph)%3.4;
+    if(cyc>0.9&&cyc<1.25&&Math.abs(P.x-lg.x)<34&&Math.abs(P.y-lg.y)<300)hurt(1);
+  }
   // 金环
   for(const r of rings){
     if(!r.got&&Math.hypot(P.x-r.x,P.y-40-r.y)<52){r.got=1;coins++;spark(r.x,r.y,'#ffd76a',10,1.4);}
@@ -238,6 +267,7 @@ function step(dt){
   if(!FLAGS.col&&P.y>300){FLAGS.col=1;msgQ('光柱托着你冲出阎罗殿——一路往上!');}
   if(!FLAGS.z1&&P.y>Z1+200){FLAGS.z1=1;msgQ('冥界的上空…白幡都在脚下了');}
   if(!FLAGS.z2&&P.y>Z2+200){FLAGS.z2=1;msgQ('人间云海——快出冥界了');}
+  if(!FLAGS.zs&&P.y>ZS0+200){FLAGS.zs=1;msgQ('风暴带…雷柱亮起就别站过去!');}
   if(!FLAGS.z3&&P.y>Z3+200){FLAGS.z3=1;msgQ('天兵拦截!小心两侧的金矛!');}
   // 力竭演出触发
   if(exhaust===0&&P.onG&&Math.abs(P.y-Z4)<8){
@@ -331,6 +361,33 @@ function draw(){
         g.beginPath();g.moveTo(lx,ly);g.quadraticCurveTo(lx+6,ly-16,lx,ly-30);g.stroke();}
     }
   }
+  // 横风叶流
+  for(const wz of WINDS){
+    const yT=sy(wz.y1), yB=sy(wz.y0);
+    if(yB<-60||yT>H+60)continue;
+    g.fillStyle='rgba(240,244,255,0.4)';
+    for(let i=0;i<8;i++){
+      const lx=((i*160+T*300*wz.dir)%(W+160)+(W+160))%(W+160)-80;
+      const band=Math.max(60,Math.min(yB,H)-Math.max(yT,0));
+      const ly=Math.max(yT,0)+((i*127)%band);
+      g.fillRect(lx,ly,26,3);
+    }
+  }
+  // 雷击柱
+  for(const lg of LGTS){
+    const py=sy(lg.y);
+    if(py<-400||py>H+400)continue;
+    const cyc=(T+lg.ph)%3.4;
+    if(cyc<0.9){
+      g.fillStyle=`rgba(255,244,180,${0.10+0.08*Math.sin(T*20)})`;
+      g.fillRect(lg.x-30,py-300,60,600);
+    } else if(cyc<1.25){
+      g.fillStyle='rgba(255,250,210,0.9)';
+      g.fillRect(lg.x-10,py-300,20,600);
+      g.fillStyle='rgba(255,244,180,0.35)';
+      g.fillRect(lg.x-34,py-300,68,600);
+    }
+  }
   // 平台
   for(const p of plats){
     const py=sy(p.y);
@@ -344,6 +401,11 @@ function draw(){
     } else if(p.t==='gold'){
       g.fillStyle='#e8c86a';g.fillRect(p.x-p.w/2,py,p.w,18);
       g.fillStyle='#f5dd9a';g.fillRect(p.x-p.w/2,py,p.w,7);
+    } else if(p.t==='storm'){
+      g.fillStyle='rgba(96,92,120,0.95)';
+      g.beginPath();g.ellipse(p.x,py+10,p.w/2+14,20,0,0,7);g.fill();
+      g.fillStyle='rgba(70,66,92,0.9)';
+      g.beginPath();g.ellipse(p.x,py+18,p.w/2+8,12,0,0,7);g.fill();
     } else {
       g.fillStyle='#4a3c56';g.fillRect(p.x-p.w/2,py,p.w,16);
       g.fillStyle='#5c4c68';g.fillRect(p.x-p.w/2,py,p.w,6);
