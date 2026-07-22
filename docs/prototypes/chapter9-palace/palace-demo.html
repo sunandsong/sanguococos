@@ -1,0 +1,737 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>阎罗殿 Demo · 过堂</title>
+<style>
+  html,body{margin:0;padding:0;background:#0c0812;height:100%;overflow:hidden;touch-action:none}
+  #wrap{display:flex;align-items:center;justify-content:center;height:100%}
+  canvas{background:#120e1a;max-height:100vh;max-width:100vw}
+  #tip{position:fixed;left:10px;top:8px;color:#a9b;font:12px/1.6 monospace;pointer-events:none;white-space:pre}
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="cv" width="720" height="1280"></canvas></div>
+<div id="tip">A/D 移动 · W/空格 跳(二段) · J 攻击/打断判官写字
+流程:押送大堂→生死簿档案塔(躲灯笼光锥,书架后可藏)→刑堂(刀山/油锅/寒冰)
+→判官(写字成兵,写一半打断他!)→十王阶→阎罗殿·阎王(P3打他砸下来的拳头) · G 无敌(默认开)</div>
+<script>
+'use strict';
+const cv=document.getElementById('cv'), g=cv.getContext('2d');
+const W=720,H=1280;
+
+// ── 布局:一层大堂 → 竖直档案塔 → 上层刑堂/判官/十王阶 → 阎罗殿 ──
+const GY1=1000;                       // 一层地面
+const TWX0=1800, TWX1=2420;           // 档案塔井(往上爬)
+const UPY=-1400;                      // 上层地面
+const HallX1=1800;
+const TRAP0=2420, TRAP1=4400;         // 刑堂(上层)
+const JUDGE0=4400, JUDGE1=5250;       // 判官堂
+const STAIR0=5250, STAIR1=6450;      // 十王阶(再往上)
+const PALY=-2160;                     // 阎罗殿地面
+const PAL0=6450, PAL1=8300, END=8300;
+const grounds=[
+  {x0:-60,x1:TWX1,y:GY1},
+  // 档案塔书架(之字)
+  {x0:1860,x1:2060,y:800},{x0:2200,x1:2400,y:620},{x0:1860,x1:2060,y:440},
+  {x0:2200,x1:2400,y:260},{x0:1860,x1:2060,y:80},{x0:2200,x1:2400,y:-100},
+  {x0:1860,x1:2060,y:-280},{x0:2200,x1:2400,y:-460},{x0:1860,x1:2060,y:-640},
+  {x0:2200,x1:2400,y:-820},{x0:1860,x1:2060,y:-1000},{x0:2200,x1:2400,y:-1180},
+  {x0:1860,x1:2420,y:UPY},
+  // 上层
+  {x0:TRAP0,x1:JUDGE1,y:UPY},
+  // 十王阶(上行台阶)
+  {x0:5250,x1:5450,y:UPY-90},{x0:5450,x1:5650,y:UPY-180},{x0:5650,x1:5850,y:UPY-270},
+  {x0:5850,x1:6050,y:UPY-360},{x0:6050,x1:6250,y:UPY-450},{x0:6250,x1:6450,y:UPY-560},
+  // 阎罗殿
+  {x0:PAL0,x1:PAL1+60,y:PALY},
+];
+// 藏身柜(潜行掩体)
+const HIDES=[{x0:1900,x1:2010,y:800},{x0:2240,x1:2350,y:620},{x0:1900,x1:2010,y:440},
+  {x0:2240,x1:2350,y:260},{x0:1900,x1:2010,y:80},{x0:2240,x1:2350,y:-460},{x0:1900,x1:2010,y:-640}];
+// 巡逻文书吏(灯笼光锥)
+const CLERKS=[{x:2130,y:560,ph:0},{x:2130,y:20,ph:2},{x:2130,y:-520,ph:4},{x:2130,y:-1060,ph:1}];
+// 刑堂机关
+const SPIKES=[];for(let x=2560;x<3080;x+=130)SPIKES.push({x,ph:(x/130)%3});
+const FIRES=[{x0:3200,x1:3760}];
+const BOARDS=[3270,3430,3590,3720];
+const ICE={x0:3820,x1:4360};
+// 判官
+const JD={x:4950,hp:12,st:'idle',t:1.6,hit:0,dead:0,ch:'',cw:0,dir:-1};
+const swords=[];const cages=[];const slashes=[];
+// 阎王
+const YM={x:7350,hp:60,st:'off',t:0,hit:0,dead:0,ph:1,gavT:3,bookT:6,fistT:2,
+  intro:0,introT:0,rumble:0};
+const shocks=[];const words=[];const inks=[];const fists=[];
+let deadTalk=0;
+
+// ── 玩家 ──
+const P={x:120,y:GY1,vx:0,vy:0,dir:1,onG:1,jumps:0,hp:3,inv:0,atkT:0,dead:0,win:0};
+let camX=0,camY=0,coins=0,GOD=1,shake=0,T=0,slow=0,lock=0;
+let msg='',msgT=0;
+const FLAGS={hall:0,tower:0,page:0,trap:0,judge:0,stair:0,pal:0};
+function msgQ(t,d){msg=t;msgT=d||2.6;}
+const keys={};
+onkeydown=e=>{keys[e.code]=1;
+  if(['Space','KeyW'].includes(e.code)){e.preventDefault();jump();}
+  if(e.code==='KeyJ')atk();
+  if(e.code==='KeyG')GOD=!GOD;};
+onkeyup=e=>keys[e.code]=0;
+let touchL={on:0,x:0};
+cv.addEventListener('touchstart',ev=>{const r=cv.getBoundingClientRect();
+  for(const t of ev.changedTouches){const x=(t.clientX-r.left)/r.width*W,y=(t.clientY-r.top)/r.height*H;
+    if(x<W/2&&y>H*0.5){touchL={on:1,x,id:t.identifier};}
+    else if(x>W*0.72&&y>H*0.72)atk();
+    else jump();}
+  if(P.dead||P.win)restart();ev.preventDefault();},{passive:false});
+cv.addEventListener('touchmove',ev=>{const r=cv.getBoundingClientRect();
+  for(const t of ev.changedTouches){if(touchL.on&&t.identifier===touchL.id)touchL.x=(t.clientX-r.left)/r.width*W;}
+  ev.preventDefault();},{passive:false});
+cv.addEventListener('touchend',ev=>{for(const t of ev.changedTouches)if(t.identifier===touchL.id)touchL.on=0;
+  ev.preventDefault();},{passive:false});
+
+function jump(){
+  if(P.dead||P.win){restart();return;}
+  if(lock>0)return;
+  if(P.onG){P.vy=-620;P.onG=0;P.jumps=1;}
+  else if(P.jumps<2){P.vy=-620;P.jumps++;}
+}
+function atk(){
+  if(P.dead||P.win){restart();return;}
+  if(lock>0)return;
+  if(P.atkT<=0)P.atkT=0.26;
+}
+function restart(){
+  if(!P.dead&&!P.win)return;
+  P.dead=0;P.win=0;P.hp=3;P.vx=0;P.vy=0;P.atkT=0;
+  if(P.x>PAL0){P.x=PAL0+100;P.y=PALY;
+    if(!YM.dead){YM.hp=60;YM.ph=1;YM.st='fight';YM.gavT=3;YM.bookT=6;YM.rumble=0;
+      shocks.length=0;words.length=0;inks.length=0;fists.length=0;}
+  } else if(P.x>JUDGE0){P.x=JUDGE0+80;P.y=UPY;
+    if(!JD.dead){JD.hp=12;JD.st='idle';JD.t=1.6;swords.length=0;cages.length=0;slashes.length=0;}
+  } else if(P.x>TRAP0&&P.y<0){P.x=TRAP0+40;P.y=UPY;}
+  else {P.x=120;P.y=GY1;}
+  P.onG=1;
+}
+function hurt(n){ if(GOD){shake=4;return;} if(P.inv>0||P.dead)return;
+  P.hp-=n;P.inv=1.3;shake=9; if(P.hp<=0){P.hp=0;P.dead=1;} }
+const parts=[];
+function spark(x,y,col,n,sp){for(let i=0;i<n;i++){const a=Math.random()*6.283;
+  parts.push({x,y,vx:Math.cos(a)*sp*100,vy:Math.sin(a)*sp*100,life:0,max:0.5+Math.random()*0.3,col});}}
+const inHide=()=>HIDES.some(h=>P.x>h.x0&&P.x<h.x1&&Math.abs(P.y-h.y)<10);
+
+function step(dt){
+  T+=dt;
+  if(msgT>0)msgT-=dt;
+  if(P.inv>0)P.inv-=dt;
+  if(P.atkT>0)P.atkT-=dt;
+  if(shake>0)shake=Math.max(0,shake-dt*30);
+  if(lock>0)lock-=dt;
+  if(P.dead||P.win)return;
+
+  const mv=lock>0?0:((keys.KeyD||keys.ArrowRight?1:0)-(keys.KeyA||keys.ArrowLeft?1:0)
+    ||(touchL.on?Math.sign(touchL.x-(W/4)):0));
+  if(mv)P.dir=mv;
+
+  // 移动(寒冰段带惯性)
+  const onIce=P.x>ICE.x0&&P.x<ICE.x1&&Math.abs(P.y-UPY)<8;
+  if(onIce)P.vx+=(mv*280-P.vx)*Math.min(1,dt*1.6);
+  else P.vx=mv*250;
+  P.x+=P.vx*dt;
+  P.vy+=1500*dt;
+  const py0=P.y;
+  P.y+=P.vy*dt;
+  P.x=Math.max(40,Math.min(END-40,P.x));
+  // 塔井壁
+  if(P.y<GY1-60&&P.y>UPY+40&&P.x<TWX1+40)P.x=Math.max(TWX0+16,Math.min(TWX1-16,P.x));
+  // 判官门禁
+  if(!JD.dead&&P.x>JUDGE1-60)P.x=Math.min(P.x,JUDGE1-60);
+  // 阎王殿门禁
+  if(!YM.dead&&YM.st!=='off'&&P.x>PAL1-80)P.x=Math.min(P.x,PAL1-80);
+  P.onG=0;
+  if(P.vy>=0)for(const gr of grounds){
+    if(P.x>gr.x0-8&&P.x<gr.x1+8&&py0<=gr.y+4&&P.y>=gr.y){
+      P.y=gr.y;P.vy=0;P.onG=1;P.jumps=0;break;}
+  }
+  // 掉出塔井回底
+  if(P.y>GY1+200){P.y=GY1;P.vy=0;}
+
+  // 阶段提示
+  if(!FLAGS.hall&&P.x>300){FLAGS.hall=1;msgQ('阎罗殿大堂…文书鬼吏埋头造册');}
+  if(!FLAGS.tower&&P.x>TWX0&&P.y>GY1-80){FLAGS.tower=1;msgQ('生死簿档案塔——躲开灯笼的光,书柜后能藏身');}
+  if(!FLAGS.page&&P.y<-500&&P.y>-700&&P.x<2100){FLAGS.page=1;coins+=5;
+    msgQ('翻到空城那页生死簿…名字全被朱笔划了。不是寿数,是人改的!',3.6);}
+  if(!FLAGS.trap&&P.x>TRAP0+80&&P.y<0){FLAGS.trap=1;msgQ('刑堂——刀山/油锅/寒冰,借过一下');}
+  if(!FLAGS.judge&&P.x>JUDGE0+100&&P.y<0){FLAGS.judge=1;JD.st='idle';msgQ('判官:"嗯?候审的怎么上来了!"');}
+  if(!FLAGS.stair&&P.x>STAIR0+100){FLAGS.stair=1;msgQ('十王阶…十殿阎罗俯视着你');}
+  if(!FLAGS.pal&&P.x>PAL0+200){FLAGS.pal=1;YM.st='intro';YM.introT=0;lock=6.4;}
+
+  // ── 潜行:灯笼光锥 ──
+  if(P.x>TWX0&&P.x<TWX1+40&&P.y<GY1-40&&P.y>UPY+20){
+    for(const c of CLERKS){
+      const a0=Math.sin(T*0.8+c.ph)*0.9;         // 光锥摆动
+      const dx2=P.x-c.x, dy2=(P.y-40)-c.y;
+      const d=Math.hypot(dx2,dy2);
+      if(d<300&&!inHide()){
+        const ang=Math.atan2(dy2,dx2);
+        const target=Math.PI/2+a0;                // 朝下摆
+        let diff=Math.abs(ang-target);
+        if(diff>Math.PI)diff=Math.PI*2-diff;
+        if(diff<0.42){
+          if(GOD){shake=3;if(msgT<=0)msgQ('(无敌:灯照到了,不押回)');}
+          else{P.x=TWX0+60;P.y=GY1;P.vy=0;shake=7;msgQ('被文书吏的灯照到了!押回楼下…');}
+          break;
+        }
+      }
+    }
+  }
+  // ── 刑堂机关 ──
+  for(const sp of SPIKES){
+    const up=(Math.sin(T*2.2+sp.ph*2.1)>0.3);
+    if(up&&Math.abs(P.x-sp.x)<26&&Math.abs(P.y-UPY)<8)hurt(1);
+  }
+  for(const f of FIRES){
+    const hot=(Math.sin(T*1.4)>-0.2);
+    if(hot&&P.x>f.x0&&P.x<f.x1&&Math.abs(P.y-UPY)<8){
+      const onBoard=BOARDS.some(b=>Math.abs(P.x-b)<44);
+      if(!onBoard)hurt(1);
+    }
+  }
+  // ── 判官 ──
+  if(FLAGS.judge&&!JD.dead){
+    JD.t-=dt;if(JD.hit>0)JD.hit-=dt;
+    JD.dir=Math.sign(P.x-JD.x)||-1;
+    if(JD.st==='idle'){
+      if(JD.t<=0){
+        const r=Math.random();
+        JD.ch=r<0.4?'追':r<0.7?'困':'斩';
+        JD.st='write';JD.cw=0;JD.t=0.95;
+      }
+    } else if(JD.st==='write'){
+      JD.cw=1-JD.t/0.95;
+      if(JD.t<=0){
+        if(JD.ch==='追'){for(let k=0;k<3;k++)swords.push({x:JD.x,y:UPY-160,t:-k*0.25});}
+        else if(JD.ch==='困'){cages.push({x:P.x,y:UPY,t:0});}
+        else {slashes.push({x:P.x,t:0});}
+        JD.st='idle';JD.t=2.0+Math.random();
+      }
+    }
+    // 打断/命中
+    if(P.atkT>0.1&&Math.abs(P.x+P.dir*70-JD.x)<110&&Math.abs(P.y-UPY)<100){
+      JD.hp--;JD.hit=0.18;P.atkT=0.08;shake=5;spark(JD.x,UPY-90,'#ffd7d0',10,1.5);
+      if(JD.st==='write'){JD.st='idle';JD.t=1.6;msgQ('打断了他的笔!');}
+      if(JD.hp<=0){JD.dead=1;spark(JD.x,UPY-80,'#e8dcf8',20,2);
+        msgQ('判官摆手认输:"上面那位…也是身不由己。"',3.4);}
+    }
+  }
+  for(let i=swords.length-1;i>=0;i--){const sw=swords[i];
+    sw.t+=dt;if(sw.t<0)continue;
+    const a=Math.atan2((P.y-40)-sw.y,P.x-sw.x);
+    sw.x+=Math.cos(a)*300*dt;sw.y+=Math.sin(a)*300*dt;
+    if(Math.hypot(P.x-sw.x,P.y-40-sw.y)<30){hurt(1);swords.splice(i,1);continue;}
+    if(sw.t>3.4)swords.splice(i,1);}
+  for(let i=cages.length-1;i>=0;i--){const cg=cages[i];
+    cg.t+=dt;
+    if(cg.t>0.6&&cg.t<2.4&&Math.abs(P.x-cg.x)<80&&Math.abs(P.y-cg.y)<20)hurt(1);
+    if(cg.t>2.4)cages.splice(i,1);}
+  for(let i=slashes.length-1;i>=0;i--){const sl=slashes[i];
+    sl.t+=dt;
+    if(sl.t>0.5&&sl.t<0.72&&Math.abs(P.x-sl.x)<50)hurt(1);
+    if(sl.t>1.1)slashes.splice(i,1);}
+
+  // ── 阎王 ──
+  if(YM.st==='intro'){
+    YM.introT+=dt;
+    if(YM.introT>6.2){YM.st='fight';msgQ('阎王:"…你的名字,不在簿上。"',3);}
+  } else if(YM.st==='fight'&&!YM.dead){
+    if(YM.hit>0)YM.hit-=dt;
+    YM.ph=YM.hp>40?1:YM.hp>20?2:3;
+    YM.rumble=YM.ph===3?1:0;
+    // 惊堂木(全程)
+    YM.gavT-=dt;
+    if(YM.gavT<=0){
+      YM.gavT=YM.ph===1?4:YM.ph===2?3.4:2.8;
+      shocks.push({x:YM.x-260,dir:-1},{x:YM.x-180,dir:1});
+      shake=13;
+      spark(YM.x-220,PALY,'#e8d8b0',16,2);
+    }
+    // 判词飞袭
+    if(Math.random()<dt*(YM.ph===1?0.5:0.3)){
+      words.push({x:PAL1+60,y:PALY-90-Math.random()*220,ch:['罪','收','斩','押'][Math.random()*4|0],v:260+Math.random()*120});
+    }
+    // P2 字兵
+    if(YM.ph>=2){
+      YM.bookT-=dt;
+      if(YM.bookT<=0){YM.bookT=5;inks.push({x:YM.x-140,hp:2,hit:0},{x:YM.x-220,hp:2,hit:0});
+        msgQ('生死簿翻页——字兵出!');}
+    }
+    // P3 巨拳
+    if(YM.ph===3){
+      YM.fistT-=dt;
+      if(YM.fistT<=0){YM.fistT=3.2;fists.push({x:Math.max(PAL0+140,Math.min(PAL1-140,P.x)),t:0});}
+    }
+    // 玩家打本体(P1/P2)或拳头(P3)
+    if(P.atkT>0.1){
+      if(YM.ph<3&&Math.abs(P.x+P.dir*70-(YM.x-160))<140&&P.y>PALY-160){
+        YM.hp--;YM.hit=0.15;P.atkT=0.08;shake=5;spark(YM.x-180,PALY-120,'#ffd7d0',10,1.6);
+      }
+      for(const f of fists){
+        if(f.t>0.9&&f.t<2.2&&Math.abs(P.x+P.dir*70-f.x)<120){
+          YM.hp-=2;YM.hit=0.15;P.atkT=0.08;shake=7;spark(f.x,PALY-60,'#ffe9b0',12,1.8);
+        }
+      }
+      if(YM.hp<=0&&!YM.dead){YM.dead=1;slow=1.6;shake=16;deadTalk=0;
+        shocks.length=0;words.length=0;fists.length=0;inks.length=0;}
+    }
+  } else if(YM.dead){
+    deadTalk+=dt;
+    if(deadTalk>1&&deadTalk<1.1)msgQ('阎王收了怒相:"生死簿…是天庭改的。"',3.4);
+    if(deadTalk>4.6&&deadTalk<4.7)msgQ('"要讨公道——上天去吧。"',3.4);
+    if(P.x>YM.x-40&&deadTalk>5)P.win=1;   // 走进光柱
+  }
+  // 冲击波
+  for(let i=shocks.length-1;i>=0;i--){const sk=shocks[i];
+    sk.x+=sk.dir*440*dt;
+    if(P.onG&&Math.abs(P.x-sk.x)<32&&Math.abs(P.y-PALY)<10)hurt(1);
+    if(sk.x<PAL0-60||sk.x>PAL1+60)shocks.splice(i,1);}
+  // 判词
+  for(let i=words.length-1;i>=0;i--){const wd=words[i];
+    wd.x-=wd.v*dt;
+    if(Math.abs(P.x-wd.x)<34&&Math.abs((P.y-46)-wd.y)<40){hurt(1);words.splice(i,1);continue;}
+    if(wd.x<PAL0-80)words.splice(i,1);}
+  // 字兵
+  for(let i=inks.length-1;i>=0;i--){const ik=inks[i];
+    if(ik.hit>0)ik.hit-=dt;
+    ik.x+=Math.sign(P.x-ik.x)*90*dt;
+    if(Math.abs(P.x-ik.x)<34&&Math.abs(P.y-PALY)<20)hurt(1);
+    if(P.atkT>0.1&&Math.abs(P.x+P.dir*60-ik.x)<70){
+      ik.hp--;ik.hit=0.15;P.atkT=0.08;spark(ik.x,PALY-40,'#cfd0e8',8,1.3);
+      if(ik.hp<=0){inks.splice(i,1);coins+=2;continue;}
+    }
+  }
+  // 巨拳
+  for(let i=fists.length-1;i>=0;i--){const f=fists[i];
+    f.t+=dt;
+    if(f.t>0.75&&f.t<0.85&&P.onG&&Math.abs(P.x-f.x)<130)hurt(1);
+    if(f.t>0.78&&f.t<0.83&&!f.shk){f.shk=1;shake=15;
+      shocks.push({x:f.x-60,dir:-1},{x:f.x+60,dir:1});}
+    if(f.t>2.4)fists.splice(i,1);}
+
+  // 相机
+  camX+=((P.x-W*0.42)-camX)*Math.min(1,dt*5);
+  camX=Math.max(0,Math.min(END-W,camX));
+  const cyT=P.y-H*0.62;
+  camY+=(cyT-camY)*Math.min(1,dt*5);
+
+  for(let i=parts.length-1;i>=0;i--){const p=parts[i];p.life+=dt;
+    if(p.life>p.max){parts.splice(i,1);continue;}
+    p.x+=p.vx*dt;p.y+=p.vy*dt;}
+}
+
+const sx=wx=>wx-camX;
+const sy=wy=>wy-camY;
+
+function drawYama(){
+  // 阎王:顶天立地,画面装不下——坐时头顶出屏,P3站起只见躯干和拳
+  const bx=sx(YM.x), gy=sy(PALY);
+  const rise=YM.ph===3?220:0;
+  const bob=Math.sin(T*0.8)*8;
+  const hk=YM.hit>0;
+  g.save();g.translate(bx,gy+bob*0.3-rise);
+  // 帝座(P3碎裂)
+  if(YM.ph<3&&!YM.dead){
+    g.fillStyle='#2a1a22';g.fillRect(-300,-560,600,560);
+    g.fillStyle='#3a2430';g.fillRect(-260,-620,520,70);
+    g.fillStyle='#c8a24a';g.fillRect(-260,-624,520,10);
+  } else {
+    g.fillStyle='#241620';
+    g.beginPath();g.moveTo(-300,0);g.lineTo(-260,-320);g.lineTo(-150,-180);g.lineTo(-40,-380);g.lineTo(-300,-560);g.lineTo(-320,0);g.fill();
+  }
+  // 身体(暗红官袍,金纹)
+  g.fillStyle=hk?'#ffd8d0':'#5e1e26';
+  g.beginPath();
+  g.moveTo(-260,0);
+  g.quadraticCurveTo(-300,-500,-170,-700);
+  g.lineTo(170,-700);
+  g.quadraticCurveTo(300,-500,260,0);
+  g.fill();
+  g.fillStyle='#c8a24a';
+  g.fillRect(-190,-460,380,16);
+  g.beginPath();g.moveTo(-40,-700);g.lineTo(-90,0);g.lineTo(-58,0);g.lineTo(-8,-700);g.fill();
+  g.beginPath();g.moveTo(40,-700);g.lineTo(90,0);g.lineTo(58,0);g.lineTo(8,-700);g.fill();
+  // 玉圭(抱在胸前)
+  g.fillStyle='#e8dcc8';
+  g.save();g.rotate(-0.06);g.fillRect(-30,-560,60,150);g.restore();
+  // 头(巨脸,一大一小怒目)
+  g.fillStyle=hk?'#ffe0d8':'#e8b088';
+  g.beginPath();g.ellipse(0,-810,150,130,0,0,7);g.fill();
+  // 冕冠+旒珠
+  g.fillStyle='#1c1420';g.fillRect(-170,-940,340,60);
+  g.fillStyle='#c8a24a';g.fillRect(-170,-946,340,8);
+  for(let k=0;k<7;k++){
+    const lx=-150+k*50, swy=Math.sin(T*1.6+k)*6;
+    g.strokeStyle='#c8a24a';g.lineWidth=3;
+    g.beginPath();g.moveTo(lx,-880);g.lineTo(lx+swy,-800);g.stroke();
+    g.fillStyle='#e8d8a0';g.beginPath();g.arc(lx+swy,-796,6,0,7);g.fill();
+  }
+  // 眉眼(凶而憨:一大一小)
+  g.fillStyle='#3a1418';
+  g.beginPath();g.ellipse(-60,-856,44,16,-0.3,0,7);g.fill();
+  g.beginPath();g.ellipse(62,-852,38,14,0.32,0,7);g.fill();
+  g.fillStyle='#fff';
+  g.beginPath();g.arc(-58,-820,30,0,7);g.fill();
+  g.beginPath();g.arc(60,-816,22,0,7);g.fill();
+  const ea=Math.atan2((sy(P.y)-40)-(gy-810),sx(P.x)-bx);
+  g.fillStyle=YM.ph===3?'#d83030':'#241418';
+  g.beginPath();g.arc(-58+Math.cos(ea)*10,-820+Math.sin(ea)*10,13,0,7);g.fill();
+  g.beginPath();g.arc(60+Math.cos(ea)*8,-816+Math.sin(ea)*8,9,0,7);g.fill();
+  // 胡子+嘴
+  g.strokeStyle='#241418';g.lineWidth=6;
+  g.beginPath();g.moveTo(-40,-742);g.quadraticCurveTo(0,-716,40,-742);g.stroke();
+  g.fillStyle='#241418';
+  g.beginPath();g.moveTo(-70,-730);g.quadraticCurveTo(-90,-660,-60,-620);g.lineTo(-48,-700);g.fill();
+  g.beginPath();g.moveTo(70,-730);g.quadraticCurveTo(90,-660,60,-620);g.lineTo(48,-700);g.fill();
+  // 左手+惊堂木(击案预兆:抬起)
+  const gav=YM.gavT<0.8&&YM.st==='fight'&&!YM.dead?(0.8-YM.gavT)/0.8:0;
+  g.save();g.translate(-230,-420-gav*140);g.rotate(-0.2-gav*0.5);
+  g.fillStyle='#e8b088';g.beginPath();g.arc(0,0,44,0,7);g.fill();
+  g.fillStyle='#5a3a26';g.fillRect(-14,-90,28,90);
+  g.fillStyle='#7a5236';g.fillRect(-40,-120,80,36);
+  g.restore();
+  g.restore();
+}
+
+function draw(){
+  g.save();
+  const rmb=YM.rumble?Math.sin(T*30)*3:0;
+  if(shake>0||rmb)g.translate((Math.random()-0.5)*shake+rmb,(Math.random()-0.5)*shake);
+  // 底色
+  const sky=g.createLinearGradient(0,0,0,H);
+  sky.addColorStop(0,'#120e1a');sky.addColorStop(1,'#1e1626');
+  g.fillStyle=sky;g.fillRect(0,0,W,H);
+  // 大殿柱列(视差)
+  for(let i=0;i<10;i++){
+    const px2=((i*520-camX*0.5)%(W+800)+(W+800))%(W+800)-400;
+    g.fillStyle='rgba(42,26,38,0.9)';
+    g.fillRect(px2,-200,64,H+400);
+    g.fillStyle='rgba(200,162,74,0.25)';
+    g.fillRect(px2,-200,64,8);
+  }
+  // 烛火(散布)
+  for(let i=0;i<8;i++){
+    const cx3=((i*340-camX*0.8)%(W+300)+(W+300))%(W+300)-150;
+    const cy3=200+((i*173)%700)-camY*0.1%40;
+    const gl=0.4+0.3*Math.sin(T*3+i*2);
+    g.fillStyle=`rgba(255,178,92,${gl*0.5})`;
+    g.beginPath();g.arc(cx3,cy3,4,0,7);g.fill();
+  }
+
+  // 档案塔内壁+书墙背景
+  {
+    const x0=sx(TWX0-50),x1=sx(TWX1+50);
+    const yT=sy(UPY-60), yB=sy(GY1+60);
+    if(!(x1<0||x0>W||yB<0||yT>H)){
+      const t0=Math.max(-40,yT), t1=Math.min(H+40,yB);
+      g.fillStyle='#251a29';
+      g.fillRect(x0,t0,x1-x0,t1-t0);
+      g.fillStyle='#2f2134';
+      g.fillRect(x0,t0,26,t1-t0);g.fillRect(x1-26,t0,26,t1-t0);
+      // 背景书架横排+彩书脊
+      for(let wy=Math.floor((camY-100)/150)*150;wy<camY+H+150;wy+=150){
+        if(wy>GY1-60||wy<UPY+40)continue;
+        const yy=sy(wy);
+        g.fillStyle='rgba(70,50,62,0.9)';g.fillRect(x0+30,yy,x1-x0-60,9);
+        for(let bx2=x0+40;bx2<x1-52;bx2+=23){
+          const ci=(((bx2+wy*0.7)|0)%4+4)%4;
+          g.fillStyle=['rgba(158,96,96,0.55)','rgba(96,116,150,0.55)','rgba(150,128,86,0.55)','rgba(110,88,130,0.55)'][ci];
+          g.fillRect(bx2,yy-36,15,36);
+        }
+      }
+    }
+  }
+  // 地面/平台
+  for(const gr of grounds){
+    const x0=sx(gr.x0),x1=sx(gr.x1),yy=sy(gr.y);
+    if(x1<-40||x0>W+40||yy<-80||yy>H+120)continue;
+    const shelf=gr.y<GY1-40&&gr.y>UPY+20&&gr.x0>=1860;
+    g.fillStyle=shelf?'#6a4e42':'#2a1e2c';
+    g.fillRect(x0,yy,x1-x0,shelf?18:(gr.y===GY1||gr.y===UPY||gr.y===PALY?H:14));
+    g.fillStyle=shelf?'#8a6a52':'#3a2a3a';
+    g.fillRect(x0,yy,x1-x0,7);
+    if(shelf){ // 架上的书(亮彩书脊)
+      for(let x=x0+10;x<x1-14;x+=24){
+        const ci=((((x+gr.y)|0)%4)+4)%4;
+        g.fillStyle=['#b06a6a','#6a84b0','#b09a5e','#8a6aa0'][ci];
+        g.fillRect(x,yy-30,16,28);
+      }
+    }
+  }
+  // 藏身柜
+  for(const hd2 of HIDES){
+    const x0=sx(hd2.x0),yy=sy(hd2.y);
+    if(x0<-140||x0>W+140)continue;
+    g.fillStyle='#241a28';
+    g.fillRect(x0,yy-120,hd2.x1-hd2.x0,120);
+    g.strokeStyle='#c8a24a';g.lineWidth=2;
+    g.strokeRect(x0+8,yy-110,hd2.x1-hd2.x0-16,100);
+  }
+  // 文书吏+光锥
+  for(const c of CLERKS){
+    const cx3=sx(c.x),cy3=sy(c.y);
+    if(cy3<-200||cy3>H+200)continue;
+    const a0=Math.sin(T*0.8+c.ph)*0.9;
+    // 光锥
+    const target=Math.PI/2+a0;
+    g.fillStyle='rgba(255,200,110,0.16)';
+    g.beginPath();g.moveTo(cx3,cy3);
+    g.arc(cx3,cy3,300,target-0.42,target+0.42);g.fill();
+    // 鬼吏
+    const bob=Math.sin(T*2+c.ph)*4;
+    g.fillStyle='rgba(230,232,244,0.9)';
+    g.beginPath();g.arc(cx3,cy3-20+bob,18,Math.PI,0);
+    g.quadraticCurveTo(cx3+18,cy3+8+bob,cx3+10,cy3+12+bob);
+    g.quadraticCurveTo(cx3,cy3+2+bob,cx3-10,cy3+12+bob);
+    g.quadraticCurveTo(cx3-18,cy3+8+bob,cx3-18,cy3-20+bob);g.fill();
+    g.fillStyle='#222';
+    g.beginPath();g.arc(cx3-6,cy3-22+bob,2.4,0,7);g.arc(cx3+6,cy3-22+bob,2.4,0,7);g.fill();
+    g.fillStyle=`rgba(255,178,92,${0.7+0.2*Math.sin(T*4+c.ph)})`;
+    g.beginPath();g.ellipse(cx3,cy3+6+bob,7,9,0,0,7);g.fill();
+  }
+  // 刑堂机关
+  for(const sp2 of SPIKES){
+    const px2=sx(sp2.x),yy=sy(UPY);
+    if(px2<-40||px2>W+40)continue;
+    const up=(Math.sin(T*2.2+sp2.ph*2.1)>0.3);
+    const hgt=up?54:10;
+    g.fillStyle='#8a8ca0';
+    g.beginPath();g.moveTo(px2-20,yy);g.lineTo(px2,yy-hgt);g.lineTo(px2+20,yy);g.fill();
+  }
+  for(const f of FIRES){
+    const x0=sx(f.x0),x1=sx(f.x1),yy=sy(UPY);
+    if(x1<-40||x0>W+40)continue;
+    const hot=(Math.sin(T*1.4)>-0.2);
+    g.fillStyle='#1a1016';g.fillRect(x0,yy,x1-x0,40);
+    g.fillStyle=hot?'rgba(255,120,50,0.85)':'rgba(180,80,40,0.4)';
+    g.beginPath();
+    for(let x=x0;x<=x1;x+=20)g.lineTo(x,yy+(hot?-14:4)+Math.sin(x*0.1+T*8)*(hot?12:3));
+    g.lineTo(x1,yy+40);g.lineTo(x0,yy+40);g.fill();
+    for(const b of BOARDS){
+      const bx2=sx(b);
+      g.fillStyle='#5a4232';g.fillRect(bx2-44,yy-8,88,12);
+    }
+  }
+  {
+    const x0=sx(ICE.x0),x1=sx(ICE.x1),yy=sy(UPY);
+    if(!(x1<-40||x0>W+40)){
+      g.fillStyle='rgba(150,210,240,0.35)';g.fillRect(x0,yy,x1-x0,10);
+      g.fillStyle='rgba(220,240,255,0.5)';g.fillRect(x0,yy,x1-x0,4);
+    }
+  }
+  // 判官
+  if(!JD.dead||true){
+    const jx=sx(JD.x),jy=sy(UPY);
+    if(jx>-200&&jx<W+200&&!JD.dead){
+      const hk=JD.hit>0;
+      g.save();g.translate(jx,jy);
+      g.fillStyle=hk?'#ffd8d0':'#2c3a2c';
+      g.fillRect(-40,-150,80,150);
+      g.fillStyle='#e8b088';g.beginPath();g.arc(0,-176,30,0,7);g.fill();
+      g.fillStyle='#1c1420';g.fillRect(-34,-224,68,42);
+      g.fillStyle='#fff';g.beginPath();g.arc(-10,-180,8,0,7);g.arc(12,-178,6,0,7);g.fill();
+      g.fillStyle='#222';g.beginPath();g.arc(-9,-180,3.4,0,7);g.arc(13,-178,2.8,0,7);g.fill();
+      g.strokeStyle='#241418';g.lineWidth=4;
+      g.beginPath();g.moveTo(-14,-156);g.quadraticCurveTo(0,-148,14,-156);g.stroke();
+      // 大笔
+      g.save();g.translate(JD.dir*54,-120);g.rotate(JD.dir*(JD.st==='write'?-0.9+Math.sin(T*18)*0.12:-0.4));
+      g.fillStyle='#5a3a26';g.fillRect(-7,-90,14,90);
+      g.fillStyle='#241418';g.beginPath();g.moveTo(-9,0);g.lineTo(9,0);g.lineTo(0,26);g.fill();
+      g.restore();
+      g.restore();
+      // 写字预警
+      if(JD.st==='write'){
+        g.fillStyle=`rgba(216,60,60,${0.5+0.3*Math.sin(T*14)})`;
+        g.font='64px serif';g.textAlign='center';
+        g.fillText(JD.ch,jx,jy-280);
+        g.textAlign='left';
+        g.strokeStyle='rgba(216,60,60,0.7)';g.lineWidth=4;
+        g.beginPath();g.arc(jx,jy-300,52,-Math.PI/2,-Math.PI/2+6.283*JD.cw);g.stroke();
+      }
+      g.fillStyle='#2a2436';g.fillRect(jx-50,jy-330,100,8);
+      g.fillStyle='#d85a4a';g.fillRect(jx-50,jy-330,100*JD.hp/12,8);
+    }
+  }
+  // 飞剑/困圈/斩痕
+  for(const sw of swords){
+    if(sw.t<0)continue;
+    const px2=sx(sw.x),py2=sy(sw.y);
+    g.save();g.translate(px2,py2);
+    g.rotate(Math.atan2((sy(P.y)-40)-py2,sx(P.x)-px2));
+    g.fillStyle='#cfd0e8';g.fillRect(-20,-3,34,6);
+    g.fillStyle='#8a8ca8';g.beginPath();g.moveTo(14,-6);g.lineTo(30,0);g.lineTo(14,6);g.fill();
+    g.restore();
+  }
+  for(const cg of cages){
+    const px2=sx(cg.x),py2=sy(cg.y);
+    const al=cg.t<0.6?0.35:0.8;
+    g.strokeStyle=`rgba(216,60,60,${al})`;g.lineWidth=5;
+    for(let k=-2;k<=2;k++){g.beginPath();g.moveTo(px2+k*32,py2);g.lineTo(px2+k*32,py2-130);g.stroke();}
+    g.font='40px serif';g.fillStyle=`rgba(216,60,60,${al})`;
+    g.textAlign='center';g.fillText('困',px2,py2-150);g.textAlign='left';
+  }
+  for(const sl of slashes){
+    const px2=sx(sl.x);
+    const al=sl.t<0.5?0.3+0.3*Math.sin(T*16):0.85;
+    g.fillStyle=`rgba(30,24,40,${al})`;
+    if(sl.t>=0.5)g.fillRect(px2-46,0,92,H);
+    else {g.strokeStyle=`rgba(216,60,60,${al})`;g.lineWidth=3;g.strokeRect(px2-46,0,92,H);}
+  }
+  // 十王阶巨像
+  if(camX>STAIR0-W&&camX<STAIR1+400){
+    for(let k=0;k<5;k++){
+      const gx2=sx(5350+k*230), gy2=sy(UPY-120-k*90);
+      g.fillStyle='rgba(34,22,36,0.95)';
+      g.fillRect(gx2-46,gy2-330,92,330);
+      g.beginPath();g.arc(gx2,gy2-350,40,0,7);g.fill();
+      g.fillStyle=`rgba(216,60,60,${0.3+0.2*Math.sin(T*2+k)})`;
+      g.beginPath();g.arc(gx2-12,gy2-354,5,0,7);g.arc(gx2+12,gy2-354,5,0,7);g.fill();
+    }
+  }
+  // 阎罗殿:阎王
+  if(YM.st!=='off'&&camX>PAL0-W){
+    if(YM.st==='intro'){
+      const it=YM.introT;
+      // 逐对点烛
+      for(let k=0;k<6;k++){
+        if(it>k*0.5){
+          const lx=sx(PAL0+160+k*300), ly=sy(PALY)-240;
+          const gl=0.5+0.3*Math.sin(T*4+k);
+          g.fillStyle=`rgba(255,178,92,${gl})`;
+          g.beginPath();g.arc(lx,ly,6,0,7);g.fill();
+          g.fillStyle=`rgba(255,178,92,${gl*0.2})`;
+          g.beginPath();g.arc(lx,ly,26,0,7);g.fill();
+        }
+      }
+      if(it>3.2){
+        // 黑暗中先睁眼
+        const bx=sx(YM.x), gy2=sy(PALY);
+        const op=Math.min(1,(it-3.2)/0.8);
+        g.fillStyle=`rgba(216,40,40,${op})`;
+        g.beginPath();g.arc(bx-58,gy2-820,26,0,7);g.fill();
+        g.beginPath();g.arc(bx+60,gy2-816,19,0,7);g.fill();
+      }
+      if(it>4.6){
+        g.globalAlpha=Math.min(1,(it-4.6)/1.2);
+        drawYama();
+        g.globalAlpha=1;
+      }
+      if(it>5.6&&it<5.8){shake=16;}
+      // 黑幕渐开
+      g.fillStyle=`rgba(6,4,10,${Math.max(0,0.9-it*0.2)})`;
+      g.fillRect(0,0,W,H);
+      // 电影黑边
+      g.fillStyle='rgba(4,3,8,0.95)';
+      g.fillRect(0,0,W,90);g.fillRect(0,H-90,W,90);
+    } else if(!YM.dead){
+      drawYama();
+      g.fillStyle='#2a2436';g.fillRect(W/2-190,120,380,14);
+      g.fillStyle='#d85a4a';g.fillRect(W/2-190,120,380*Math.max(0,YM.hp)/60,14);
+      g.fillStyle='#e8d8b0';g.font='20px serif';g.textAlign='center';
+      g.fillText(YM.ph===3?'阎 王 · 怒相(打他的拳!)':'阎 王',W/2,108);g.textAlign='left';
+    } else {
+      // 战败:垂首+光柱
+      drawYama();
+      const bx=sx(YM.x);
+      const op=Math.min(0.85,deadTalk*0.3);
+      g.fillStyle=`rgba(255,240,190,${op})`;
+      g.fillRect(bx-70,0,140,sy(PALY));
+      g.fillStyle=`rgba(255,240,190,${op*0.35})`;
+      g.fillRect(bx-130,0,260,sy(PALY));
+    }
+  }
+  // 冲击波/判词/字兵/巨拳
+  for(const sk of shocks){
+    const px2=sx(sk.x),yy=sy(PALY);
+    g.fillStyle='rgba(232,216,176,0.8)';
+    g.beginPath();g.moveTo(px2-18,yy);g.quadraticCurveTo(px2,yy-52,px2+18,yy);g.fill();
+  }
+  for(const wd of words){
+    const px2=sx(wd.x),py2=sy(wd.y);
+    g.fillStyle='rgba(216,60,60,0.9)';
+    g.font='52px serif';g.textAlign='center';
+    g.fillText(wd.ch,px2,py2);g.textAlign='left';
+  }
+  for(const ik of inks){
+    const px2=sx(ik.x),yy=sy(PALY);
+    g.fillStyle=ik.hit>0?'#ffd8d0':'#241826';
+    g.beginPath();g.arc(px2,yy-34,24,0,7);g.fill();
+    g.fillStyle='#fff';g.beginPath();g.arc(px2-8,yy-38,5,0,7);g.arc(px2+8,yy-38,5,0,7);g.fill();
+    g.fillStyle='#222';g.beginPath();g.arc(px2-7,yy-38,2.2,0,7);g.arc(px2+9,yy-38,2.2,0,7);g.fill();
+  }
+  for(const f of fists){
+    const px2=sx(f.x),yy=sy(PALY);
+    if(f.t<0.75){
+      g.strokeStyle=`rgba(216,60,60,${0.4+0.3*Math.sin(T*16)})`;g.lineWidth=4;
+      g.beginPath();g.ellipse(px2,yy-6,120,20,0,0,7);g.stroke();
+    } else if(f.t<2.2){
+      g.fillStyle=YM.hit>0?'#ffe0d8':'#e8b088';
+      g.beginPath();g.ellipse(px2,yy-70,110,80,0,0,7);g.fill();
+      g.fillStyle='#c89070';
+      for(let k=-1;k<=1;k++){g.beginPath();g.arc(px2+k*54,yy-130,26,0,7);g.fill();}
+      g.fillStyle='#c8a24a';g.fillRect(px2-110,yy-60,220,14);
+    }
+  }
+  // 主角
+  {
+    const px=sx(P.x), py=sy(P.y);
+    g.save();g.translate(px,py);
+    if(P.inv>0&&Math.sin(T*30)>0)g.globalAlpha=0.4;
+    g.fillStyle='#4a5a78';g.fillRect(-11,-42,22,28);
+    g.fillStyle='#f0c8a0';g.beginPath();g.arc(0,-60,18,0,7);g.fill();
+    g.fillStyle='#3a3444';g.beginPath();g.arc(0,-67,17,Math.PI,0);g.fill();
+    g.fillStyle='#222';g.beginPath();g.arc(P.dir*7,-60,2.4,0,7);g.fill();
+    if(P.atkT>0.1){g.strokeStyle='#e8e8f0';g.lineWidth=5;
+      g.beginPath();g.arc(P.dir*10,-40,36,-1.2*P.dir,0.6*P.dir,P.dir<0);g.stroke();}
+    if(inHide()){
+      g.strokeStyle='rgba(140,230,190,0.7)';g.lineWidth=2.5;
+      g.beginPath();g.arc(0,-46,32,0,7);g.stroke();
+    }
+    g.strokeStyle='#3a4258';g.lineWidth=5;
+    g.beginPath();g.moveTo(-5,-14);g.lineTo(-7,0);g.moveTo(5,-14);g.lineTo(7,0);g.stroke();
+    g.restore();
+  }
+  for(const p of parts){g.globalAlpha=1-p.life/p.max;g.fillStyle=p.col;
+    g.fillRect(sx(p.x)-3,sy(p.y)-3,6,6);}
+  g.globalAlpha=1;
+
+  // HUD
+  for(let i=0;i<3;i++){g.fillStyle=i<P.hp?'#e85a5a':'#443a4c';
+    g.beginPath();const hx=34+i*40,hy=36;
+    g.arc(hx-7,hy-4,9,0,7);g.arc(hx+7,hy-4,9,0,7);
+    g.moveTo(hx-15,hy);g.lineTo(hx,hy+16);g.lineTo(hx+15,hy);g.fill();}
+  g.fillStyle='#ffd76a';g.beginPath();g.arc(40,86,12,0,7);g.fill();
+  g.fillStyle='#fff';g.font='22px monospace';g.fillText('×'+coins,58,94);
+  if(GOD){g.fillStyle='rgba(150,230,180,0.9)';g.font='20px monospace';g.fillText('无敌 ON(按G关)',W-220,40);}
+  if(msgT>0){g.font='24px sans-serif';const w2=g.measureText(msg).width;
+    g.fillStyle='rgba(16,12,26,0.8)';g.fillRect(W/2-w2/2-20,150,w2+40,46);
+    g.fillStyle='#e8d8ff';g.textAlign='center';g.fillText(msg,W/2,181);g.textAlign='left';}
+  if(P.dead)ov('过不了这一堂…','按键从堂口再来');
+  if(P.win)ov('殿顶裂开了','一道光直通天上——第10关「飞升」 · 按键重玩');
+  g.restore();
+}
+function ov(t1,t2){
+  g.fillStyle='rgba(6,4,12,0.78)';g.fillRect(0,0,W,H);
+  g.fillStyle='#e8d8ff';g.font='52px sans-serif';g.textAlign='center';
+  g.fillText(t1,W/2,H/2-30);
+  g.fillStyle='#cfc6e6';g.font='24px sans-serif';g.fillText(t2,W/2,H/2+30);g.textAlign='left';
+}
+let last=0;
+function loop(ts){
+  let dt=Math.min(0.033,(ts-last)/1000||0.016);last=ts;
+  if(slow>0){slow-=dt;dt*=0.4;}
+  step(dt);draw();requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
