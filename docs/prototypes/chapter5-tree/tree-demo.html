@@ -265,11 +265,17 @@ function step(dt){
     }
     if(P.vy!==0)P.onG=0;
   }
-  // 摔落保护
+  // 摔落保护:只救"掉进虚空"(下方1600内没有任何可落平台才拉回);正常下行/下降段放行
   const cpY=cpIdx>=0?cps[cpIdx].y:0;
-  if(P.y<cpY-950&&P.mode==='walk'){
-    P.x=cpIdx>=0?cps[cpIdx].x:120;P.y=cpY;P.vy=0;
-    msgQ('摔下去了…回到萤火处');shake=6;
+  if(P.y<cpY-950&&P.mode==='walk'&&P.vy<-200){
+    let hasBelow=false;
+    for(const p of plats){
+      if(p.y<P.y-10&&p.y>P.y-1600&&Math.abs(P.x-p.x)<p.w/2+240){hasBelow=true;break;}
+    }
+    if(!hasBelow){
+      P.x=cpIdx>=0?cps[cpIdx].x:120;P.y=cpY;P.vy=0;
+      msgQ('下面是深渊…回到萤火处');shake=6;
+    }
   }
   // 抓藤
   if(P.mode==='walk'&&P.vineCd<=0){
