@@ -1,0 +1,696 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>渔港 Demo · 空港浪话(10分钟版)</title>
+<style>
+  html,body{margin:0;padding:0;background:#1a1626;height:100%;overflow:hidden;touch-action:none}
+  #wrap{display:flex;align-items:center;justify-content:center;height:100%}
+  canvas{background:#79c8f0;max-height:100vh;max-width:100vw}
+  #tip{position:fixed;left:10px;top:8px;color:#9bb;font:12px/1.6 monospace;pointer-events:none;white-space:pre}
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="cv" width="720" height="1280"></canvas></div>
+<div id="tip">A/D 移动 · W/空格 跳(二段) · S 下潜 · J 攻击/水中冲刺 · G 无敌开关(默认开)
+九段:渔村街→鱼市巷→栈道水路A→电鳗峡(无板必游)→沉船(舱内藏宝)→水路组合段→灯塔爬塔→防波堤浪→巨蟹将军
+水下挥不了刀 · 气泡=补氧+弹射 · 深水氧气×2 · 巨蟹正面格挡要绕后</div>
+<script>
+'use strict';
+const cv = document.getElementById('cv'), g = cv.getContext('2d');
+// 石砖真图瓦片(日光版,AI生成+换色):防波堤/灯塔段平铺
+const stoneImg=new Image(); stoneImg.src='tile-stone-day.png'; let stonePat=null;
+stoneImg.onload=()=>{ stonePat=g.createPattern(stoneImg,'repeat'); };
+const W = 720, H = 1280;
+
+// ── 关卡布局(七段) ──
+const VIL_END = 2200;      // ① 渔村街
+const MKT_END = 4400;      // ② 鱼市巷(棚顶双路线)
+const DOCK_END = 11800;    // ③~⑥ 码头水路(栈道A→电鳗峡→沉船→组合段)
+const LH_END = 12600;      // ⑦ 灯塔(爬塔)
+const SEA_END = 15200;     // ⑧ 防波堤(浪头) ⑨ Boss
+const SHIP_X = 15500;      // 船
+const GY = 1000, WY = 1046, DEEP = 1150, WBOT = 1268;
+
+// 静态可站面
+const SURF = [
+  {x0:0, x1:MKT_END, y:GY},                 // 村+市地面
+  {x0:DOCK_END, x1:LH_END, y:1000},         // 灯塔段地面
+  {x0:LH_END, x1:SEA_END+120, y:948},       // 防波堤
+  // 鱼市棚顶(上层路线,7座)
+  {x0:2380,x1:2560,y:876},{x0:2680,x1:2860,y:876},{x0:2980,x1:3160,y:876},{x0:3280,x1:3460,y:876},
+  {x0:3580,x1:3760,y:876},{x0:3880,x1:4060,y:876},{x0:4180,x1:4340,y:876},
+  // 水路歇脚石台(检查点用)
+  {x0:7080,x1:7220,y:980},{x0:9420,x1:9560,y:980},
+  // 灯塔爬塔(左面之字上,顶部阳台,右面下)
+  {x0:12240,x1:12320,y:880},{x0:12150,x1:12230,y:770},{x0:12240,x1:12320,y:660},{x0:12150,x1:12230,y:560},
+  {x0:12240,x1:12460,y:470},{x0:12440,x1:12520,y:700},{x0:12520,x1:12600,y:860},
+];
+// 灯塔塔身(挡路,必须爬塔翻过去)
+const TWR = {x0:12336, x1:12424, top:600};
+
+// 栈道板
+const planks = [];
+{
+  let x = MKT_END + 60, i = 0;
+  const seg = [[170,0],[130,0],[110,1],[150,0],[90,1],[170,0],[120,0],[110,1],[140,0],[100,1],[160,0],[130,0],[120,1],[150,0],[110,1],[160,0]];
+  while (x < DOCK_END - 220) { const [w2,br] = seg[i++ % seg.length]; planks.push({x0:x, x1:x+w2, y:980, broken:br, t:0, gone:0}); x += w2 + 70 + (br?30:0); }
+}
+// 电鳗峡:7250~8350 无板,只能水面/水下游(两条电鳗封路)
+for (let i=planks.length-1;i>=0;i--) if (planks[i].x1>7250 && planks[i].x0<8350) planks.splice(i,1);
+// ④ 沉船:壳堵水面,必潜;舱内小空间(气穴+宝箱)
+const WRECK = {x0:8500, x1:9230, bot:1140};
+const XI0=8610, XI1=9110, IY0=950;            // 舱内
+const HL0=8650, HL1=8730, HR0=8990, HR1=9070; // 底部两个洞
+for (let i=planks.length-1;i>=0;i--) if (planks[i].x1>WRECK.x0-40 && planks[i].x0<WRECK.x1+40) planks.splice(i,1);
+const chest = {x:9050, y:1110, got:0};
+let wreckMsg=0, airMsg=0, shrineMsg=0;
+
+// 水域物件
+const bubbles = [[4800,1210],[5500,1240],[6300,1205],[7450,1230],[7820,1210],[8140,1235],[8870,1215],[9700,1240],[10400,1205],[11050,1235],[11550,1210]].map(p=>({x:p[0],y:p[1],r:26,t:Math.random()*6}));
+const ghosts = [[5050,1120],[5750,1185],[6550,1115],[7650,1160],[9900,1120],[10650,1180],[11300,1110]].map(p=>({x:p[0],y:p[1],hx:p[0],hy:p[1],st:0,t:0}));
+const eels = [{x0:7320,x1:7600,y:1190,T:3.2,warn:0.9,on:0.8,t:0},{x0:7900,x1:8180,y:1150,T:3.2,warn:0.9,on:0.8,t:1.6},{x0:10150,x1:10430,y:1190,T:3.4,warn:0.9,on:0.8,t:0.8}];
+const pearls = [[5300,1235],[6700,1250],[7750,1252],[8330,1250],[9750,1248],[10950,1250],[11600,1240]].map(p=>({x:p[0],y:p[1],got:0}));
+// 金币(棚顶/塔上/堤上)
+const coins = [[2470,838],[2770,838],[3070,838],[3370,838],[3670,838],[3970,838],[4260,838],
+  [7150,940],[9490,940],
+  [12190,730],[12280,622],[12350,432],
+  [12900,908],[13300,908],[13700,908],[14100,908],[14500,908]].map(p=>({x:p[0],y:p[1],got:0}));
+// 怪
+const crabs = [[700,GY],[1500,GY],[2550,GY],[3350,GY],[4150,GY],[13000,948],[13800,948],[14400,948]].map(p=>({x:p[0],y:p[1],dir:1,hp:3,hit:0,dead:0,t:Math.random()*9}));
+const puffs = [[1100,GY],[3050,GY],[3900,GY],[12180,1000],[13400,948],[14100,948]].map(p=>({x:p[0],y:p[1],ph:Math.random()*9,hp:2,hit:0,dead:0,big:0}));
+// Boss + 浪
+const boss = {x:14900, y:948, hp:14, dir:-1, st:'walk', t:0, hit:0, dead:0, deadT:0, swX:0};
+const wave = {T:4.5, t:2, dur:1.5};
+// 检查点
+const CPS = [{x:120,y:GY},{x:2250,y:GY},{x:4350,y:GY},{x:7150,y:980},{x:9490,y:980},{x:11850,y:1000},{x:12650,y:948}];
+
+// ── 玩家 ──
+const P = {x:120, y:GY, vx:0, vy:0, dir:1, jumps:0, mode:'land', hp:3, inv:0,
+  o2:8, O2MAX:8, atkT:0, dashT:0, walk:0, coins:0, cpi:0, dead:0, win:0, msg:'', msgT:0};
+const keys = {};
+let GOD = 1;
+onkeydown = e => { keys[e.code]=1; if(['Space','KeyW','KeyS','ArrowUp','ArrowDown'].includes(e.code)) e.preventDefault();
+  if(e.code==='Space'||e.code==='KeyW'||e.code==='ArrowUp') jump();
+  if(e.code==='KeyJ'||e.code==='KeyK') act();
+  if(e.code==='KeyG') GOD=!GOD; };
+onkeyup = e => keys[e.code]=0;
+let touchL={on:0,x:0};
+cv.addEventListener('touchstart',ev=>{for(const t of ev.changedTouches){const r=cv.getBoundingClientRect();const x=(t.clientX-r.left)/r.width*W,y=(t.clientY-r.top)/r.height*H;
+  if(x<W/2){touchL={on:1,x,id:t.identifier};} else if(y>H*0.55){ if(x>W*0.75) act(); else jump(); }}ev.preventDefault();},{passive:false});
+cv.addEventListener('touchmove',ev=>{for(const t of ev.changedTouches){if(touchL.on&&t.identifier===touchL.id){const r=cv.getBoundingClientRect();touchL.x=(t.clientX-r.left)/r.width*W;}}ev.preventDefault();},{passive:false});
+cv.addEventListener('touchend',ev=>{for(const t of ev.changedTouches){if(t.identifier===touchL.id)touchL.on=0;}ev.preventDefault();},{passive:false});
+
+function jump(){
+  if (P.dead||P.win) { restart(); return; }
+  if (P.mode==='swim') { P.vy = -330; return; }
+  if (P.jumps < 2) { P.vy = -620; P.jumps++; }
+}
+function act(){
+  if (P.dead||P.win) { restart(); return; }
+  if (P.mode==='swim') { if(P.dashT<=0) P.dashT=0.35; return; }
+  if (P.atkT<=0) P.atkT = 0.28;
+}
+function restart(){
+  if(!P.dead&&!P.win)return;
+  P.dead=0;P.win=0;P.hp=3;P.o2=P.O2MAX;P.vx=0;P.vy=0;
+  const cp=CPS[P.cpi]; P.x=cp.x; P.y=cp.y; P.mode='land';
+  boss.hp=14;boss.dead=0;boss.st='walk';boss.x=14900;
+  for(const c of crabs){c.hp=3;c.dead=0;}
+  for(const pf of puffs){pf.hp=2;pf.dead=0;pf.big=0;}
+  for(const pl of planks){pl.gone=0;pl.t=0;}
+}
+function msg(s){P.msg=s;P.msgT=2.2;}
+function hurt(n){
+  if(GOD){shake=4;return;}
+  if(P.inv>0||P.dead)return;
+  P.hp-=n;P.inv=1.4;shake=9;
+  if(P.hp<=0){P.hp=0;P.dead=1;}
+}
+function landSurfs(x){
+  const out=[];
+  for(const s of SURF) if(x>=s.x0-8&&x<=s.x1+8) out.push(s.y);
+  for(const pl of planks) if(!pl.gone&&x>=pl.x0-8&&x<=pl.x1+8) out.push(pl.y);
+  return out;
+}
+const inWaterZone = x => x>=MKT_END && x<DOCK_END;
+
+// ── 主循环 ──
+let last=0, cam=0, shake=0, tGlobal=0;
+const parts=[];
+function spark(x,y,col,n,sp){for(let i=0;i<n;i++){const a=Math.random()*6.283;parts.push({x,y,vx:Math.cos(a)*sp*(60+Math.random()*90),vy:Math.sin(a)*sp*(60+Math.random()*90)-60,life:0,max:0.5+Math.random()*0.4,col});}}
+
+function step(dt){
+  tGlobal+=dt;
+  if(P.msgT>0)P.msgT-=dt;
+  if(P.inv>0)P.inv-=dt;
+  if(shake>0)shake=Math.max(0,shake-dt*30);
+  if(P.dead||P.win)return;
+
+  const Lk = keys.KeyA||keys.ArrowLeft||(touchL.on&&touchL.x<W/2-40);
+  const Rk = keys.KeyD||keys.ArrowRight||(touchL.on&&touchL.x>W/2-40&&touchL.x<W/2);
+  const DN = keys.KeyS||keys.ArrowDown;
+  const mv = (Rk?1:0)-(Lk?1:0);
+  if(mv)P.dir=mv;
+
+  const inWater = inWaterZone(P.x) && P.y > WY-6;
+  if (inWater && P.mode!=='swim') { P.mode='swim'; P.vy*=0.3; spark(P.x,WY,'#bde8ff',12,1.4); }
+
+  if (P.mode==='swim') {
+    P.vx += (mv*300 - P.vx)*Math.min(1,dt*6);
+    P.vy += (((DN?1:0)*260) - P.vy)*Math.min(1,dt*4) - 30*dt;
+    if(P.dashT>0){P.dashT-=dt;P.vx=P.dir*520;}
+    P.x += P.vx*dt; P.y += P.vy*dt;
+    // 水域两端:深处顶墙,浮上来才能出水
+    if(P.y>WY+20){ P.x=Math.max(MKT_END+10,Math.min(DOCK_END-10,P.x)); }
+    const inI = P.x>XI0&&P.x<XI1&&P.y>IY0&&P.y<WRECK.bot;
+    if (P.y < WY && !inI) {
+      if (P.vy < -140) { P.mode='air'; P.vy=-500; P.jumps=1; spark(P.x,WY,'#bde8ff',10,1.5); }
+      else { P.y=WY; P.vy=0; }
+    }
+    if (P.y > WBOT) {P.y=WBOT;P.vy=0;}
+    // 沉船壳碰撞:舱内/底洞可通,其余推开
+    if (P.x>WRECK.x0-24 && P.x<WRECK.x1+24 && P.y<WRECK.bot) {
+      const okI = P.x>XI0&&P.x<XI1&&P.y>IY0;
+      const okH = ((P.x>HL0&&P.x<HL1)||(P.x>HR0&&P.x<HR1))&&P.y>1095;
+      if(!okI&&!okH){
+        if(P.x<=XI0){ if(P.x<WRECK.x0+30)P.x=WRECK.x0-24; else P.x=XI0+2; }
+        else if(P.x>=XI1){ if(P.x>WRECK.x1-30)P.x=WRECK.x1+24; else P.x=XI1-2; }
+        else if(P.y<=IY0) P.y=IY0+2;
+        else P.y=WRECK.bot;
+      }
+    }
+    // 氧气:水面/舱内气穴回,水下耗(深水×2)
+    const breathable = P.y<WY+26 || (inI&&P.y<IY0+58);
+    if (breathable) { P.o2 = Math.min(P.O2MAX,P.o2+dt*3);
+      if(inI&&!airMsg){airMsg=1;msg('船舱气穴!能换气');} }
+    else P.o2 -= dt*(P.y>DEEP?2:1);
+    if (P.o2<=0){P.o2=0;hurt(1);P.vy=-260;}
+  } else {
+    P.vx = mv*260;
+    if(P.atkT>0)P.atkT-=dt;
+    const prevY=P.y;
+    P.x += P.vx*dt;
+    // 塔身挡路(翻塔才能过)
+    if(P.x>TWR.x0-14&&P.x<TWR.x1+14&&P.y>TWR.top){ P.x = P.x<(TWR.x0+TWR.x1)/2 ? TWR.x0-14 : TWR.x1+14; }
+    // 沉船壳上方挡跳
+    if(P.x>WRECK.x0-20&&P.x<WRECK.x1+20&&P.y>860){ P.x = P.x<(WRECK.x0+WRECK.x1)/2 ? WRECK.x0-20 : WRECK.x1+20; }
+    P.vy += 1500*dt; P.y += P.vy*dt;
+    let best=null;
+    if(P.vy>=0) for(const sy of landSurfs(P.x)) if(prevY<=sy+6&&P.y>=sy&&(best===null||sy<best)) best=sy;
+    if(best!==null){P.y=best;P.vy=0;P.jumps=0;P.mode='land';}
+    else P.mode='air';
+    if(!inWaterZone(P.x)&&P.y>H+60) hurt(3);
+    if(mv&&P.mode==='land')P.walk+=dt*9;
+  }
+  P.x = Math.max(40, Math.min(SHIP_X+80, P.x));
+  // 提示点
+  if(!wreckMsg&&Math.abs(P.x-(WRECK.x0-170))<40){wreckMsg=1;msg('前方沉船堵路——潜到船底,舱里有气穴和宝箱!');}
+  if(!shrineMsg&&Math.abs(P.x-2120)<36){shrineMsg=1;msg('神龛(正式版:金币换祝福)');}
+  // 检查点
+  for(let i=CPS.length-1;i>0;i--) if(P.x>CPS[i].x&&P.cpi<i){P.cpi=i;msg('检查点 ✓');break;}
+
+  // 断板
+  for (const pl of planks){
+    if(pl.gone||!pl.broken)continue;
+    if(P.mode!=='swim'&&P.x>pl.x0-8&&P.x<pl.x1+8&&Math.abs(P.y-pl.y)<8){
+      pl.t+=dt; if(pl.t>0.45){pl.gone=1;spark((pl.x0+pl.x1)/2,pl.y,'#b08a5a',10,1.5);} }
+  }
+  // 气泡
+  for (const b of bubbles){
+    b.t+=dt;
+    if(P.mode==='swim'&&Math.hypot(P.x-b.x,P.y-(b.y+Math.sin(b.t*2)*12))<b.r+22){
+      P.o2=P.O2MAX;P.vy=-560;spark(b.x,b.y,'#dff4ff',14,1.6);msg('气泡弹射!补氧!');
+    }
+  }
+  // 水鬼
+  for (const gh of ghosts){
+    gh.t+=dt;
+    const d=Math.hypot(P.x-gh.x,P.y-gh.y);
+    if(gh.st===0){ gh.x=gh.hx+Math.sin(gh.t*0.8)*14;
+      if(P.mode==='swim'&&d<170){gh.st=1;gh.t=0;} }
+    else if(gh.st===1){
+      const a=Math.atan2(P.y-gh.y,P.x-gh.x);
+      gh.x+=Math.cos(a)*300*dt; gh.y+=Math.sin(a)*300*dt;
+      if(d<34){hurt(1);P.o2=Math.max(0,P.o2-2);gh.st=2;gh.t=0;}
+      if(gh.t>2.2){gh.st=2;gh.t=0;}
+    } else {
+      gh.x+=(gh.hx-gh.x)*dt*1.5; gh.y+=(gh.hy-gh.y)*dt*1.5;
+      if(gh.t>2.5)gh.st=0;
+    }
+  }
+  // 电鳗(多条)
+  for(const eel of eels){
+    eel.t=(eel.t+dt)%eel.T;
+    const act=eel.t>eel.warn+1.5&&eel.t<eel.warn+1.5+eel.on;
+    if(act&&P.mode==='swim'&&P.x>eel.x0-10&&P.x<eel.x1+10&&P.y>eel.y-80&&P.y<eel.y+90) hurt(1);
+  }
+  // 珍珠/金币/宝箱
+  for(const pl of pearls){ if(!pl.got&&Math.hypot(P.x-pl.x,P.y-pl.y)<30){pl.got=1;P.coins+=5;spark(pl.x,pl.y,'#ffe9b0',12,1.4);msg('珍珠 +5');} }
+  for(const c of coins){ if(!c.got&&Math.hypot(P.x-c.x,(P.y-40)-c.y)<34){c.got=1;P.coins++;spark(c.x,c.y,'#ffd76a',6,1);} }
+  if(!chest.got&&P.mode==='swim'&&Math.hypot(P.x-chest.x,P.y-chest.y)<40){chest.got=1;P.coins+=10;spark(chest.x,chest.y,'#ffe9b0',20,1.8);msg('沉船宝箱 +10!');}
+
+  // 螃蟹兵
+  for(const c of crabs){
+    if(c.dead)continue;
+    c.t+=dt; if(c.hit>0)c.hit-=dt;
+    c.x+=Math.sin(c.t*1.1)>0?28*dt:-28*dt;
+    const d=Math.abs(P.x-c.x);
+    if(d<40&&Math.abs(P.y-c.y)<50)hurt(1);
+    if(P.atkT>0.12&&Math.abs(P.y-c.y)<70&&d<86&&Math.sign(c.x-P.x)===P.dir){
+      const front=Math.sign(Math.cos(c.t*1.1));
+      if(P.y<c.y-40||front!==Math.sign(P.x-c.x)){
+        c.hp--;c.hit=0.2;P.atkT=0.1;spark(c.x,c.y-30,'#ffd7d0',10,1.5);shake=5;
+        if(c.hp<=0){c.dead=1;P.coins+=2;spark(c.x,c.y-20,'#ffd7d0',16,2);}
+      } else { spark(c.x,c.y-34,'#cfd6e6',6,1.2);msg('正面被钳子挡住!');P.atkT=0.1; }
+    }
+  }
+  // 河豚
+  for(const pf of puffs){
+    if(pf.dead)continue;
+    pf.ph+=dt;
+    const dd=Math.abs(P.x-pf.x);
+    pf.big += ((dd<120?1:0)-pf.big)*Math.min(1,dt*5);
+    if(dd<46&&Math.abs(P.y-pf.y)<60&&pf.big>0.6){P.vy=-520;P.vx=Math.sign(P.x-pf.x)*300;msg('被河豚弹飞!');}
+    if(P.atkT>0.12&&dd<80&&Math.abs(P.y-pf.y)<70&&Math.sign(pf.x-P.x)===P.dir){
+      pf.hp--;P.atkT=0.1;spark(pf.x,pf.y-40,'#ffe2c8',8,1.4);
+      if(pf.hp<=0){pf.dead=1;P.coins+=2;spark(pf.x,pf.y-40,'#ffe2c8',16,2);}
+    }
+  }
+  // 浪头
+  wave.t=(wave.t+dt)%wave.T;
+  if(P.x>LH_END&&P.x<SEA_END&&wave.t<wave.dur&&P.mode!=='swim'){
+    const wx=SEA_END-(wave.t/wave.dur)*(SEA_END-LH_END);
+    if(Math.abs(P.x-wx)<70){P.vx-=420;P.x-=420*dt;if(P.mode==='land')msg('浪来了!跳!');}
+  }
+  // 巨蟹将军
+  if(!boss.dead&&P.x>14450){
+    boss.t+=dt; if(boss.hit>0)boss.hit-=dt;
+    if(boss.st==='walk'){
+      boss.dir=Math.sign(P.x-boss.x)||-1;
+      boss.x+=boss.dir*46*dt;
+      if(boss.t>3.4){boss.st='pre';boss.t=0;}
+    } else if(boss.st==='pre'){ if(boss.t>0.7){boss.st='sweep';boss.t=0;boss.swX=boss.dir;} }
+    else if(boss.st==='sweep'){ boss.x+=boss.swX*560*dt; if(boss.t>0.55){boss.st='walk';boss.t=0;} }
+    boss.x=Math.max(14520,Math.min(SEA_END+80,boss.x));
+    const d=Math.abs(P.x-boss.x);
+    if(d<70&&Math.abs(P.y-boss.y)<70)hurt(1);
+    if(P.atkT>0.12&&d<110&&Math.abs(P.y-boss.y)<90&&Math.sign(boss.x-P.x)===P.dir){
+      const behind=Math.sign(P.x-boss.x)===boss.dir;
+      if(behind||P.y<boss.y-50){
+        boss.hp--;boss.hit=0.2;P.atkT=0.1;shake=6;spark(boss.x,boss.y-50,'#ffd7d0',12,1.7);
+        if(boss.hp<=0){boss.dead=1;boss.deadT=0;shake=14;spark(boss.x,boss.y-40,'#ffe9b0',26,2.4);msg('巨蟹将军被打翻了!跳板放下了!');}
+      } else { spark(boss.x-boss.dir*60,boss.y-50,'#cfd6e6',8,1.4);msg('双钳格挡!绕到背后!');P.atkT=0.1; }
+    }
+  }
+  if(boss.dead)boss.deadT+=dt;
+  // 上船门
+  if(!boss.dead&&P.x>SEA_END+40){P.x=SEA_END+40;if(P.msgT<=0)msg('巨蟹将军挡着跳板——先打翻它!');}
+  if(P.x>SHIP_X-40&&boss.dead)P.win=1;
+  for(let i=parts.length-1;i>=0;i--){const p=parts[i];p.life+=dt;if(p.life>p.max){parts.splice(i,1);continue;}p.x+=p.vx*dt;p.y+=p.vy*dt;p.vy+=800*dt;}
+
+  cam += ((P.x-W*0.38)-cam)*Math.min(1,dt*5);
+  cam = Math.max(0,Math.min(SHIP_X+200-W,cam));
+}
+
+// ── 绘制 ──
+function draw(){
+  g.save();
+  if(shake>0)g.translate((Math.random()-0.5)*shake,(Math.random()-0.5)*shake);
+  const sky=g.createLinearGradient(0,0,0,H);
+  sky.addColorStop(0,'#54b4ea');sky.addColorStop(0.5,'#8fd2f4');sky.addColorStop(0.78,'#cceefb');sky.addColorStop(1,'#8fd0ee');
+  g.fillStyle=sky;g.fillRect(0,0,W,H);
+  g.fillStyle='rgba(255,255,255,0.92)';for(const [cx3,cy3,r3] of [[W*0.2,H*0.24,54],[W*0.28,H*0.26,40],[W*0.7,H*0.34,60],[W*0.62,H*0.37,44]]){g.beginPath();g.arc(cx3-cam*0.04%W,cy3,r3,0,7);g.fill();}
+  g.fillStyle='#3f8fc0';g.fillRect(0,H*0.60,W,H*0.03);
+  // ── 远景层(0.1x):远岛+远灯塔剪影,颜色最淡(空气透视) ──
+  {
+    const k=cam*0.1;
+    g.fillStyle='rgba(150,190,220,0.55)';
+    for(let i=0;i<4;i++){const ix=((i*640-k)%(W+700))-200;
+      g.beginPath();g.moveTo(ix,H*0.60);g.quadraticCurveTo(ix+90,H*0.545,ix+200,H*0.60);g.fill();}
+    g.fillStyle='rgba(150,190,220,0.6)';
+    const lx=((900-k)%(W+700))-200;
+    g.fillRect(lx,H*0.53,14,H*0.07);g.fillRect(lx-6,H*0.53,26,6);
+  }
+  // ── 中景层(0.28x):连排屋顶+桅杆,稍深 ──
+  {
+    const k=cam*0.28;
+    g.fillStyle='rgba(90,130,170,0.8)';
+    for(let i=0;i<10;i++){const ix=((i*300-k)%(W+500))-200;
+      g.beginPath();g.moveTo(ix,H*0.615);g.lineTo(ix+60,H*0.575);g.lineTo(ix+120,H*0.615);g.fill();
+      g.fillRect(ix+16,H*0.615,88,H*0.02);}
+    g.fillStyle='rgba(66,100,140,0.9)';
+    for(let i=0;i<5;i++){const mx=((i*430-k*1.1)%(W+500))-160;g.fillRect(mx,H*0.52,5,H*0.11);g.fillRect(mx-18,H*0.555,42,4);}
+  }
+  // 海鸥(中景,自己飞)
+  {
+    g.strokeStyle='rgba(240,240,250,0.8)';g.lineWidth=2.5;
+    for(let i=0;i<3;i++){
+      const bx=((tGlobal*46+i*300-cam*0.28)%(W+400))-160, by=H*0.30+i*40+Math.sin(tGlobal*2+i)*10;
+      const f=Math.sin(tGlobal*8+i*2)*6;
+      g.beginPath();g.moveTo(bx-10,by-f);g.quadraticCurveTo(bx,by+4,bx+10,by-f);g.stroke();
+    }
+  }
+  // ── 近背层(0.55x):矮栅栏+挂着的渔网,深色 ──
+  {
+    const k=cam*0.55;
+    g.strokeStyle='rgba(70,84,110,0.9)';g.lineWidth=5;
+    for(let i=0;i<14;i++){const ix=((i*220-k)%(W+400))-160;
+      g.beginPath();g.moveTo(ix,H*0.652);g.lineTo(ix,H*0.615);g.stroke();}
+    g.strokeStyle='rgba(70,84,110,0.55)';g.lineWidth=2.5;
+    for(let i=0;i<5;i++){const ix=((i*620-k)%(W+700))-200;
+      g.beginPath();g.moveTo(ix,H*0.618);
+      g.quadraticCurveTo(ix+70,H*0.66,ix+140,H*0.618);g.stroke();
+      for(let m=1;m<4;m++){g.beginPath();g.moveTo(ix+m*35,H*0.62);g.quadraticCurveTo(ix+m*35,H*0.645,ix+70,H*0.655);g.stroke();}
+    }
+  }
+  g.save();g.translate(-cam,0);
+
+  // ①② 地面
+  // 栈桥面(架在海上)+ 桥下阴影 + 木桩插进水里
+  g.fillStyle='#b0854a';g.fillRect(0,GY,MKT_END,104);
+  g.fillStyle='#c89a58';for(let x=0;x<MKT_END;x+=90)g.fillRect(x,GY,84,10);
+  g.fillStyle='rgba(60,40,24,0.45)';g.fillRect(0,GY+96,MKT_END,22);
+  g.fillStyle='#8a6438';
+  for(let x=70;x<MKT_END;x+=150){g.fillRect(x,GY+100,26,150);g.fillStyle='#75552f';g.fillRect(x+18,GY+100,8,150);g.fillStyle='#8a6438';}
+  for(let i=0;i<8;i++){const hx=120+i*260;
+    g.fillStyle='#5c4a58';g.fillRect(hx,GY-170,150,170);
+    g.fillStyle='#3e3448';g.beginPath();g.moveTo(hx-16,GY-170);g.lineTo(hx+75,GY-232);g.lineTo(hx+166,GY-170);g.fill();
+    g.fillStyle='#2e2838';g.fillRect(hx+50,GY-70,44,70);
+  }
+  for(const fx of [380,760,1180,1560,1940]){g.strokeStyle='#4a3c34';g.lineWidth=6;g.beginPath();g.moveTo(fx,GY);g.lineTo(fx,GY-90);g.moveTo(fx-60,GY-88);g.lineTo(fx+60,GY-88);g.stroke();
+    g.fillStyle='#b8b09a';for(let k=-1;k<=1;k++)g.fillRect(fx+k*36-8,GY-86,16,34);}
+  // 神龛
+  {
+    const sx=2120;
+    g.fillStyle='#6a5a48';g.fillRect(sx-34,GY-96,68,96);
+    g.fillStyle='#4a3c34';g.beginPath();g.moveTo(sx-46,GY-96);g.lineTo(sx,GY-134);g.lineTo(sx+46,GY-96);g.fill();
+    g.fillStyle='#2a2432';g.fillRect(sx-18,GY-70,36,44);
+    const gl=0.5+0.5*Math.sin(tGlobal*3);
+    g.fillStyle=`rgba(255,220,140,${0.35+gl*0.3})`;g.beginPath();g.arc(sx,GY-50,7,0,7);g.fill();
+  }
+  // 鱼市摊棚(上层路线)
+  for(const s of SURF){
+    if(s.y!==876)continue;
+    const mx=(s.x0+s.x1)/2;
+    g.strokeStyle='#4a3c34';g.lineWidth=7;
+    g.beginPath();g.moveTo(s.x0+14,GY);g.lineTo(s.x0+14,s.y+8);g.moveTo(s.x1-14,GY);g.lineTo(s.x1-14,s.y+8);g.stroke();
+    g.fillStyle='#a05a4a';g.beginPath();g.moveTo(s.x0-10,s.y+10);g.lineTo(mx,s.y-16);g.lineTo(s.x1+10,s.y+10);g.fill();
+    g.fillStyle='#8a7460';g.fillRect(s.x0+4,GY-56,s.x1-s.x0-8,20);
+    g.fillStyle='#9ab0a0';for(let k=0;k<3;k++){g.beginPath();g.ellipse(s.x0+34+k*44,GY-62,16,7,0.3,0,7);g.fill();}
+  }
+
+  // ③ 水域
+  g.fillStyle='#1f7ba6';g.fillRect(MKT_END,WY,DOCK_END-MKT_END,WBOT-WY+20);
+  g.fillStyle='rgba(10,58,92,0.55)';g.fillRect(MKT_END,DEEP,DOCK_END-MKT_END,WBOT-DEEP+20);
+  for(const pl of planks){g.strokeStyle='#4e3e30';g.lineWidth=10;
+    g.beginPath();g.moveTo(pl.x0+16,pl.y);g.lineTo(pl.x0+16,WBOT);g.moveTo(pl.x1-16,pl.y);g.lineTo(pl.x1-16,WBOT);g.stroke();}
+  for(const pl of planks){
+    if(pl.gone)continue;
+    g.fillStyle=pl.broken?'#8a6a48':'#a07c54';
+    if(pl.broken&&pl.t>0)g.fillStyle=`rgb(${138+Math.sin(tGlobal*40)*40|0},106,72)`;
+    g.fillRect(pl.x0,pl.y-12,pl.x1-pl.x0,14);
+    g.strokeStyle='#6a5038';g.lineWidth=2;
+    for(let x=pl.x0;x<pl.x1;x+=34)g.strokeRect(x,pl.y-12,34,14);
+  }
+  // ④ 沉船剖面
+  {
+    const cx2=(WRECK.x0+WRECK.x1)/2;
+    g.fillStyle='#4a3a2c';
+    g.beginPath();g.moveTo(WRECK.x0,WRECK.bot);
+    g.quadraticCurveTo(WRECK.x0+20,WY-90,cx2,WY-118);
+    g.quadraticCurveTo(WRECK.x1-20,WY-90,WRECK.x1,WRECK.bot);
+    g.lineTo(WRECK.x0,WRECK.bot);g.fill();
+    g.fillStyle='#141e2c';g.fillRect(XI0,IY0,XI1-XI0,WRECK.bot-IY0);   // 舱内
+    g.strokeStyle='rgba(200,235,255,0.55)';g.lineWidth=3;              // 气穴水线
+    g.beginPath();for(let x=XI0;x<=XI1;x+=16)g.lineTo(x,IY0+56+Math.sin(x*0.06+tGlobal*3)*4);g.stroke();
+    g.fillStyle='rgba(90,140,180,0.35)';                               // 底洞
+    g.fillRect(HL0,WRECK.bot-8,HL1-HL0,16);g.fillRect(HR0,WRECK.bot-8,HR1-HR0,16);
+    g.strokeStyle='#5e4a36';g.lineWidth=5;
+    for(let k=1;k<3;k++){g.beginPath();g.moveTo(WRECK.x0+26*k,WRECK.bot-6*k);
+      g.quadraticCurveTo(cx2,WY-118+30*k,WRECK.x1-26*k,WRECK.bot-6*k);g.stroke();}
+    g.strokeStyle='#3a2e22';g.lineWidth=8;
+    g.beginPath();g.moveTo(WRECK.x0+40,WY-64);g.quadraticCurveTo(cx2,WY-132,WRECK.x1-40,WY-64);g.stroke();
+    if(!chest.got){
+      g.fillStyle='#8a6034';g.fillRect(chest.x-24,chest.y-14,48,28);
+      g.fillStyle='#ffd76a';g.fillRect(chest.x-4,chest.y-14,8,28);
+      g.strokeStyle='#5e4020';g.lineWidth=3;g.strokeRect(chest.x-24,chest.y-14,48,28);
+    }
+    g.fillStyle='rgba(200,230,255,0.5)';
+    for(let k=0;k<3;k++){g.beginPath();g.arc(cx2-60+k*60,WRECK.bot+70-((tGlobal*46+k*53)%70),4+k,0,7);g.fill();}
+  }
+  // 电鳗
+  for(const eel of eels){
+    const active=eel.t>eel.warn+1.5&&eel.t<eel.warn+1.5+eel.on;
+    const warn=eel.t>1.5&&eel.t<=eel.warn+1.5;
+    g.strokeStyle=active?'#ffe96a':'#6a7a5a';g.lineWidth=active?10:6;
+    g.beginPath();for(let x=eel.x0;x<=eel.x1;x+=14)g.lineTo(x,eel.y+Math.sin(x*0.05+tGlobal*6)*14);g.stroke();
+    g.fillStyle='#fff';g.beginPath();g.arc(eel.x0+8,eel.y-4,7,0,7);g.fill();
+    g.fillStyle='#222';g.beginPath();g.arc(eel.x0+9,eel.y-4,3,0,7);g.fill();
+    if(warn){g.fillStyle=`rgba(255,230,120,${0.12+0.1*Math.sin(tGlobal*18)})`;g.fillRect(eel.x0-10,eel.y-80,eel.x1-eel.x0+20,170);}
+    if(active){g.fillStyle='rgba(255,236,120,0.22)';g.fillRect(eel.x0-10,eel.y-80,eel.x1-eel.x0+20,170);}
+  }
+  for(const b of bubbles){const by=b.y+Math.sin(b.t*2)*12;
+    g.fillStyle='rgba(190,230,255,0.28)';g.beginPath();g.arc(b.x,by,b.r,0,7);g.fill();
+    g.strokeStyle='rgba(220,244,255,0.8)';g.lineWidth=3;g.beginPath();g.arc(b.x,by,b.r,0,7);g.stroke();}
+  for(const pl of pearls){if(pl.got)continue;
+    g.fillStyle='#d8cbb8';g.beginPath();g.ellipse(pl.x,pl.y+8,20,12,0,0,7);g.fill();
+    g.fillStyle='#fff3d8';g.beginPath();g.arc(pl.x,pl.y,9+Math.sin(tGlobal*4)*2,0,7);g.fill();}
+  for(const gh of ghosts){
+    g.fillStyle='rgba(30,50,66,0.9)';g.beginPath();g.arc(gh.x,gh.y,20,0,7);g.fill();
+    const glow=gh.st===1?1:0.5+0.5*Math.sin(gh.t*3);
+    g.fillStyle=`rgba(180,255,220,${glow})`;
+    g.beginPath();g.arc(gh.x-7,gh.y-4,4,0,7);g.arc(gh.x+7,gh.y-4,4,0,7);g.fill();
+  }
+
+  // ⑤⑥ 灯塔段+防波堤
+  g.fillStyle=stonePat||'#7a7268';g.fillRect(DOCK_END,1000,LH_END-DOCK_END,120);
+  g.fillRect(LH_END,948,SEA_END+220-LH_END,132);
+  for(let x=DOCK_END+30;x<LH_END;x+=170)g.fillRect(x,1114,60,140);
+  for(let x=LH_END+40;x<SEA_END+200;x+=190)g.fillRect(x,1074,70,180);
+  // 石墩压暗一档(和堤面区分层次)
+  g.fillStyle='rgba(40,30,50,0.22)';
+  for(let x=DOCK_END+30;x<LH_END;x+=170)g.fillRect(x,1114,60,140);
+  for(let x=LH_END+40;x<SEA_END+200;x+=190)g.fillRect(x,1074,70,180);
+  g.fillStyle='rgba(50,40,58,0.28)';for(let x=LH_END;x<SEA_END+200;x+=70)g.fillRect(x,948,64,12);
+  // 灯塔(塔身挡路)
+  {
+    const lx=(TWR.x0+TWR.x1)/2;
+    g.fillStyle='#c8b8a8';g.beginPath();g.moveTo(lx-64,1000);g.lineTo(lx-36,440);g.lineTo(lx+36,440);g.lineTo(lx+64,1000);g.fill();
+    g.fillStyle='#a03c3c';g.fillRect(lx-58,920,116,26);g.fillRect(lx-50,760,100,26);g.fillRect(lx-44,600,88,26);
+    g.fillStyle='#3a3444';g.fillRect(lx-30,440,60,-34);
+    const on=0.6+0.4*Math.sin(tGlobal*2);
+    g.fillStyle=`rgba(255,236,150,${on})`;g.beginPath();g.arc(lx,420,14,0,7);g.fill();
+    g.fillStyle=`rgba(255,236,150,${on*0.14})`;g.beginPath();g.moveTo(lx,420);g.lineTo(lx+280,330);g.lineTo(lx+280,510);g.fill();
+  }
+  // 爬塔石阶
+  for(const s of SURF){
+    if(s.y===876||s.y===GY||s.y===1000||s.y===948)continue;
+    g.fillStyle='#9a8e80';g.fillRect(s.x0,s.y,s.x1-s.x0,12);
+    g.strokeStyle='#6e645a';g.lineWidth=2;g.strokeRect(s.x0,s.y,s.x1-s.x0,12);
+  }
+  // 浪头
+  if(wave.t<wave.dur){
+    const wx=SEA_END-(wave.t/wave.dur)*(SEA_END-LH_END);
+    g.fillStyle='rgba(150,200,230,0.75)';
+    g.beginPath();g.moveTo(wx+60,948);g.quadraticCurveTo(wx,860,wx-60,948);g.fill();
+    g.fillStyle='rgba(220,240,255,0.9)';g.beginPath();g.arc(wx-10,880,14,0,7);g.arc(wx+22,896,10,0,7);g.fill();
+  }
+  g.fillStyle='rgba(60,110,140,0.5)';g.fillRect(LH_END,996,SEA_END+220-LH_END,4);
+  // ── 前景海(码头架在水上:村/市段 与 灯塔/堤段 的画面底部整条是海) ──
+  for(const [wx0,wx1] of [[-200,MKT_END],[DOCK_END,SHIP_X+400]]){
+    const WT=1168;
+    g.fillStyle='#1f7ba6';
+    g.beginPath();g.moveTo(wx0,WT);
+    for(let x=wx0;x<=wx1;x+=24)g.lineTo(x,WT+Math.sin(x*0.018+tGlobal*2.2)*7);
+    g.lineTo(wx1,H+40);g.lineTo(wx0,H+40);g.fill();
+    g.strokeStyle='rgba(255,255,255,0.55)';g.lineWidth=3;
+    g.beginPath();for(let x=wx0;x<=wx1;x+=24)g.lineTo(x,WT+Math.sin(x*0.018+tGlobal*2.2)*7);g.stroke();
+    g.fillStyle='rgba(8,56,96,0.4)';g.fillRect(wx0,1225,wx1-wx0,H-1225+40);
+    // 波光
+    g.strokeStyle='rgba(255,255,255,0.25)';g.lineWidth=2;
+    for(let x=wx0+40;x<wx1;x+=160){const yy=1195+Math.sin(x*0.05+tGlobal*1.7)*6;
+      g.beginPath();g.moveTo(x,yy);g.lineTo(x+56,yy);g.stroke();}
+  }
+  // 停泊的小渔船(随浪摇晃)
+  for(const bx3 of [950,3350,13600]){
+    if(bx3>MKT_END&&bx3<DOCK_END)continue;
+    const bobY=Math.sin(tGlobal*1.6+bx3)*6, rot=Math.sin(tGlobal*1.3+bx3)*0.04;
+    g.save();g.translate(bx3,1200+bobY);g.rotate(rot);
+    g.fillStyle='#7a4e30';g.beginPath();g.moveTo(-70,0);g.lineTo(70,0);g.lineTo(48,30);g.lineTo(-48,30);g.fill();
+    g.fillStyle='#e8e2d4';g.fillRect(-24,-26,48,26);
+    g.fillStyle='#3e5a70';g.fillRect(-16,-20,14,12);
+    g.strokeStyle='#5e3c22';g.lineWidth=4;g.beginPath();g.moveTo(30,0);g.lineTo(30,-46);g.stroke();
+    g.restore();
+  }
+  // 检查点旗
+  for(let i=1;i<CPS.length;i++){const c=CPS[i];
+    g.strokeStyle='#4a3c34';g.lineWidth=5;g.beginPath();g.moveTo(c.x,c.y);g.lineTo(c.x,c.y-70);g.stroke();
+    g.fillStyle=P.cpi>=i?'#9be8c8':'#8a7a88';
+    g.beginPath();g.moveTo(c.x,c.y-70);g.lineTo(c.x+34,c.y-58);g.lineTo(c.x,c.y-46);g.fill();}
+  // 金币
+  for(const c of coins){if(c.got)continue;
+    const bob=Math.sin(tGlobal*4+c.x)*4;
+    g.fillStyle='#ffd76a';g.beginPath();g.ellipse(c.x,c.y+bob,10,12,0,0,7);g.fill();
+    g.strokeStyle='#c8a040';g.lineWidth=3;g.beginPath();g.ellipse(c.x,c.y+bob,5,9,0,0,7);g.stroke();}
+
+  // 螃蟹兵
+  for(const c of crabs){
+    if(c.dead)continue;
+    const bob=Math.sin(c.t*6)*3,hitk=c.hit>0;
+    g.save();g.translate(c.x,c.y+bob);
+    g.fillStyle=hitk?'#ffd0c8':'#c85a4a';
+    g.beginPath();g.ellipse(0,-30,34,24,0,0,7);g.fill();
+    g.fillStyle='#a84838';g.beginPath();g.ellipse(-38,-38,13,10,0.6,0,7);g.ellipse(38,-38,13,10,-0.6,0,7);g.fill();
+    g.fillStyle='#fff';g.beginPath();g.arc(-10,-40,6,0,7);g.arc(10,-40,6,0,7);g.fill();
+    g.fillStyle='#222';g.beginPath();g.arc(-10,-40,2.6,0,7);g.arc(10,-40,2.6,0,7);g.fill();
+    g.strokeStyle='#a84838';g.lineWidth=4;
+    for(const sd of [-1,1])for(let k=0;k<3;k++){g.beginPath();g.moveTo(sd*28,-24+k*6);g.lineTo(sd*44,-14+k*8+Math.sin(c.t*8+k)*3);g.stroke();}
+    g.restore();
+  }
+  // 河豚
+  for(const pf of puffs){
+    if(pf.dead)continue;
+    const r=22+pf.big*26;
+    g.save();g.translate(pf.x,pf.y-40+Math.sin(pf.ph*2)*6);
+    g.fillStyle='#e8b078';g.beginPath();g.arc(0,0,r,0,7);g.fill();
+    if(pf.big>0.4){g.strokeStyle='#c88a50';g.lineWidth=3;
+      for(let a=0;a<12;a++){g.beginPath();g.moveTo(Math.cos(a*0.52)*r,Math.sin(a*0.52)*r);g.lineTo(Math.cos(a*0.52)*(r+8),Math.sin(a*0.52)*(r+8));g.stroke();}}
+    g.fillStyle='#fff';g.beginPath();g.arc(-8,-6,7,0,7);g.arc(10,-6,7,0,7);g.fill();
+    g.fillStyle='#222';g.beginPath();g.arc(-8,-6,3,0,7);g.arc(10,-6,3,0,7);g.fill();
+    g.restore();
+  }
+  // 巨蟹将军
+  if(!boss.dead||boss.deadT<2){
+    const b=boss,bob=Math.sin(b.t*4)*4;
+    g.save();g.translate(b.x,b.y+bob);
+    if(b.dead){g.rotate(Math.min(1,b.deadT)*2.6);g.globalAlpha=Math.max(0,1-b.deadT/2);}
+    const hitk=b.hit>0;
+    g.fillStyle=hitk?'#ffd8d0':'#b84838';
+    g.beginPath();g.ellipse(0,-56,66,48,0,0,7);g.fill();
+    g.strokeStyle='#8a3428';g.lineWidth=5;g.beginPath();g.moveTo(-30,-88);g.lineTo(0,-64);g.lineTo(28,-90);g.stroke();
+    g.strokeStyle='rgba(200,190,160,0.7)';g.lineWidth=2;
+    for(let k=0;k<4;k++){g.beginPath();g.moveTo(-60+k*12,-90);g.lineTo(-74+k*14,-30);g.stroke();}
+    g.strokeStyle='#5a5a68';g.lineWidth=7;g.beginPath();g.moveTo(24,-96);g.lineTo(40,-128);g.stroke();
+    g.beginPath();g.arc(40,-132,9,0,7);g.stroke();
+    g.fillStyle='#fff';g.beginPath();g.arc(-16,-70,13,0,7);g.arc(16,-64,8,0,7);g.fill();
+    g.fillStyle='#222';g.beginPath();g.arc(-16+b.dir*4,-70,5,0,7);g.arc(16+b.dir*3,-64,3.4,0,7);g.fill();
+    const lift=b.st==='pre'?-30-Math.sin(b.t*20)*6:0;
+    g.fillStyle=hitk?'#ffd8d0':'#a83c2c';
+    g.save();g.translate(b.dir*70,-44+lift);g.rotate(b.dir*(b.st==='sweep'?0.9:0.25));
+    g.beginPath();g.ellipse(0,0,30,20,0,0,7);g.fill();
+    g.beginPath();g.ellipse(b.dir*22,-8,14,9,0.5*b.dir,0,7);g.fill();g.restore();
+    g.save();g.translate(-b.dir*58,-40);g.beginPath();g.ellipse(0,0,18,13,0,0,7);g.fill();g.restore();
+    g.strokeStyle='#8a3428';g.lineWidth=5;
+    for(const sd of [-1,1])for(let k=0;k<3;k++){g.beginPath();g.moveTo(sd*52,-30+k*6);g.lineTo(sd*74,-12+k*8+Math.sin(b.t*10+k)*4);g.stroke();}
+    g.restore();
+    if(!b.dead&&P.x>14450){g.fillStyle='#2a2436';g.fillRect(b.x-70,b.y-150,140,10);
+      g.fillStyle='#d85a4a';g.fillRect(b.x-70,b.y-150,140*b.hp/14,10);}
+  }
+  // 跳板
+  if(boss.dead){
+    const k=Math.min(1,boss.deadT/1.2);
+    g.save();g.translate(SEA_END+120,948);g.rotate((1-k)*-1.2);
+    g.fillStyle='#8a6a44';g.fillRect(0,-8,SHIP_X-60-(SEA_END+120),14);
+    g.strokeStyle='#6a5034';g.lineWidth=2;
+    for(let x=0;x<SHIP_X-60-(SEA_END+120);x+=30)g.strokeRect(x,-8,30,14);
+    g.restore();
+  } else {
+    g.fillStyle='#8a6a44';g.save();g.translate(SHIP_X-70,996);g.rotate(-1.35);g.fillRect(0,-8,150,14);g.restore();
+  }
+  // 船
+  {
+    const sx=SHIP_X;
+    g.fillStyle='#5a4234';g.beginPath();g.moveTo(sx-90,996);g.lineTo(sx+120,996);g.lineTo(sx+90,1080);g.lineTo(sx-60,1080);g.fill();
+    g.fillStyle='#4a3628';g.fillRect(sx-4,996,8,-150);
+    g.fillStyle='#c8b090';g.beginPath();g.moveTo(sx+4,846);g.lineTo(sx+80,920);g.lineTo(sx+4,920);g.fill();
+    const on=0.6+0.4*Math.sin(tGlobal*3);
+    g.fillStyle=`rgba(255,220,130,${on})`;g.beginPath();g.arc(sx+60,970,10,0,7);g.fill();
+    g.fillStyle=`rgba(255,220,130,${on*0.2})`;g.beginPath();g.arc(sx+60,970,34,0,7);g.fill();
+  }
+
+  // 主角
+  {
+    const p=P,sw=p.mode==='swim';
+    g.save();g.translate(p.x,p.y);
+    if(p.inv>0&&Math.sin(tGlobal*30)>0)g.globalAlpha=0.4;
+    if(sw)g.rotate(p.dir*(0.5+0.2*Math.sin(tGlobal*8)));
+    const bob=p.mode==='land'&&Math.abs(p.vx)>1?Math.sin(p.walk)*3:0;
+    g.fillStyle='#4a5a78';g.fillRect(-12,-46+bob,24,30);
+    g.fillStyle='#f0c8a0';g.beginPath();g.arc(0,-66+bob,20,0,7);g.fill();
+    g.fillStyle='#3a3444';g.beginPath();g.arc(0,-74+bob,19,Math.PI,0);g.fill();
+    g.fillStyle='#222';g.beginPath();g.arc(p.dir*8,-66+bob,2.6,0,7);g.fill();
+    if(p.atkT>0.12){g.strokeStyle='#e8e8f0';g.lineWidth=5;g.beginPath();g.arc(p.dir*10,-40,34,-1.2*p.dir,0.6*p.dir,p.dir<0);g.stroke();}
+    if(p.dashT>0.1){g.strokeStyle='rgba(190,230,255,0.8)';g.lineWidth=4;g.beginPath();g.moveTo(-p.dir*20,-40);g.lineTo(-p.dir*46,-40);g.stroke();}
+    g.strokeStyle='#3a4258';g.lineWidth=6;
+    if(sw){g.beginPath();g.moveTo(-6,-16);g.lineTo(-14,2+Math.sin(tGlobal*10)*6);g.moveTo(6,-16);g.lineTo(12,2-Math.sin(tGlobal*10)*6);g.stroke();}
+    else{g.beginPath();g.moveTo(-6,-16+bob);g.lineTo(-8,0);g.moveTo(6,-16+bob);g.lineTo(8,0);g.stroke();}
+    g.restore();
+  }
+
+  // 水面覆盖
+  {
+    g.fillStyle='rgba(70,180,215,0.4)';
+    g.beginPath();g.moveTo(MKT_END,WY+10);
+    for(let x=MKT_END;x<=DOCK_END;x+=20)g.lineTo(x,WY+Math.sin(x*0.02+tGlobal*2.4)*6);
+    g.lineTo(DOCK_END,WBOT+20);g.lineTo(MKT_END,WBOT+20);g.fill();
+    g.strokeStyle='rgba(220,240,255,0.5)';g.lineWidth=3;
+    g.beginPath();for(let x=MKT_END;x<=DOCK_END;x+=20)g.lineTo(x,WY+Math.sin(x*0.02+tGlobal*2.4)*6);g.stroke();
+    g.fillStyle='rgba(8,56,96,0.35)';g.fillRect(MKT_END,DEEP,DOCK_END-MKT_END,WBOT-DEEP+20);
+  }
+  for(const p of parts){g.globalAlpha=1-p.life/p.max;g.fillStyle=p.col;g.fillRect(p.x-3,p.y-3,6,6);}
+  g.globalAlpha=1;
+  g.restore();
+
+  // ── 飘雾两层(0.85x 淡 / 1.15x 更淡更快):空气流动感 ──
+  for(const [spd,al,yy,hh] of [[0.85,0.07,H*0.68,90],[1.15,0.05,H*0.80,120]]){
+    const k=(cam*spd+tGlobal*18*spd)%(W+600);
+    g.fillStyle=`rgba(196,204,226,${al})`;
+    for(let i=0;i<3;i++){const fx2=((i*520-k)%(W+600))-260;
+      g.beginPath();g.ellipse(fx2,yy+Math.sin(tGlobal+i)*8,240,hh*0.5,0,0,7);g.fill();}
+  }
+  // ── 暗角(上下压边,视线聚焦游戏层) ──
+  {
+    let gr=g.createLinearGradient(0,0,0,150);
+    gr.addColorStop(0,'rgba(30,70,100,0.30)');gr.addColorStop(1,'rgba(14,10,26,0)');
+    g.fillStyle=gr;g.fillRect(0,0,W,150);
+    gr=g.createLinearGradient(0,H-170,0,H);
+    gr.addColorStop(0,'rgba(14,10,26,0)');gr.addColorStop(1,'rgba(30,70,100,0.4)');
+    g.fillStyle=gr;g.fillRect(0,H-170,W,170);
+  }
+
+  // HUD
+  for(let i=0;i<3;i++){g.fillStyle=i<P.hp?'#e85a5a':'#443a4c';
+    g.beginPath();const hx=34+i*40,hy=36;
+    g.arc(hx-7,hy-4,9,0,7);g.arc(hx+7,hy-4,9,0,7);
+    g.moveTo(hx-15,hy);g.lineTo(hx,hy+16);g.lineTo(hx+15,hy);g.fill();}
+  if(GOD){g.fillStyle='rgba(150,230,180,0.9)';g.font='20px monospace';g.fillText('无敌 ON(按G关)',W-220,40);}
+  g.fillStyle='#ffd76a';g.beginPath();g.arc(40,86,12,0,7);g.fill();
+  g.fillStyle='#fff';g.font='22px monospace';g.fillText('×'+P.coins,58,94);
+  if(P.mode==='swim'&&P.y>WY+20){
+    g.fillStyle='rgba(20,30,50,0.7)';g.fillRect(W/2-130,70,260,20);
+    g.fillStyle=P.o2<2.5?'#e86a5a':'#6ac8e8';g.fillRect(W/2-127,73,254*P.o2/P.O2MAX,14);
+    g.fillStyle='#cfe8ff';g.font='15px monospace';g.fillText('氧气',W/2-166,86);
+  }
+  if(P.msgT>0){g.font='24px sans-serif';const w2=g.measureText(P.msg).width;
+    g.fillStyle='rgba(20,18,34,0.75)';g.fillRect(W/2-w2/2-20,140,w2+40,44);
+    g.fillStyle='#ffe9b0';g.textAlign='center';g.fillText(P.msg,W/2,170);g.textAlign='left';}
+  if(P.dead)ov('你倒下了','按 J / 空格 从检查点再来');
+  if(P.win)ov('出海!','渔港通关 · 金币 ×'+P.coins+' · 按 J 重玩');
+  g.restore();
+}
+function ov(t1,t2){
+  g.fillStyle='rgba(14,12,26,0.72)';g.fillRect(0,0,W,H);
+  g.fillStyle='#ffe9b0';g.font='52px sans-serif';g.textAlign='center';
+  g.fillText(t1,W/2,H/2-30);
+  g.fillStyle='#cfd6e6';g.font='24px sans-serif';g.fillText(t2,W/2,H/2+30);g.textAlign='left';
+}
+function loop(ts){
+  const dt=Math.min(0.033,(ts-last)/1000||0.016);last=ts;
+  step(dt);draw();requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
