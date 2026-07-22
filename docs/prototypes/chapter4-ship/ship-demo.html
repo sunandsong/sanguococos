@@ -1,0 +1,620 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>航船 Demo · 射击关</title>
+<style>
+  html,body{margin:0;padding:0;background:#241e38;height:100%;overflow:hidden;touch-action:none}
+  #wrap{display:flex;align-items:center;justify-content:center;height:100%}
+  canvas{background:#3b3454;max-height:100vh;max-width:100vw;cursor:crosshair}
+  #tip{position:fixed;left:10px;top:8px;color:#9bb;font:12px/1.6 monospace;pointer-events:none;white-space:pre}
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="cv" width="720" height="1280"></canvas></div>
+<div id="tip">A/D 甲板走位 · W/空格 跳 · 鼠标瞄准 · 按住左键/J 开火(有过热)
+波次:飞鱼群→水母/海蛇→触手拍甲板→风暴浪→大海怪Boss(打亮嘴)
+护船:怪撞到船=掉船血;船血/人血归零都算输 · G 无敌开关(默认开)</div>
+<script>
+'use strict';
+const cv = document.getElementById('cv'), g = cv.getContext('2d');
+const W = 720, H = 1280;
+
+// ── 船体/世界 ──
+const DECK = 950;              // 甲板基线(随浪起伏)
+const SEA = 1030;              // 海面
+let shipPh = 0, deckY = DECK, tilt = 0;
+
+// ── 玩家 ──
+const P = {x:400, y:DECK, vy:0, onDeck:1, dir:1, hp:3, inv:0,
+  aimX:360, aimY:500, heat:0, locked:0, fireT:0, shooting:0, dead:0, win:0};
+let shipHP = 100, coins = 0;
+let GOD = 1;
+const keys = {};
+onkeydown = e => { keys[e.code]=1;
+  if(['Space','KeyW'].includes(e.code)){e.preventDefault();jump();}
+  if(e.code==='KeyJ')autoFire=1;
+  if(e.code==='KeyG')GOD=!GOD; };
+onkeyup = e => { keys[e.code]=0; if(e.code==='KeyJ')autoFire=0; };
+cv.addEventListener('mousemove',e=>{const r=cv.getBoundingClientRect();
+  P.aimX=(e.clientX-r.left)/r.width*W; P.aimY=(e.clientY-r.top)/r.height*H;});
+cv.addEventListener('mousedown',()=>{P.shooting=1; if(P.dead||P.win)restart();});
+cv.addEventListener('mouseup',()=>P.shooting=0);
+const joy={on:0,id:-1,bx:0,by:0,dx:0,dy:0,jumped:0};
+const fireBtn={x:W-110,y:H-140,r:64,id:-1};
+let autoFire=0;
+function tpos(t,r){return [(t.clientX-r.left)/r.width*W,(t.clientY-r.top)/r.height*H];}
+cv.addEventListener('touchstart',ev=>{const r=cv.getBoundingClientRect();
+  for(const t of ev.changedTouches){const [x,y]=tpos(t,r);
+    if(Math.hypot(x-fireBtn.x,y-fireBtn.y)<fireBtn.r+22){fireBtn.id=t.identifier;autoFire=1;}
+    else if(x<W*0.55&&y>H*0.6){joy.on=1;joy.id=t.identifier;joy.bx=x;joy.by=y;joy.dx=0;joy.dy=0;joy.jumped=0;}
+  } if(P.dead||P.win)restart(); ev.preventDefault();},{passive:false});
+cv.addEventListener('touchmove',ev=>{const r=cv.getBoundingClientRect();
+  for(const t of ev.changedTouches){const [x,y]=tpos(t,r);
+    if(joy.on&&t.identifier===joy.id){
+      joy.dx=Math.max(-70,Math.min(70,x-joy.bx));
+      joy.dy=Math.max(-90,Math.min(90,y-joy.by));
+      if(joy.dy<-55&&!joy.jumped){joy.jumped=1;jump();}
+      if(joy.dy>-30)joy.jumped=0;
+    }}ev.preventDefault();},{passive:false});
+cv.addEventListener('touchend',ev=>{for(const t of ev.changedTouches){
+  if(t.identifier===joy.id){joy.on=0;joy.dx=0;joy.dy=0;}
+  if(t.identifier===fireBtn.id){fireBtn.id=-1;autoFire=0;}
+}ev.preventDefault();},{passive:false});
+
+function jump(){ if(P.dead||P.win){restart();return;} if(P.onDeck){P.vy=-560;P.onDeck=0;} }
+function restart(){
+  if(!P.dead&&!P.win)return;
+  P.dead=0;P.win=0;P.hp=3;shipHP=100;P.heat=0;P.locked=0;
+  foes.length=0;bullets.length=0;shots.length=0;parts.length=0;
+  T=0;phase=0;boss=null;spawnT=2;
+}
+function hurtP(n){ if(GOD){shake=4;return;} if(P.inv>0||P.dead)return;
+  P.hp-=n;P.inv=1.4;shake=9; if(P.hp<=0){P.hp=0;P.dead=1;} }
+function hurtShip(n){ if(GOD){shake=5;return;}
+  shipHP-=n;shake=10; if(shipHP<=0){shipHP=0;P.dead=1;} }
+
+// ── 实体 ──
+const foes=[];    // {type,x,y,...}
+const bullets=[]; // 玩家子弹
+const shots=[];   // 敌方弹
+const parts=[];
+let T=0, phase=0, spawnT=2, boss=null, shake=0, slow=0;
+const PHASES=['启航·教学','飞鱼群!','水母与海蛇','触手拍船!','风暴!','大海怪现身!'];
+
+function spark(x,y,col,n,sp){for(let i=0;i<n;i++){const a=Math.random()*6.283;
+  parts.push({x,y,vx:Math.cos(a)*sp*(60+Math.random()*90),vy:Math.sin(a)*sp*(60+Math.random()*90)-60,life:0,max:0.5+Math.random()*0.4,col});}}
+function msgQ(s){msg=s;msgT=2.4;}
+let msg='',msgT=0;
+
+// 生成器
+function spawnFish(){ const side=Math.random()<0.5?-1:1;
+  foes.push({type:'fish',x:side<0?-40:W+40,y:SEA-20,vx:-side*(240+Math.random()*120),
+    vy:-(520+Math.random()*160),hp:1,t:0}); }
+function spawnJelly(){ foes.push({type:'jelly',x:80+Math.random()*(W-160),y:H+60,
+  vy:-(60+Math.random()*40),hp:2,t:Math.random()*6,hit:0}); }
+function spawnSnake(){ const side=Math.random()<0.5?-1:1;
+  foes.push({type:'snake',x:side<0?60:W-60,y:SEA+40,side,hp:3,t:0,st:0,hit:0}); }
+function spawnTent(){ const tx=240+Math.random()*380;
+  foes.push({type:'tent',x:tx,y:SEA+80,hp:4,t:0,st:0,hit:0}); }
+function spawnWave(){ foes.push({type:'wave',x:W+80,y:SEA,t:0}); }
+function spawnBoss(){
+  boss={x:W/2,y:H+200,hp:60,st:'rise',t:0,mouth:0,hit:0,tents:[{a:-1,hp:8,t:0,st:0},{a:1,hp:8,t:1.5,st:0}]};
+  foes.length=0;
+}
+
+function pickTarget(){
+  if(boss){
+    if(boss.mouth>0)return {x:boss.x,y:boss.y+52};
+    let best=null,bd=1e9;
+    for(const tn of boss.tents){ if(tn.hp>0){const tx=W/2+tn.a*260,ty=boss.y+180;
+      const d=Math.hypot(tx-P.x,ty-P.y);if(d<bd){bd=d;best={x:tx,y:ty};}}}
+    const dh=Math.hypot(boss.x-P.x,boss.y-P.y);
+    if(dh<bd)best={x:boss.x,y:boss.y};
+    return best;
+  }
+  let best=null,bd=1e9;
+  for(const f of foes){
+    if(f.type==='wave')continue;
+    if(f.type==='tent'&&f.st===0)continue;
+    if(f.type==='snake'&&f.st===0)continue;
+    const ty=f.type==='tent'?f.y-90:f.y;
+    const d=Math.hypot(f.x-P.x,ty-(P.y-40));
+    if(d<bd){bd=d;best={x:f.x,y:ty};}
+  }
+  return best||{x:P.x+P.dir*300,y:P.y-260};
+}
+function step(dt){
+  T+=dt; shipPh+=dt;
+  deckY = DECK + Math.sin(shipPh*0.9)*10;
+  tilt = Math.sin(shipPh*0.7)*0.02;
+  if(msgT>0)msgT-=dt;
+  if(P.inv>0)P.inv-=dt;
+  if(shake>0)shake=Math.max(0,shake-dt*30);
+  if(P.dead||P.win)return;
+
+  // 阶段推进
+  const ph = T<14?0 : T<44?1 : T<86?2 : T<128?3 : T<152?4 : 5;
+  if(ph!==phase){phase=ph;msgQ(PHASES[phase]);if(phase===5)spawnBoss();}
+
+  // 刷怪
+  spawnT-=dt;
+  if(spawnT<=0&&!boss){
+    if(phase===0){spawnFish();spawnT=3;}
+    else if(phase===1){spawnFish();spawnT=1.1;}
+    else if(phase===2){(Math.random()<0.55?spawnJelly:spawnSnake)();spawnT=1.6;}
+    else if(phase===3){const r=Math.random();(r<0.4?spawnTent:r<0.7?spawnJelly:spawnFish)();spawnT=2.0;}
+    else if(phase===4){const r=Math.random();(r<0.3?spawnWave:r<0.6?spawnTent:spawnFish)();spawnT=1.5;}
+  }
+
+  // 玩家
+  let mv=(keys.KeyD?1:0)-(keys.KeyA?1:0);
+  if(joy.on&&Math.abs(joy.dx)>16)mv=Math.sign(joy.dx);
+  if(mv)P.dir=mv;
+  P.x=Math.max(214,Math.min(650,P.x+mv*240*dt));
+  if(!P.onDeck){P.vy+=1500*dt;P.y+=P.vy*dt;
+    if(P.y>=deckY){P.y=deckY;P.vy=0;P.onDeck=1;}}
+  else P.y=deckY;
+
+  // 射击(过热)
+  if(P.locked>0){P.locked-=dt;P.heat=Math.max(0,P.heat-dt*55);}
+  else{
+    P.heat=Math.max(0,P.heat-dt*34);
+    P.fireT-=dt;
+    if(autoFire){const tg=pickTarget();
+      P.aimX+=(tg.x-P.aimX)*Math.min(1,dt*14);
+      P.aimY+=(tg.y-P.aimY)*Math.min(1,dt*14);}
+    if((P.shooting||autoFire)&&P.fireT<=0){
+      P.fireT=0.11;
+      const gx=P.x+P.dir*10, gy=P.y-52;
+      const a=Math.atan2(P.aimY-gy,P.aimX-gx)+(Math.random()-0.5)*0.06;
+      bullets.push({x:gx,y:gy,vx:Math.cos(a)*820,vy:Math.sin(a)*820,life:0});
+      P.heat+=7;
+      spark(gx+Math.cos(a)*26,gy+Math.sin(a)*26,'#ffe9a0',3,0.8);
+      if(P.heat>=100){P.locked=1.6;msgQ('过热!散热中…');}
+    }
+  }
+  // 子弹
+  for(let i=bullets.length-1;i>=0;i--){const b=bullets[i];
+    b.life+=dt;b.x+=b.vx*dt;b.y+=b.vy*dt;
+    if(b.life>1.4||b.x<-40||b.x>W+40||b.y<-40||b.y>H+40)bullets.splice(i,1);}
+
+  // 敌人
+  for(let i=foes.length-1;i>=0;i--){
+    const f=foes[i]; f.t+=dt; if(f.hit>0)f.hit-=dt;
+    if(f.type==='fish'){
+      f.vy+=900*dt;f.x+=f.vx*dt;f.y+=f.vy*dt;
+      if(Math.abs(f.x-P.x)<34&&Math.abs(f.y-P.y+40)<44){hurtP(1);foes.splice(i,1);continue;}
+      if(f.y>SEA+40&&f.vy>0){foes.splice(i,1);continue;}
+    } else if(f.type==='jelly'){
+      f.y+=f.vy*dt; f.x+=Math.sin(f.t*2)*40*dt;
+      if(f.y<deckY+8&&Math.abs(f.x-P.x)<200){ // 靠近甲板自爆
+        if(Math.abs(f.x-P.x)<70)hurtP(1); hurtShip(6);
+        spark(f.x,f.y,'#b0e0ff',14,1.6);foes.splice(i,1);continue; }
+      if(f.y<deckY-60){hurtShip(5);spark(f.x,f.y,'#b0e0ff',12,1.5);foes.splice(i,1);continue;}
+    } else if(f.type==='snake'){
+      if(f.st===0){f.y-=160*dt;if(f.y<SEA-120){f.st=1;f.t=0;}}
+      else if(f.st===1){ if(f.t>0.5){f.st=2;f.t=0;
+        for(let k=-1;k<=1;k++){const a=Math.atan2((P.y-40)-(f.y),P.x-f.x)+k*0.22;
+          shots.push({x:f.x,y:f.y,vx:Math.cos(a)*300,vy:Math.sin(a)*300,life:0});}} }
+      else if(f.st===2){ if(f.t>1.6){f.st=3;f.t=0;} }
+      else { f.y+=180*dt; if(f.y>SEA+60){foes.splice(i,1);continue;} }
+    } else if(f.type==='tent'){
+      if(f.st===0){ // 预警水花
+        if(f.t>1.0){f.st=1;f.t=0;}
+      } else if(f.st===1){ f.y=Math.max(deckY-190,f.y-560*dt);
+        if(f.t>0.5){f.st=2;f.t=0;} }
+      else if(f.st===2){ // 横拍甲板
+        if(f.t<0.3){}else if(f.t<0.42){
+          if(Math.abs(f.x-P.x)<120&&P.onDeck)hurtP(1);
+          if(f.t<0.34)hurtShip(4);
+        } else if(f.t>1.2){f.st=3;f.t=0;}
+      } else { f.y+=420*dt; if(f.y>SEA+90){foes.splice(i,1);continue;} }
+    } else if(f.type==='wave'){
+      f.x-=420*dt;
+      if(Math.abs(f.x-P.x)<60&&P.onDeck){hurtP(1);}
+      if(f.x<-80){foes.splice(i,1);continue;}
+    }
+    // 中弹
+    if(f.type!=='wave'){
+      const hy=f.type==='tent'?f.y-90:f.type==='snake'?f.y:f.y;
+      for(let j=bullets.length-1;j>=0;j--){const b=bullets[j];
+        if(Math.hypot(b.x-f.x,b.y-hy)<(f.type==='tent'?54:36)){
+          bullets.splice(j,1);f.hp--;f.hit=0.15;spark(b.x,b.y,'#ffd7d0',5,1.1);
+          if(f.hp<=0){coins+=2;spark(f.x,hy,'#ffe9b0',12,1.6);foes.splice(i,1);}
+          break;}}
+    }
+  }
+  // 敌弹
+  for(let i=shots.length-1;i>=0;i--){const sh=shots[i];
+    sh.life+=dt;sh.x+=sh.vx*dt;sh.y+=sh.vy*dt;
+    if(Math.abs(sh.x-P.x)<26&&Math.abs(sh.y-(P.y-40))<36){hurtP(1);shots.splice(i,1);continue;}
+    if(sh.life>3||sh.y>H+40||sh.x<-40||sh.x>W+40)shots.splice(i,1);}
+
+  // Boss:大海怪
+  if(boss){
+    const b=boss; b.t+=dt; if(b.hit>0)b.hit-=dt;
+    if(b.st==='rise'){ b.y-=120*dt; if(b.y<=520){b.y=520;b.st='idle';b.t=0;} }
+    else if(b.st==='idle'){
+      b.x=W/2+Math.sin(T*0.6)*120;
+      b.mouth=Math.max(0,b.mouth-dt);
+      if(b.t>2.6){ b.st=Math.random()<0.5?'spit':'mouth'; b.t=0; }
+    } else if(b.st==='spit'){
+      if(b.t>0.4&&!b.sp){b.sp=1;
+        for(let k=0;k<5;k++){const a=Math.atan2((P.y-40)-b.y,P.x-b.x)+(k-2)*0.16;
+          shots.push({x:b.x,y:b.y+40,vx:Math.cos(a)*280,vy:Math.sin(a)*280,life:0});}}
+      if(b.t>1.2){b.sp=0;b.st='idle';b.t=0;}
+    } else if(b.st==='mouth'){ // 张嘴蓄力=弱点窗口
+      b.mouth=1.8;
+      if(b.t>1.8){ b.st='slam'; b.t=0; }
+    } else if(b.st==='slam'){ // 双触手拍船
+      for(const tn of b.tents){ if(tn.hp>0&&b.t>0.3&&b.t<0.44&&!tn.done){
+        tn.done=1; hurtShip(6);
+        if(Math.abs((W/2+tn.a*220)-P.x)<130&&P.onDeck)hurtP(1);
+        spark(W/2+tn.a*220,deckY,'#cfe0ff',10,1.5);} }
+      if(b.t>1.4){for(const tn of b.tents)tn.done=0; b.st='idle';b.t=0;}
+    }
+    // 子弹打Boss:嘴张开×3伤
+    for(let j=bullets.length-1;j>=0;j--){const bl=bullets[j];
+      let hitb=false;
+      for(const tn of b.tents){ if(tn.hp>0&&Math.hypot(bl.x-(W/2+tn.a*260),bl.y-(b.y+180))<44){
+        tn.hp--;hitb=true;spark(bl.x,bl.y,'#ffd7d0',5,1.1);
+        if(tn.hp<=0){spark(W/2+tn.a*260,b.y+180,'#ffe9b0',18,2);msgQ('触手打断了!');}
+        break;} }
+      if(!hitb&&Math.hypot(bl.x-b.x,bl.y-b.y)<86){
+        const dmg=b.mouth>0?3:1;
+        b.hp-=dmg;b.hit=0.15;hitb=true;
+        spark(bl.x,bl.y,b.mouth>0?'#ffe9a0':'#ffd7d0',dmg*3,1.3);
+      }
+      if(hitb)bullets.splice(j,1);
+      if(b.hp<=0){P.win=1;slow=1.4;spark(b.x,b.y,'#ffe9b0',40,2.6);break;}
+    }
+  }
+
+  for(let i=parts.length-1;i>=0;i--){const p=parts[i];p.life+=dt;
+    if(p.life>p.max){parts.splice(i,1);continue;}
+    p.x+=p.vx*dt;p.y+=p.vy*dt;p.vy+=800*dt;}
+}
+
+// ── 绘制 ──
+let bgScroll=0;
+function draw(dt){
+  bgScroll+=dt*170;
+  g.save();
+  if(shake>0)g.translate((Math.random()-0.5)*shake,(Math.random()-0.5)*shake);
+  // 夕阳天
+  const sky=g.createLinearGradient(0,0,0,H);
+  sky.addColorStop(0,'#3b3454');sky.addColorStop(0.35,'#7a5a70');sky.addColorStop(0.52,'#e0956a');sky.addColorStop(0.7,'#9a5e52');sky.addColorStop(1,'#412e50');
+  g.fillStyle=sky;g.fillRect(0,0,W,H);
+  // 落日+金光道
+  g.fillStyle='rgba(255,214,150,0.95)';g.beginPath();g.arc(W*0.32,H*0.40,52,0,7);g.fill();
+  g.fillStyle='rgba(255,190,150,0.28)';g.beginPath();g.arc(W*0.32,H*0.40,100,0,7);g.fill();
+  // 云(向左飘=船向右开)
+  g.fillStyle='rgba(240,180,170,0.5)';
+  for(let i=0;i<4;i++){const cx3=((i*260-bgScroll*0.35)%(W+300))-150, cy3=H*(0.16+(i%3)*0.07);
+    g.beginPath();g.ellipse(cx3,cy3,60,26,0,0,7);g.fill();}
+  // 远岛
+  g.fillStyle='rgba(120,90,130,0.6)';
+  for(let i=0;i<3;i++){const ix=((i*420-bgScroll*0.55)%(W+500))-250;
+    g.beginPath();g.moveTo(ix,H*0.475);g.quadraticCurveTo(ix+80,H*0.42,ix+170,H*0.475);g.fill();}
+  // 海平线+海
+  g.fillStyle='#5a4560';g.fillRect(0,H*0.475,W,6);
+  const seaG=g.createLinearGradient(0,H*0.475,0,H);
+  seaG.addColorStop(0,'#6a4a64');seaG.addColorStop(0.35,'#3a4a6a');seaG.addColorStop(1,'#1c2a48');
+  g.fillStyle=seaG;g.fillRect(0,H*0.475+6,W,H);
+  // 金光道
+  g.fillStyle='rgba(255,190,120,0.25)';
+  for(let i=0;i<9;i++){const yy=H*0.5+i*24;
+    g.fillRect(W*0.32-40-i*8+Math.sin(shipPh*2+i)*10,yy,80+i*16,7);}
+  // 海浪纹(向后跑=船在前进)
+  g.strokeStyle='rgba(220,200,230,0.28)';g.lineWidth=3;
+  for(let i=0;i<8;i++){
+    const yy=H*0.52+i*54, sp2=(bgScroll*(0.8+i*0.45))%160;
+    g.beginPath();
+    for(let x=-160-sp2;x<W+200;x+=160){g.moveTo(x,yy);g.quadraticCurveTo(x+34,yy-8,x+70,yy);}
+    g.stroke();
+  }
+
+  // ── 高速掠过的漂浮物(行进感主力):浮标/浮木/泡沫团 ──
+  {
+    const items=[[0,'buoy'],[430,'wood'],[820,'foam'],[1240,'wood'],[1650,'buoy'],[2080,'foam']];
+    for(const [off,kind] of items){
+      const spd=3.2;   // 比海纹快得多=离镜头近
+      const ix=W+120-((bgScroll*spd+off*3)%(W*3+600));
+      if(ix<-140)continue;
+      const iy=SEA+60+((off*7)%140), bob=Math.sin(shipPh*2+off)*6;
+      if(kind==='buoy'){
+        g.fillStyle='#c85a4a';g.beginPath();g.ellipse(ix,iy+bob,16,20,0,0,7);g.fill();
+        g.fillStyle='#e8e2d4';g.fillRect(ix-16,iy-8+bob,32,7);
+        g.strokeStyle='rgba(230,240,255,0.5)';g.lineWidth=2.5;
+        g.beginPath();g.ellipse(ix,iy+22+bob,24,6,0,0,7);g.stroke();
+      } else if(kind==='wood'){
+        g.save();g.translate(ix,iy+bob);g.rotate(0.2+Math.sin(shipPh+off)*0.1);
+        g.fillStyle='#6a4a34';g.fillRect(-34,-7,68,14);
+        g.fillStyle='#523a28';g.fillRect(-34,-7,68,4);g.restore();
+      } else {
+        g.fillStyle='rgba(230,244,255,0.45)';
+        g.beginPath();g.ellipse(ix,iy+bob,30,9,0,0,7);g.ellipse(ix+22,iy+4+bob,18,6,0,0,7);g.fill();
+      }
+    }
+  }
+  // ── 船尾尾迹(白沫拖尾)+ 船头劈浪 ──
+  {
+    // 尾迹:从船尾往左一条渐隐白沫带
+    for(let i=0;i<7;i++){
+      const wx3=52-i*58-((bgScroll*2)%58), al=0.5*(1-i/7);
+      g.fillStyle=`rgba(230,244,255,${Math.max(0,al)})`;
+      g.beginPath();g.ellipse(wx3,deckY+96+Math.sin(shipPh*3+i)*4,34-i*3,9,0,0,7);g.fill();
+    }
+    // 船头浪花:持续溅
+    if(Math.random()<0.5)parts.push({x:676,y:deckY+80,vx:120+Math.random()*80,vy:-(160+Math.random()*140),life:0,max:0.5,col:'#dff0ff'});
+    g.fillStyle='rgba(230,244,255,0.75)';
+    g.beginPath();g.ellipse(672,deckY+86,26,10,0.3,0,7);g.fill();
+    g.beginPath();g.arc(688,deckY+70,9+Math.sin(shipPh*6)*3,0,7);g.fill();
+  }
+  // ── 船(豪华双桅楼船,整体随浪) ──
+  g.save();g.translate(W/2,deckY);g.rotate(tilt);g.translate(-W/2,-deckY);
+  // 主桅(带双层帆)
+  g.fillStyle='#4a3628';g.fillRect(332,deckY-470,16,470);
+  g.fillStyle='#e8dcc0';
+  g.beginPath();g.moveTo(348,deckY-450);g.quadraticCurveTo(508,deckY-370,478,deckY-250);g.lineTo(348,deckY-258);g.fill();
+  g.beginPath();g.moveTo(332,deckY-440);g.quadraticCurveTo(196,deckY-360,216,deckY-250);g.lineTo(332,deckY-258);g.fill();
+  g.fillStyle='#dccfae';
+  g.beginPath();g.moveTo(348,deckY-240);g.quadraticCurveTo(488,deckY-180,462,deckY-100);g.lineTo(348,deckY-108);g.fill();
+  g.beginPath();g.moveTo(332,deckY-236);g.quadraticCurveTo(210,deckY-176,232,deckY-100);g.lineTo(332,deckY-108);g.fill();
+  // 帆上红纹
+  g.strokeStyle='#a03c3c';g.lineWidth=5;
+  g.beginPath();g.moveTo(240,deckY-330);g.quadraticCurveTo(340,deckY-352,452,deckY-330);g.stroke();
+  // 前桅+前帆
+  g.fillStyle='#4a3628';g.fillRect(536,deckY-340,12,340);
+  g.fillStyle='#e8dcc0';
+  g.beginPath();g.moveTo(548,deckY-320);g.quadraticCurveTo(646,deckY-250,626,deckY-140);g.lineTo(548,deckY-150);g.fill();
+  // 斜桅+三角帆(船头)
+  g.strokeStyle='#4a3628';g.lineWidth=10;
+  g.beginPath();g.moveTo(668,deckY-6);g.lineTo(724,deckY-70);g.stroke();
+  g.fillStyle='#dccfae';g.beginPath();g.moveTo(716,deckY-62);g.lineTo(560,deckY-150);g.lineTo(636,deckY-30);g.fill();
+  // 旗(迎风向后猎猎)
+  g.fillStyle='#a03c3c';g.beginPath();g.moveTo(340,deckY-470);g.quadraticCurveTo(288+Math.sin(shipPh*7)*8,deckY-462,276+Math.sin(shipPh*9)*10,deckY-452);g.quadraticCurveTo(300,deckY-444,340,deckY-438);g.fill();
+  g.fillStyle='#e8b04a';g.beginPath();g.moveTo(548,deckY-340);g.quadraticCurveTo(514+Math.sin(shipPh*8)*6,deckY-334,506+Math.sin(shipPh*10)*8,deckY-326);g.quadraticCurveTo(522,deckY-320,548,deckY-316);g.fill();
+  // 瞭望斗
+  g.fillStyle='#5a4234';g.fillRect(310,deckY-368,60,26);
+  g.fillStyle='#6a4e3a';g.fillRect(306,deckY-372,68,8);
+  // 尾楼(两层船楼,暖窗)
+  g.fillStyle='#5e4030';g.fillRect(44,deckY-170,150,170);
+  g.fillStyle='#6e4c38';g.fillRect(36,deckY-176,166,12);
+  g.fillStyle='#54382a';g.fillRect(56,deckY-88,126,88);
+  g.fillStyle='#e8b04a';g.fillRect(36,deckY-186,166,8);          // 金檐
+  const wl=0.7+0.3*Math.sin(shipPh*2.4);
+  g.fillStyle=`rgba(255,214,130,${wl})`;
+  for(const wx4 of [66,110,154]){g.fillRect(wx4,deckY-152,26,30);g.fillRect(wx4,deckY-66,26,26);}
+  g.strokeStyle='#3e2a1e';g.lineWidth=3;
+  for(const wx4 of [66,110,154]){g.strokeRect(wx4,deckY-152,26,30);g.strokeRect(wx4,deckY-66,26,26);}
+  // 尾楼顶栏杆+大灯笼
+  g.strokeStyle='#e8b04a';g.lineWidth=3;
+  for(let x=44;x<=194;x+=25){g.beginPath();g.moveTo(x,deckY-186);g.lineTo(x,deckY-206);g.stroke();}
+  g.beginPath();g.moveTo(40,deckY-206);g.lineTo(198,deckY-206);g.stroke();
+  const ln=0.6+0.4*Math.sin(shipPh*3.2);
+  g.fillStyle=`rgba(255,190,110,${ln})`;g.beginPath();g.arc(30,deckY-196,11,0,7);g.fill();
+  g.strokeStyle='#4a3628';g.lineWidth=4;g.beginPath();g.moveTo(30,deckY-206);g.lineTo(30,deckY-176);g.stroke();
+  // 船体(更长更深,金线+舷窗)
+  g.fillStyle='#6a4a34';g.beginPath();
+  g.moveTo(24,deckY);g.lineTo(696,deckY);g.quadraticCurveTo(720,deckY+20,676,deckY+120);
+  g.lineTo(76,deckY+120);g.quadraticCurveTo(8,deckY+36,24,deckY);g.fill();
+  g.fillStyle='#7c5840';g.fillRect(24,deckY-6,672,10);
+  g.fillStyle='#e8b04a';g.fillRect(24,deckY+18,668,6);            // 金线上
+  g.fillStyle='#c89040';g.fillRect(40,deckY+86,630,5);            // 金线下
+  g.strokeStyle='#523a28';g.lineWidth=3;
+  g.beginPath();g.moveTo(40,deckY+52);g.lineTo(688,deckY+52);g.stroke();
+  // 舷窗(暖光)
+  for(let x=110;x<650;x+=76){
+    g.fillStyle='#3e2a1e';g.beginPath();g.arc(x,deckY+62,11,0,7);g.fill();
+    g.fillStyle=`rgba(255,214,130,${0.5+0.3*Math.sin(shipPh*2+x)})`;g.beginPath();g.arc(x,deckY+62,7,0,7);g.fill();
+    g.strokeStyle='#e8b04a';g.lineWidth=2.5;g.beginPath();g.arc(x,deckY+62,11,0,7);g.stroke();
+  }
+  // 船首金雕像(鱼龙昂首)+船头灯
+  g.fillStyle='#e8b04a';
+  g.beginPath();g.moveTo(696,deckY+8);g.quadraticCurveTo(736,deckY-10,730,deckY-46);
+  g.quadraticCurveTo(726,deckY-22,706,deckY-14);g.fill();
+  g.beginPath();g.arc(728,deckY-48,10,0,7);g.fill();
+  g.fillStyle='#222';g.beginPath();g.arc(731,deckY-50,3,0,7);g.fill();
+  const on=0.6+0.4*Math.sin(shipPh*3);
+  g.fillStyle=`rgba(255,220,130,${on})`;g.beginPath();g.arc(688,deckY-16,9,0,7);g.fill();
+  // 雕花栏杆
+  g.strokeStyle='#523a28';g.lineWidth=4;
+  for(let x=210;x<680;x+=42){g.beginPath();g.moveTo(x,deckY-6);g.lineTo(x,deckY-36);g.stroke();
+    g.fillStyle='#e8b04a';g.beginPath();g.arc(x,deckY-38,4,0,7);g.fill();}
+  g.strokeStyle='#6a4e3a';g.lineWidth=5;
+  g.beginPath();g.moveTo(200,deckY-38);g.lineTo(690,deckY-38);g.stroke();
+  g.restore();
+
+  // ── 敌人 ──
+  for(const f of foes){
+    if(f.type==='fish'){
+      g.save();g.translate(f.x,f.y);g.rotate(Math.atan2(f.vy,f.vx));
+      g.fillStyle=f.hit>0?'#ffd7d0':'#7ab0c8';
+      g.beginPath();g.ellipse(0,0,26,11,0,0,7);g.fill();
+      g.fillStyle='#5a90a8';g.beginPath();g.moveTo(-20,0);g.lineTo(-36,-10);g.lineTo(-36,10);g.fill();
+      g.beginPath();g.moveTo(2,-8);g.lineTo(14,-22);g.lineTo(18,-6);g.fill();
+      g.fillStyle='#fff';g.beginPath();g.arc(12,-3,4,0,7);g.fill();
+      g.fillStyle='#222';g.beginPath();g.arc(13,-3,2,0,7);g.fill();
+      g.restore();
+    } else if(f.type==='jelly'){
+      const puls=1+Math.sin(f.t*4)*0.12;
+      g.fillStyle=f.hit>0?'rgba(255,215,208,0.9)':'rgba(150,190,255,0.75)';
+      g.beginPath();g.arc(f.x,f.y,24*puls,Math.PI,0);g.fill();
+      g.fillRect(f.x-24*puls,f.y-2,48*puls,6);
+      g.strokeStyle='rgba(150,190,255,0.6)';g.lineWidth=3;
+      for(let k=-1;k<=1;k++){g.beginPath();g.moveTo(f.x+k*12,f.y+4);
+        g.quadraticCurveTo(f.x+k*18,f.y+26,f.x+k*10,f.y+44+Math.sin(f.t*5+k)*6);g.stroke();}
+      g.fillStyle='#222';g.beginPath();g.arc(f.x-7,f.y-8,2.6,0,7);g.arc(f.x+7,f.y-8,2.6,0,7);g.fill();
+    } else if(f.type==='snake'){
+      g.strokeStyle=f.hit>0?'#ffd7d0':'#6a9a6a';g.lineWidth=14;
+      g.beginPath();g.moveTo(f.x,SEA+50);
+      g.quadraticCurveTo(f.x+f.side*30,f.y+60,f.x,f.y);g.stroke();
+      g.fillStyle=f.hit>0?'#ffd7d0':'#7aae7a';
+      g.beginPath();g.ellipse(f.x,f.y,20,15,0,0,7);g.fill();
+      g.fillStyle='#fff';g.beginPath();g.arc(f.x-6,f.y-4,5,0,7);g.arc(f.x+6,f.y-4,5,0,7);g.fill();
+      g.fillStyle='#222';g.beginPath();g.arc(f.x-5,f.y-4,2.4,0,7);g.arc(f.x+7,f.y-4,2.4,0,7);g.fill();
+      if(f.st===1){g.fillStyle=`rgba(255,120,90,${0.4+0.3*Math.sin(f.t*20)})`;
+        g.beginPath();g.arc(f.x,f.y+8,6,0,7);g.fill();}
+    } else if(f.type==='tent'){
+      if(f.st===0){ // 水面预警水花
+        g.fillStyle=`rgba(180,220,255,${0.3+0.25*Math.sin(f.t*16)})`;
+        g.beginPath();g.ellipse(f.x,SEA+4,46,12,0,0,7);g.fill();
+      } else {
+        g.strokeStyle=f.hit>0?'#ffd7d0':'#9a6ab0';g.lineWidth=26;g.lineCap='round';
+        g.beginPath();g.moveTo(f.x,SEA+80);
+        const bend=f.st===2&&f.t>0.3?90:0;
+        g.quadraticCurveTo(f.x+30,f.y-40,f.x+(f.st===2?bend:0),f.y-90);g.stroke();
+        g.fillStyle='#b88ac8';
+        for(let k=0;k<3;k++){g.beginPath();g.arc(f.x+8,f.y-30-k*26,6,0,7);g.fill();}
+        g.lineCap='butt';
+      }
+    } else if(f.type==='wave'){
+      g.fillStyle='rgba(150,190,230,0.8)';
+      g.beginPath();g.moveTo(f.x+70,deckY);g.quadraticCurveTo(f.x,deckY-110,f.x-70,deckY);g.fill();
+      g.fillStyle='rgba(230,244,255,0.9)';
+      g.beginPath();g.arc(f.x-14,deckY-92,15,0,7);g.arc(f.x+20,deckY-76,11,0,7);g.fill();
+    }
+  }
+
+  // ── Boss ──
+  if(boss){
+    const b=boss;
+    // 触手(两根,断了不画)
+    for(const tn of b.tents){ if(tn.hp<=0)continue;
+      const tx=W/2+tn.a*260;
+      g.strokeStyle=b.hit>0?'#ffd7d0':'#8a5aa0';g.lineWidth=30;g.lineCap='round';
+      g.beginPath();g.moveTo(tx+tn.a*60,H+40);
+      g.quadraticCurveTo(tx+tn.a*40,b.y+320,tx,b.y+180);g.stroke();g.lineCap='butt';
+      g.fillStyle='#a878b8';g.beginPath();g.arc(tx,b.y+180,26,0,7);g.fill();
+      // 血环
+      g.strokeStyle='#d85a4a';g.lineWidth=4;
+      g.beginPath();g.arc(tx,b.y+180,34,-Math.PI/2,-Math.PI/2+6.283*tn.hp/8);g.stroke();
+    }
+    // 本体:大头
+    g.save();g.translate(b.x,b.y);
+    g.fillStyle=b.hit>0?'#ffd8d0':'#7a4a90';
+    g.beginPath();g.ellipse(0,0,90,110,0,0,7);g.fill();
+    g.fillStyle='#8a5aa0';
+    g.beginPath();g.ellipse(-30,-70,26,36,0.3,0,7);g.ellipse(30,-70,26,36,-0.3,0,7);g.fill();
+    // 眼(一大一小)
+    g.fillStyle='#fff';g.beginPath();g.arc(-28,-20,20,0,7);g.arc(30,-14,13,0,7);g.fill();
+    g.fillStyle='#222';
+    const ea=Math.atan2((P.y-40)-b.y,P.x-b.x);
+    g.beginPath();g.arc(-28+Math.cos(ea)*7,-20+Math.sin(ea)*7,8,0,7);g.fill();
+    g.beginPath();g.arc(30+Math.cos(ea)*5,-14+Math.sin(ea)*5,5,0,7);g.fill();
+    // 嘴:张开=弱点发光
+    if(b.mouth>0){
+      g.fillStyle=`rgba(255,220,120,${0.7+0.3*Math.sin(T*14)})`;
+      g.beginPath();g.ellipse(0,52,34,26,0,0,7);g.fill();
+      g.fillStyle='#5a3a20';g.beginPath();g.ellipse(0,52,22,15,0,0,7);g.fill();
+    } else {
+      g.strokeStyle='#5a3a70';g.lineWidth=5;
+      g.beginPath();g.moveTo(-22,52);g.quadraticCurveTo(0,64,22,52);g.stroke();
+    }
+    g.restore();
+    // Boss 血条
+    g.fillStyle='#2a2436';g.fillRect(W/2-160,150,320,12);
+    g.fillStyle='#d85a4a';g.fillRect(W/2-160,150,320*b.hp/60,12);
+    g.fillStyle='#e8d8f0';g.font='18px sans-serif';g.textAlign='center';
+    g.fillText('大海怪 · 张嘴时打嘴=三倍伤',W/2,140);g.textAlign='left';
+  }
+
+  // 敌弹
+  for(const sh of shots){
+    g.fillStyle='#9ae87a';g.beginPath();g.arc(sh.x,sh.y,8,0,7);g.fill();
+    g.fillStyle='rgba(154,232,122,0.4)';g.beginPath();g.arc(sh.x,sh.y,13,0,7);g.fill();}
+  // 玩家子弹
+  for(const b of bullets){
+    g.strokeStyle='#ffe9a0';g.lineWidth=4;
+    g.beginPath();g.moveTo(b.x,b.y);g.lineTo(b.x-b.vx*0.02,b.y-b.vy*0.02);g.stroke();}
+
+  // ── 主角(持枪) ──
+  {
+    const p=P;
+    g.save();g.translate(p.x,p.y);
+    if(p.inv>0&&Math.sin(T*30)>0)g.globalAlpha=0.4;
+    g.fillStyle='#4a5a78';g.fillRect(-12,-46,24,30);
+    g.fillStyle='#f0c8a0';g.beginPath();g.arc(0,-66,20,0,7);g.fill();
+    g.fillStyle='#3a3444';g.beginPath();g.arc(0,-74,19,Math.PI,0);g.fill();
+    const aimA=Math.atan2(p.aimY-(p.y-52),p.aimX-p.x);
+    g.fillStyle='#222';g.beginPath();g.arc(Math.cos(aimA)*8,-66+Math.sin(aimA)*4,2.6,0,7);g.fill();
+    // 枪(指向准星)
+    g.save();g.translate(0,-52);g.rotate(aimA);
+    g.fillStyle='#3a3a48';g.fillRect(6,-5,34,10);g.fillRect(30,-7,14,14);
+    g.restore();
+    g.strokeStyle='#3a4258';g.lineWidth=6;
+    g.beginPath();g.moveTo(-6,-16);g.lineTo(-8,0);g.moveTo(6,-16);g.lineTo(8,0);g.stroke();
+    g.restore();
+    // 准星
+    g.strokeStyle='rgba(255,233,160,0.9)';g.lineWidth=2.5;
+    g.beginPath();g.arc(p.aimX,p.aimY,14,0,7);g.stroke();
+    g.beginPath();g.moveTo(p.aimX-22,p.aimY);g.lineTo(p.aimX-8,p.aimY);
+    g.moveTo(p.aimX+8,p.aimY);g.lineTo(p.aimX+22,p.aimY);
+    g.moveTo(p.aimX,p.aimY-22);g.lineTo(p.aimX,p.aimY-8);
+    g.moveTo(p.aimX,p.aimY+8);g.lineTo(p.aimX,p.aimY+22);g.stroke();
+  }
+
+  // 粒子
+  for(const p of parts){g.globalAlpha=1-p.life/p.max;g.fillStyle=p.col;g.fillRect(p.x-3,p.y-3,6,6);}
+  g.globalAlpha=1;
+
+  // ── HUD ──
+  for(let i=0;i<3;i++){g.fillStyle=i<P.hp?'#e85a5a':'#443a4c';
+    g.beginPath();const hx=34+i*40,hy=36;
+    g.arc(hx-7,hy-4,9,0,7);g.arc(hx+7,hy-4,9,0,7);
+    g.moveTo(hx-15,hy);g.lineTo(hx,hy+16);g.lineTo(hx+15,hy);g.fill();}
+  // 船血
+  g.fillStyle='#2a2436';g.fillRect(34,66,180,12);
+  g.fillStyle='#6ab0e8';g.fillRect(34,66,180*shipHP/100,12);
+  g.fillStyle='#cfe8ff';g.font='15px monospace';g.fillText('船',14,77);
+  // 过热
+  g.fillStyle='#2a2436';g.fillRect(34,92,180,10);
+  g.fillStyle=P.locked>0?'#e86a5a':P.heat>70?'#e8a05a':'#9be8c8';
+  g.fillRect(34,92,180*Math.min(1,P.heat/100),10);
+  g.fillStyle='#cfe8ff';g.fillText('热',14,101);
+  g.fillStyle='#ffd76a';g.beginPath();g.arc(40,132,12,0,7);g.fill();
+  g.fillStyle='#fff';g.font='22px monospace';g.fillText('×'+coins,58,140);
+  if(GOD){g.fillStyle='rgba(150,230,180,0.9)';g.font='20px monospace';g.fillText('无敌 ON(按G关)',W-220,40);}
+  // 阶段标语
+  if(msgT>0){g.font='26px sans-serif';const w2=g.measureText(msg).width;
+    g.fillStyle='rgba(20,18,34,0.75)';g.fillRect(W/2-w2/2-20,180,w2+40,48);
+    g.fillStyle='#ffe9b0';g.textAlign='center';g.fillText(msg,W/2,213);g.textAlign='left';}
+  // 虚拟摇杆
+  if(joy.on){
+    g.fillStyle='rgba(220,228,244,0.10)';g.beginPath();g.arc(joy.bx,joy.by,64,0,7);g.fill();
+    g.strokeStyle='rgba(230,238,252,0.35)';g.lineWidth=2;g.beginPath();g.arc(joy.bx,joy.by,64,0,7);g.stroke();
+    g.fillStyle='rgba(230,238,252,0.28)';g.beginPath();g.arc(joy.bx+joy.dx,joy.by+Math.max(-64,Math.min(64,joy.dy)),30,0,7);g.fill();
+  }
+  // 开火键(毛玻璃)
+  {
+    const fb=fireBtn, pressed=autoFire;
+    g.fillStyle=pressed?'rgba(255,214,130,0.30)':'rgba(220,228,244,0.12)';
+    g.beginPath();g.arc(fb.x,fb.y,fb.r,0,7);g.fill();
+    g.strokeStyle='rgba(230,238,252,0.4)';g.lineWidth=2.5;g.beginPath();g.arc(fb.x,fb.y,fb.r,0,7);g.stroke();
+    g.save();g.translate(fb.x,fb.y);g.rotate(-0.5);
+    g.fillStyle='rgba(240,244,255,0.85)';g.fillRect(-20,-6,34,12);g.fillRect(6,-10,14,20);
+    g.restore();
+  }
+  if(P.dead)ov('船毁人亡…','点击/按J 重来');
+  if(P.win)ov('海怪沉了!','靠岸雨林海岸 · 金币×'+coins+' · 点击重玩');
+  g.restore();
+}
+function ov(t1,t2){
+  g.fillStyle='rgba(14,12,26,0.72)';g.fillRect(0,0,W,H);
+  g.fillStyle='#ffe9b0';g.font='52px sans-serif';g.textAlign='center';
+  g.fillText(t1,W/2,H/2-30);
+  g.fillStyle='#cfd6e6';g.font='24px sans-serif';g.fillText(t2,W/2,H/2+30);g.textAlign='left';
+}
+let last=0;
+function loop(ts){
+  let dt=Math.min(0.033,(ts-last)/1000||0.016);last=ts;
+  if(slow>0){slow-=dt;dt*=0.4;}
+  step(dt);draw(dt);requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
