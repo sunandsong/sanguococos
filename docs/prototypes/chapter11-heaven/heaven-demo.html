@@ -1,0 +1,616 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>天界 Demo · 终章</title>
+<style>
+  html,body{margin:0;padding:0;background:#1a140e;height:100%;overflow:hidden;touch-action:none}
+  #wrap{display:flex;align-items:center;justify-content:center;height:100%}
+  canvas{background:#2a2218;max-height:100vh;max-width:100vw}
+  #tip{position:fixed;left:10px;top:8px;color:#cb9;font:12px/1.6 monospace;pointer-events:none;white-space:pre}
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="cv" width="720" height="1280"></canvas></div>
+<div id="tip">WASD/方向键 自由飞行 · J 冲刺斩(飞行攻击)
+流程:凌霄天街(天上也是空城…)→天兵方阵→长明灯塔(五盏故人魂灯)→天河逆流
+→司命星君:P1改写规则(重/逆/定)→P2镜像假你→P3巨大化…直到万魂来援 · G 无敌(默认开)</div>
+<script>
+'use strict';
+const cv=document.getElementById('cv'), g=cv.getContext('2d');
+const W=720,H=1280;
+const WORLD=12900, YMIN=140, YMAX=1150;
+const STREET1=4600, ARMY1=7400, TW0=7520, TOWER1=9160, RIV0=9200, RIV1=10800, BOSS0=10850, BOSSX=11900;
+
+// 天兵
+const troops=[];
+const elites=[{x:5900,y:520,hp:5,hit:0,dead:0,ph:0,shT:2},{x:6900,y:420,hp:5,hit:0,dead:0,ph:2,shT:3}];
+const debris=[];
+const rings=[];
+{
+  const rnd=s=>((Math.sin(s*127.1)*43758.5)%1+1)%1;
+  for(let i=0;i<22;i++){
+    troops.push({x:4750+i*120,y:280+((i*263)%740),hp:2,hit:0,dead:0,ph:rnd(i)*6,shT:1+rnd(i*3)*2});
+  }
+  for(let i=0;i<7;i++)debris.push({x:900+i*520,y:300+((i*331)%640),r:46,ph:rnd(i*7)*6});
+  for(let i=0;i<9;i++)rings.push({x:600+i*440,y:260+((i*277)%700),got:0});
+  for(let i=0;i<5;i++)rings.push({x:RIV0+180+i*300,y:300+((i*353)%620),got:0});
+}
+// 天河星涡
+const VORT=[{x:9600,y:520},{x:10080,y:780},{x:10480,y:360}];
+// 三盏故人魂灯
+const LAMPS=[{x:7680,y:420,name:'瓦罐匠',on:0},{x:7960,y:780,name:'老船夫',on:0},{x:8240,y:320,name:'守夜人',on:0},{x:8520,y:660,name:'渔娘',on:0},{x:8840,y:430,name:'货郎',on:0}];
+// 司命星君
+const SS={x:BOSSX,y:520,hp:90,st:'idle',t:2,hit:0,dead:0,ph:1,scale:1,
+  ch:'',chT:0,bound:0,deadT:0};
+const bolts=[];const orbs=[];
+let mirror=null, soulsFired=0, soulParts=[];
+// 规则改写效果
+const FX={heavy:0,invert:0,pin:0};
+
+// ── 玩家(全程飞行) ──
+const P={x:200,y:640,vx:0,vy:0,dir:1,hp:3,inv:0,dashT:0,dashCd:0,dead:0,win:0};
+let camX=0,coins=0,GOD=1,shake=0,T=0,slow=0,lock=0,cpi=0,endT=0;
+let msg='',msgT=0;
+const CPS=[{x:200,y:640},{x:4650,y:640},{x:7460,y:640},{x:9260,y:640},{x:10920,y:640}];
+const FLAGS={street:0,elder:0,army:0,tower:0,boss:0,river:0};
+function msgQ(t,d){msg=t;msgT=d||2.8;}
+const keys={};
+onkeydown=e=>{keys[e.code]=1;
+  if(['Space','KeyW','ArrowUp','ArrowDown'].includes(e.code))e.preventDefault();
+  if(e.code==='KeyJ')dash();
+  if(e.code==='KeyG')GOD=!GOD;};
+onkeyup=e=>keys[e.code]=0;
+let touchL={on:0,x:0,y:0};
+cv.addEventListener('touchstart',ev=>{const r=cv.getBoundingClientRect();
+  for(const t of ev.changedTouches){const x=(t.clientX-r.left)/r.width*W,y=(t.clientY-r.top)/r.height*H;
+    if(x<W/2){touchL={on:1,x,y,id:t.identifier};} else dash();}
+  if(P.dead||P.win)restart();ev.preventDefault();},{passive:false});
+cv.addEventListener('touchmove',ev=>{const r=cv.getBoundingClientRect();
+  for(const t of ev.changedTouches){if(touchL.on&&t.identifier===touchL.id){
+    touchL.x=(t.clientX-r.left)/r.width*W;touchL.y=(t.clientY-r.top)/r.height*H;}}
+  ev.preventDefault();},{passive:false});
+cv.addEventListener('touchend',ev=>{for(const t of ev.changedTouches)if(t.identifier===touchL.id)touchL.on=0;
+  ev.preventDefault();},{passive:false});
+
+function dash(){
+  if(P.dead||P.win){restart();return;}
+  if(lock>0||FX.pin>0)return;
+  if(P.dashCd<=0){P.dashT=0.28;P.dashCd=0.55;}
+}
+function restart(){
+  if(!P.dead&&!P.win)return;
+  P.dead=0;P.win=0;P.hp=3;P.vx=0;P.vy=0;
+  const c=CPS[cpi];P.x=c.x;P.y=c.y;
+  if(cpi>=4&&!SS.dead){SS.hp=90;SS.ph=1;SS.st='idle';SS.t=2;SS.scale=1;SS.bound=0;
+    bolts.length=0;orbs.length=0;mirror=null;soulsFired=0;
+    FX.heavy=0;FX.invert=0;FX.pin=0;}
+}
+function hurt(n){ if(GOD){shake=4;return;} if(P.inv>0||P.dead)return;
+  P.hp-=n;P.inv=1.3;shake=9; if(P.hp<=0){P.hp=0;P.dead=1;} }
+const parts=[];
+function spark(x,y,col,n,sp){for(let i=0;i<n;i++){const a=Math.random()*6.283;
+  parts.push({x,y,vx:Math.cos(a)*sp*100,vy:Math.sin(a)*sp*100,life:0,max:0.5+Math.random()*0.3,col});}}
+
+function step(dt){
+  T+=dt;
+  if(msgT>0)msgT-=dt;
+  if(P.inv>0)P.inv-=dt;
+  if(P.dashT>0)P.dashT-=dt;
+  if(P.dashCd>0)P.dashCd-=dt;
+  if(shake>0)shake=Math.max(0,shake-dt*30);
+  if(FX.heavy>0)FX.heavy-=dt;
+  if(FX.invert>0)FX.invert-=dt;
+  if(FX.pin>0)FX.pin-=dt;
+  if(lock>0){lock-=dt;return;}
+  if(P.dead)return;
+  if(P.win){endT+=dt;return;}
+
+  let mvx=(keys.KeyD||keys.ArrowRight?1:0)-(keys.KeyA||keys.ArrowLeft?1:0)
+    ||(touchL.on?Math.sign(touchL.x-(W/4)):0);
+  let mvy=(keys.KeyS||keys.ArrowDown?1:0)-(keys.KeyW||keys.ArrowUp?1:0)
+    ||(touchL.on?Math.sign(touchL.y-(H*0.55)):0);
+  if(FX.invert>0){mvx=-mvx;mvy=-mvy;}
+  if(FX.pin>0){mvx=0;mvy=0;}
+  if(mvx)P.dir=mvx;
+
+  // 飞行
+  const sp2=P.dashT>0?760:430;
+  P.vx+=(mvx*sp2-P.vx)*Math.min(1,dt*6);
+  P.vy+=(mvy*sp2-P.vy)*Math.min(1,dt*6);
+  if(P.dashT>0){P.vx=P.dir*760;}
+  if(FX.heavy>0)P.vy+=520*dt;
+  P.x+=P.vx*dt;P.y+=P.vy*dt;
+  P.x=Math.max(60,Math.min(WORLD-60,P.x));
+  P.y=Math.max(YMIN,Math.min(YMAX,P.y));
+  // 灯塔出口门禁(五灯未齐)
+  if(LAMPS.some(l=>!l.on)&&P.x>TOWER1-40&&P.x<TOWER1+220)P.x=Math.min(P.x,TOWER1-40);
+  // 天街漂浮残柱(撞了弹开)
+  for(const d of debris){
+    d.ph+=dt;const dy2=d.y+Math.sin(d.ph)*40;
+    const dd=Math.hypot(P.x-d.x,P.y-40-dy2);
+    if(dd<d.r+26){hurt(1);const a=Math.atan2(P.y-40-dy2,P.x-d.x);
+      P.vx=Math.cos(a)*420;P.vy=Math.sin(a)*420;}
+  }
+  // 金环
+  for(const r of rings){
+    if(!r.got&&Math.hypot(P.x-r.x,P.y-40-r.y)<52){r.got=1;coins++;spark(r.x,r.y,'#ffd76a',10,1.4);}
+  }
+  // 天河:逆风+星涡
+  if(P.x>RIV0&&P.x<RIV1){
+    P.vx-=130*dt;
+    for(const v of VORT){
+      const dd=Math.hypot(P.x-v.x,P.y-v.y);
+      if(dd<200){P.vx+=(v.x-P.x)/dd*260*dt*(200-dd)/200*3;
+        P.vy+=(v.y-P.y)/dd*260*dt*(200-dd)/200*3;}
+    }
+  }
+  // Boss 场锁
+  if(FLAGS.boss&&!SS.dead)P.x=Math.max(BOSS0+40,Math.min(WORLD-80,P.x));
+  if(Math.random()<dt*14)parts.push({x:P.x-P.dir*16,y:P.y-36,vx:-P.dir*50,vy:20,life:0,max:0.4,col:'#ffe9c0'});
+
+  // 阶段
+  if(!FLAGS.street&&P.x>400){FLAGS.street=1;msgQ('凌霄天街…怎么一个神仙都没有?');}
+  if(!FLAGS.river&&P.x>RIV0+80){FLAGS.river=1;msgQ('天河逆流…顶着风,小心星涡!');}
+  if(!FLAGS.elder&&Math.abs(P.x-2200)<140){FLAGS.elder=1;
+    msgQ('残存的老仙官:"香火断了…天庭在消散。星君他…把人间的魂当了灯油。"',4.2);}
+  if(!FLAGS.army&&P.x>STREET1){FLAGS.army=1;msgQ('残存天兵拦路——J 冲刺斩撞散他们!');}
+  if(!FLAGS.tower&&P.x>ARMY1){FLAGS.tower=1;msgQ('长明灯塔…万盏魂灯。找到五位故人的灯');}
+  if(!FLAGS.boss&&P.x>BOSS0+100&&LAMPS.every(l=>l.on)){FLAGS.boss=1;cpi=4;
+    msgQ('司命星君:"你的名字,不该出现在这里。"',3.4);}
+
+  // 天兵
+  for(const tr of troops){
+    if(tr.dead)continue;
+    tr.ph+=dt;if(tr.hit>0)tr.hit-=dt;
+    tr.y+=Math.sin(tr.ph*1.6)*30*dt;
+    if(Math.abs(P.x-tr.x)<600){
+      tr.shT-=dt;
+      if(tr.shT<=0){tr.shT=2.4;
+        const a=Math.atan2(P.y-tr.y,P.x-tr.x);
+        bolts.push({x:tr.x,y:tr.y,vx:Math.cos(a)*300,vy:Math.sin(a)*300,life:0,gold:1});}
+    }
+    if(Math.abs(P.x-tr.x)<38&&Math.abs(P.y-tr.y)<48)hurt(1);
+    if(P.dashT>0.06&&Math.abs(P.x+P.dir*50-tr.x)<80&&Math.abs(P.y-tr.y)<70){
+      tr.hp--;tr.hit=0.15;spark(tr.x,tr.y,'#ffd7d0',8,1.4);
+      if(tr.hp<=0){tr.dead=1;coins+=2;spark(tr.x,tr.y,'#ffe9b0',14,1.8);}
+    }
+  }
+  // 天将(精英:三向矛)
+  for(const el of elites){
+    if(el.dead)continue;
+    el.ph+=dt;if(el.hit>0)el.hit-=dt;
+    el.y+=Math.sin(el.ph*1.2)*26*dt;
+    if(Math.abs(P.x-el.x)<640){
+      el.shT-=dt;
+      if(el.shT<=0){el.shT=2.8;
+        for(let k=-1;k<=1;k++){
+          const a=Math.atan2(P.y-el.y,P.x-el.x)+k*0.26;
+          bolts.push({x:el.x,y:el.y,vx:Math.cos(a)*320,vy:Math.sin(a)*320,life:0});}}
+    }
+    if(Math.abs(P.x-el.x)<48&&Math.abs(P.y-el.y)<60)hurt(1);
+    if(P.dashT>0.06&&Math.abs(P.x+P.dir*50-el.x)<96&&Math.abs(P.y-el.y)<84){
+      el.hp--;el.hit=0.15;spark(el.x,el.y,'#ffd7d0',9,1.5);
+      if(el.hp<=0){el.dead=1;coins+=6;spark(el.x,el.y,'#ffe9b0',18,2);}
+    }
+  }
+  // 魂灯
+  for(const l of LAMPS){
+    if(!l.on&&Math.hypot(P.x-l.x,P.y-l.y)<56){
+      l.on=1;spark(l.x,l.y,'#8ce6be',14,1.6);
+      msgQ(l.name+'的灯…"是你呀。去吧,把大家带回家。"',3.4);
+    }
+  }
+  // ── 司命星君 ──
+  if(FLAGS.boss&&!SS.dead){
+    SS.ph=SS.hp>60?1:SS.hp>30?2:3;
+    SS.scale=SS.ph===3?2.4:1;
+    if(SS.hit>0)SS.hit-=dt;
+    SS.y=520+Math.sin(T*0.9)*80;
+    if(SS.bound>0){SS.bound-=dt;}
+    else{
+      SS.t-=dt;
+      if(SS.st==='idle'){
+        if(SS.t<=0){
+          if(SS.ph===1){SS.st='write';SS.ch=['重','逆','定'][Math.random()*3|0];SS.chT=0.9;SS.t=0.9;}
+          else if(SS.ph===2&&!mirror){mirror={x:SS.x-300,y:400,hp:14,hit:0,dashT:0,cd:2};
+            msgQ('星君照着生死簿写出了…另一个你?!',3);SS.t=3;}
+          else {SS.st='volley';SS.t=1.2;}
+        }
+      } else if(SS.st==='write'){
+        if(SS.t<=0){
+          if(SS.ch==='重'){FX.heavy=6;msgQ('「重」——身子沉得像铁!');}
+          else if(SS.ch==='逆'){FX.invert=5;msgQ('「逆」——方向反了!');}
+          else {FX.pin=1.1;msgQ('「定」!');}
+          SS.st='idle';SS.t=2.4+Math.random();
+        }
+      } else if(SS.st==='volley'){
+        if(SS.t<=0){
+          const n=SS.ph===3?7:5;
+          for(let k=0;k<n;k++){
+            const a=Math.atan2(P.y-SS.y,P.x-SS.x)+(k-(n-1)/2)*0.22;
+            orbs.push({x:SS.x,y:SS.y+40,vx:Math.cos(a)*260,vy:Math.sin(a)*260,life:0});}
+          SS.st='idle';SS.t=SS.ph===3?1.6:2.2;
+        }
+      }
+    }
+    // 镜像
+    if(mirror){
+      const m=mirror;
+      if(m.hit>0)m.hit-=dt;
+      m.cd-=dt;
+      if(m.cd<=0){m.cd=2.2;m.dashT=0.4;m.dx=Math.sign(P.x-m.x);}
+      if(m.dashT>0){m.dashT-=dt;m.x+=m.dx*700*dt;}
+      else{m.x+=(P.x-m.x)*dt*1.4;m.y+=(P.y-m.y)*dt*1.4;}
+      if(Math.abs(P.x-m.x)<36&&Math.abs(P.y-m.y)<48)hurt(1);
+      if(P.dashT>0.06&&Math.abs(P.x+P.dir*50-m.x)<80&&Math.abs(P.y-m.y)<70){
+        m.hp--;m.hit=0.15;spark(m.x,m.y,'#cfd0e8',8,1.4);
+        if(m.hp<=0){mirror=null;msgQ('假的你散了——他愣住了,上!');spark(m.x,m.y,'#e8dcf8',20,2);}
+      }
+    }
+    // 万魂来援(P3 血≤8)
+    if(SS.ph===3&&SS.hp<=12&&!soulsFired){
+      soulsFired=1;lock=3.2;SS.bound=7;
+      msgQ('灯塔炸开——万盏魂火涌来缠住了他!!',3);
+      for(let k=0;k<60;k++)soulParts.push({x:ARMY1+600+Math.random()*400,y:200+Math.random()*800,
+        tx:SS.x+(Math.random()-0.5)*300,ty:SS.y+(Math.random()-0.5)*300,t:Math.random()});
+    }
+    // 打Boss(镜像在场时无敌)
+    const canHit=!mirror;
+    if(canHit&&P.dashT>0.06&&Math.abs(P.x+P.dir*50-SS.x)<110*SS.scale&&Math.abs(P.y-SS.y)<130*SS.scale){
+      SS.hp--;SS.hit=0.15;shake=6;spark(SS.x,SS.y,'#ffd7d0',10,1.6);
+      if(SS.hp<=0){SS.dead=1;SS.deadT=0;slow=1.6;shake=16;
+        bolts.length=0;orbs.length=0;
+        msgQ('司命星君的笔…折了。',3);}
+    }
+  } else if(SS.dead){
+    SS.deadT+=dt;
+    if(SS.deadT>2&&SS.deadT<2.1)msgQ('长明灯尽数熄灭——万魂如流星,落回人间。',3.6);
+    if(SS.deadT>5.6&&SS.deadT<5.7)msgQ('天庭留你做神仙…你摇了摇头。',3.4);
+    if(SS.deadT>9){P.win=1;}
+  }
+  // 弹幕
+  for(let i=bolts.length-1;i>=0;i--){const b=bolts[i];
+    b.life+=dt;b.x+=b.vx*dt;b.y+=b.vy*dt;
+    if(Math.abs(P.x-b.x)<26&&Math.abs(P.y-b.y)<34){hurt(1);bolts.splice(i,1);continue;}
+    if(b.life>4)bolts.splice(i,1);}
+  for(let i=orbs.length-1;i>=0;i--){const o=orbs[i];
+    o.life+=dt;o.x+=o.vx*dt;o.y+=o.vy*dt;
+    if(Math.abs(P.x-o.x)<30&&Math.abs(P.y-o.y)<38){hurt(1);orbs.splice(i,1);continue;}
+    if(o.life>5)orbs.splice(i,1);}
+  // 魂火飞行
+  for(const s2 of soulParts){
+    s2.t+=dt*0.5;
+    s2.x+=(s2.tx-s2.x)*dt*1.8;
+    s2.y+=(s2.ty-s2.y)*dt*1.8;
+  }
+  // 检查点
+  for(let i=0;i<CPS.length;i++){const c=CPS[i];
+    if(i>cpi&&Math.abs(P.x-c.x)<100){cpi=i;}}
+
+  camX+=((P.x-W*0.45)-camX)*Math.min(1,dt*5);
+  camX=Math.max(0,Math.min(WORLD-W,camX));
+  for(let i=parts.length-1;i>=0;i--){const p=parts[i];p.life+=dt;
+    if(p.life>p.max){parts.splice(i,1);continue;}
+    p.x+=p.vx*dt;p.y+=p.vy*dt;}
+}
+
+const sx=wx=>wx-camX;
+
+function draw(){
+  g.save();
+  if(shake>0)g.translate((Math.random()-0.5)*shake,(Math.random()-0.5)*shake);
+  // 金尘天色(衰败的金)
+  const sky=g.createLinearGradient(0,0,0,H);
+  sky.addColorStop(0,'#3a3020');sky.addColorStop(0.5,'#4a3c26');sky.addColorStop(1,'#2e2618');
+  g.fillStyle=sky;g.fillRect(0,0,W,H);
+  // 飘尘
+  g.fillStyle='rgba(220,200,150,0.3)';
+  for(let i=0;i<16;i++){
+    const dx2=((i*97-camX*0.2)%(W+80)+(W+80))%(W+80)-40;
+    const dy2=(i*173+T*14)%(H+60)-30;
+    g.beginPath();g.arc(dx2,dy2,1.8,0,7);g.fill();
+  }
+  // 云海地面
+  g.fillStyle='rgba(240,230,208,0.9)';
+  for(let x=-100;x<W+100;x+=140){
+    const wx=((x-camX*0.9)%(W+280)+(W+280))%(W+280)-140;
+    g.beginPath();g.ellipse(wx,YMAX+90,110,44,0,0,7);g.fill();
+  }
+  g.fillStyle='rgba(216,204,180,0.95)';g.fillRect(0,YMAX+60,W,H);
+  // 蒙尘金殿(视差)
+  for(let i=0;i<7;i++){
+    const px2=((i*1250-camX*0.65)%(WORLD*0.8)+(W+700))%(W+700)-350;
+    const hh=380+((i*97)%3)*90;
+    g.fillStyle='#57482e';
+    g.fillRect(px2,YMAX+40-hh,300,hh);
+    g.fillStyle='#6a5838';
+    g.beginPath();g.moveTo(px2-34,YMAX+40-hh);g.quadraticCurveTo(px2+150,YMAX-hh-60,px2+334,YMAX+40-hh);g.fill();
+    // 蛛网(衰败)
+    g.strokeStyle='rgba(220,210,190,0.35)';g.lineWidth=2;
+    g.beginPath();g.moveTo(px2+20,YMAX+40-hh+20);g.lineTo(px2+90,YMAX+40-hh+90);
+    g.moveTo(px2+90,YMAX+40-hh+20);g.lineTo(px2+20,YMAX+40-hh+90);g.stroke();
+    // 灭了的窗
+    g.fillStyle='rgba(30,26,20,0.8)';
+    for(let k=0;k<3;k++)g.fillRect(px2+50+k*80,YMAX+40-hh+140,34,50);
+  }
+  // 老仙官(半透明)
+  {
+    const ex=sx(1600);
+    if(ex>-80&&ex<W+80){
+      const fade=0.35+0.15*Math.sin(T*1.4);
+      g.fillStyle=`rgba(240,236,220,${fade})`;
+      g.beginPath();g.arc(ex,760,22,Math.PI,0);
+      g.quadraticCurveTo(ex+22,810,ex+12,816);
+      g.quadraticCurveTo(ex,802,ex-12,816);
+      g.quadraticCurveTo(ex-22,810,ex-22,760);g.fill();
+      g.fillStyle=`rgba(230,224,205,${fade})`;
+      g.beginPath();g.arc(ex,745,14,0,7);g.fill();
+      g.fillStyle=`rgba(40,36,30,${fade+0.2})`;
+      g.beginPath();g.arc(ex-5,743,2,0,7);g.arc(ex+5,743,2,0,7);g.fill();
+    }
+  }
+  // 天兵
+  for(const tr of troops){
+    if(tr.dead)continue;
+    const tx=sx(tr.x);
+    if(tx<-60||tx>W+60)continue;
+    const bob=Math.sin(tr.ph*2)*6;
+    g.fillStyle=tr.hit>0?'#ffd8d0':'#c8a24a';
+    g.beginPath();g.arc(tx,tr.y-14+bob,20,Math.PI,0);
+    g.quadraticCurveTo(tx+20,tr.y+16+bob,tx+10,tr.y+20+bob);
+    g.quadraticCurveTo(tx,tr.y+8+bob,tx-10,tr.y+20+bob);
+    g.quadraticCurveTo(tx-20,tr.y+16+bob,tx-20,tr.y-14+bob);g.fill();
+    g.fillStyle='#8a6a2a';g.fillRect(tx-14,tr.y-34+bob,28,14);
+    g.fillStyle='#fff';g.beginPath();g.arc(tx-6,tr.y-14+bob,4,0,7);g.arc(tx+6,tr.y-14+bob,4,0,7);g.fill();
+    g.fillStyle='#222';g.beginPath();g.arc(tx-5,tr.y-14+bob,2,0,7);g.arc(tx+7,tr.y-14+bob,2,0,7);g.fill();
+    g.strokeStyle='#8a6a2a';g.lineWidth=4;
+    g.beginPath();g.moveTo(tx+16,tr.y+6+bob);g.lineTo(tx+40,tr.y-30+bob);g.stroke();
+  }
+  // 天街漂浮残柱
+  for(const d of debris){
+    const px2=sx(d.x);
+    if(px2<-80||px2>W+80)continue;
+    const dy2=d.y+Math.sin(d.ph)*40;
+    g.save();g.translate(px2,dy2);g.rotate(d.ph*0.3);
+    g.fillStyle='#6a5838';g.fillRect(-d.r,-16,d.r*2,32);
+    g.fillStyle='#57482e';g.fillRect(-d.r,-16,d.r*2,10);
+    g.restore();
+  }
+  // 金环
+  for(const r of rings){
+    if(r.got)continue;
+    const px2=sx(r.x);
+    if(px2<-70||px2>W+70)continue;
+    const gl=0.6+0.3*Math.sin(T*3+r.x);
+    g.strokeStyle=`rgba(255,215,106,${gl})`;g.lineWidth=6;
+    g.beginPath();g.ellipse(px2,r.y,40,48,0,0,7);g.stroke();
+  }
+  // 天河(金色逆流带+星涡)
+  {
+    const x0=sx(RIV0),x1=sx(RIV1);
+    if(!(x1<0||x0>W)){
+      g.fillStyle='rgba(245,221,154,0.07)';
+      g.fillRect(Math.max(0,x0),0,Math.min(W,x1)-Math.max(0,x0),H);
+      g.strokeStyle='rgba(245,221,154,0.35)';g.lineWidth=2.5;
+      for(let i=0;i<8;i++){
+        const ly=150+i*130;
+        const off=(T*220+i*60)%(RIV1-RIV0);
+        const lx=sx(RIV1-off);
+        if(lx>x0&&lx<x1){g.beginPath();g.moveTo(lx,ly);g.lineTo(lx+44,ly);g.stroke();}
+      }
+      for(const v of VORT){
+        const vx2=sx(v.x);
+        if(vx2<-100||vx2>W+100)continue;
+        g.strokeStyle='rgba(255,240,190,0.5)';g.lineWidth=3;
+        for(let k=0;k<3;k++){
+          g.beginPath();g.arc(vx2,v.y,60-k*16,T*2.4+k,T*2.4+k+4.6);g.stroke();}
+      }
+    }
+  }
+  // 天将
+  for(const el of elites){
+    if(el.dead)continue;
+    const tx=sx(el.x);
+    if(tx<-80||tx>W+80)continue;
+    const bob=Math.sin(el.ph*1.6)*8;
+    g.fillStyle=el.hit>0?'#ffd8d0':'#b0812e';
+    g.beginPath();g.arc(tx,el.y-20+bob,30,Math.PI,0);
+    g.quadraticCurveTo(tx+30,el.y+26+bob,tx+15,el.y+32+bob);
+    g.quadraticCurveTo(tx,el.y+14+bob,tx-15,el.y+32+bob);
+    g.quadraticCurveTo(tx-30,el.y+26+bob,tx-30,el.y-20+bob);g.fill();
+    g.fillStyle='#7a5a1e';g.fillRect(tx-22,el.y-52+bob,44,20);
+    g.fillStyle='#d83030';g.beginPath();g.moveTo(tx,el.y-52+bob);g.lineTo(tx+6,el.y-72+bob);g.lineTo(tx-6,el.y-72+bob);g.fill();
+    g.fillStyle='#fff';g.beginPath();g.arc(tx-9,el.y-20+bob,6,0,7);g.arc(tx+9,el.y-20+bob,5,0,7);g.fill();
+    g.fillStyle='#222';g.beginPath();g.arc(tx-8,el.y-20+bob,2.6,0,7);g.arc(tx+10,el.y-20+bob,2.4,0,7);g.fill();
+    g.strokeStyle='#7a5a1e';g.lineWidth=5;
+    g.beginPath();g.moveTo(tx+24,el.y+8+bob);g.lineTo(tx+58,el.y-44+bob);g.stroke();
+  }
+  // 长明灯塔(内壁万灯)
+  {
+    const x0=sx(TW0),x1=sx(TOWER1+220);
+    if(!(x1<0||x0>W)){
+      g.fillStyle='#241e14';
+      g.fillRect(Math.max(0,x0),100,Math.min(W,x1)-Math.max(0,x0),YMAX);
+      // 万盏魂火
+      for(let gx2=TW0+50;gx2<TOWER1+200;gx2+=60){
+        for(let gy2=180;gy2<YMAX-40;gy2+=76){
+          const fx2=sx(gx2);
+          if(fx2<-20||fx2>W+20)continue;
+          const gl=0.4+0.3*Math.sin(T*3+gx2*0.7+gy2);
+          g.fillStyle=`rgba(140,230,190,${gl*(soulsFired?0.15:0.75)})`;
+          g.beginPath();g.arc(fx2,gy2+Math.sin(T*2+gx2)*4,4,0,7);g.fill();
+        }
+      }
+    }
+  }
+  // 三盏故人灯
+  for(const l of LAMPS){
+    const lx=sx(l.x);
+    if(lx<-60||lx>W+60)continue;
+    const gl=l.on?0.95:0.5+0.3*Math.sin(T*4+l.x);
+    g.fillStyle=`rgba(255,190,110,${gl})`;
+    g.beginPath();g.ellipse(lx,l.y,12,16,0,0,7);g.fill();
+    g.fillStyle=`rgba(255,190,110,${gl*0.25})`;
+    g.beginPath();g.arc(lx,l.y,36,0,7);g.fill();
+    g.fillStyle='rgba(255,240,210,0.9)';g.font='16px serif';
+    g.textAlign='center';g.fillText(l.name,lx,l.y+42);g.textAlign='left';
+    if(!l.on){g.fillStyle=`rgba(255,240,180,${0.5+0.3*Math.sin(T*5)})`;
+      g.font='20px sans-serif';g.fillText('?',lx,l.y-30);}
+  }
+  // 司命星君
+  if(FLAGS.boss&&(!SS.dead||SS.deadT<3)){
+    const bx=sx(SS.x), sc=SS.scale;
+    if(bx>-300*sc&&bx<W+300*sc){
+      g.save();g.translate(bx,SS.y);g.scale(sc,sc);
+      if(SS.dead){g.rotate(Math.min(1,SS.deadT)*0.8);g.globalAlpha=Math.max(0,1-SS.deadT/3);}
+      const hk=SS.hit>0, bound=SS.bound>0;
+      // 官袍(紫金)
+      g.fillStyle=hk?'#ffd8d0':'#4a3660';
+      g.beginPath();
+      g.moveTo(-70,110);g.quadraticCurveTo(-90,-40,-40,-80);
+      g.lineTo(40,-80);g.quadraticCurveTo(90,-40,70,110);
+      g.quadraticCurveTo(0,140,-70,110);g.fill();
+      g.fillStyle='#c8a24a';
+      g.fillRect(-52,-6,104,10);
+      // 头+官帽
+      g.fillStyle=hk?'#ffe0d8':'#e8c8a8';
+      g.beginPath();g.arc(0,-116,38,0,7);g.fill();
+      g.fillStyle='#2a2036';g.fillRect(-42,-176,84,42);
+      g.fillStyle='#c8a24a';g.fillRect(-42,-180,84,7);
+      // 眼(细长,P3红)
+      g.fillStyle=SS.ph===3?'#d83030':'#241826';
+      g.beginPath();g.ellipse(-14,-118,10,4,0,0,7);g.ellipse(16,-116,8,3.4,0,0,7);g.fill();
+      // 长须
+      g.strokeStyle='#d8d0c0';g.lineWidth=3;
+      g.beginPath();g.moveTo(-8,-92);g.quadraticCurveTo(-4,-50,-10,-20);g.stroke();
+      g.beginPath();g.moveTo(8,-92);g.quadraticCurveTo(4,-50,10,-20);g.stroke();
+      // 朱笔(大)
+      g.save();g.translate(70,-40);g.rotate(SS.st==='write'?-0.8+Math.sin(T*16)*0.1:-0.3);
+      g.fillStyle='#5a3a26';g.fillRect(-8,-110,16,110);
+      g.fillStyle='#d83030';g.beginPath();g.moveTo(-10,0);g.lineTo(10,0);g.lineTo(0,30);g.fill();
+      g.restore();
+      // 缚魂(万魂缠身)
+      if(bound){
+        g.strokeStyle=`rgba(140,230,190,${0.7+0.2*Math.sin(T*8)})`;g.lineWidth=5;
+        for(let k=0;k<4;k++){
+          g.beginPath();g.ellipse(0,-20+k*36,96+k*8,20,Math.sin(T*3+k)*0.2,0,7);g.stroke();}
+      }
+      g.restore();
+      // 写字预警
+      if(SS.st==='write'){
+        g.fillStyle=`rgba(216,60,60,${0.55+0.3*Math.sin(T*14)})`;
+        g.font='72px serif';g.textAlign='center';
+        g.fillText(SS.ch,bx,SS.y-220*sc);g.textAlign='left';
+      }
+      if(!SS.dead){
+        g.fillStyle='#2a2436';g.fillRect(W/2-190,120,380,14);
+        g.fillStyle='#d85a4a';g.fillRect(W/2-190,120,380*Math.max(0,SS.hp)/90,14);
+        g.fillStyle='#ffe9c0';g.font='20px serif';g.textAlign='center';
+        g.fillText(mirror?'司命星君(镜像未破,伤不到他)':'司命星君',W/2,108);g.textAlign='left';
+      }
+    }
+  }
+  // 镜像假你
+  if(mirror){
+    const m=mirror,mx=sx(m.x);
+    g.save();g.translate(mx,m.y);
+    g.globalAlpha=0.85;
+    g.fillStyle=m.hit>0?'#ffd8d0':'#241826';g.fillRect(-11,-42,22,28);
+    g.fillStyle='#3a3444';g.beginPath();g.arc(0,-60,18,0,7);g.fill();
+    g.fillStyle='#d83030';g.beginPath();g.arc(-6,-60,3,0,7);g.arc(8,-60,3,0,7);g.fill();
+    g.restore();
+    g.fillStyle='#2a2436';g.fillRect(mx-36,m.y-92,72,7);
+    g.fillStyle='#8a5aa0';g.fillRect(mx-36,m.y-92,72*m.hp/14,7);
+  }
+  // 弹幕
+  for(const b of bolts){
+    const px2=sx(b.x);
+    g.fillStyle='#f5dd9a';g.beginPath();g.arc(px2,b.y,7,0,7);g.fill();
+  }
+  for(const o of orbs){
+    const px2=sx(o.x);
+    g.fillStyle='rgba(216,60,60,0.9)';g.beginPath();g.arc(px2,o.y,11,0,7);g.fill();
+    g.fillStyle='rgba(255,170,110,0.5)';g.beginPath();g.arc(px2,o.y,17,0,7);g.fill();
+  }
+  // 万魂火
+  for(const s2 of soulParts){
+    const px2=sx(s2.x);
+    const gl=0.6+0.3*Math.sin(T*6+s2.t*9);
+    g.fillStyle=`rgba(140,230,190,${gl})`;
+    g.beginPath();g.arc(px2,s2.y,4,0,7);g.fill();
+  }
+  // 主角(飞)
+  {
+    const px=sx(P.x), py=P.y;
+    g.save();g.translate(px,py);
+    if(P.inv>0&&Math.sin(T*30)>0)g.globalAlpha=0.4;
+    g.rotate(P.dir*Math.min(0.35,Math.abs(P.vx)*0.0006));
+    if(FX.pin>0){g.rotate(Math.sin(T*30)*0.06);}
+    g.fillStyle='#4a5a78';g.fillRect(-11,-42,22,28);
+    g.fillStyle='#f0c8a0';g.beginPath();g.arc(0,-60,18,0,7);g.fill();
+    g.fillStyle='#3a3444';g.beginPath();g.arc(0,-67,17,Math.PI,0);g.fill();
+    g.fillStyle='#222';g.beginPath();g.arc(P.dir*7,-60,2.4,0,7);g.fill();
+    // 冲刺斩
+    if(P.dashT>0.06){
+      g.strokeStyle='#fff';g.lineWidth=6;
+      g.beginPath();g.arc(P.dir*16,-40,40,-1.1*P.dir,0.7*P.dir,P.dir<0);g.stroke();
+      g.strokeStyle='rgba(255,233,160,0.6)';g.lineWidth=3;
+      g.beginPath();g.moveTo(-P.dir*20,-40);g.lineTo(-P.dir*60,-40);g.stroke();
+    }
+    g.strokeStyle=`rgba(255,233,160,${0.5+0.3*Math.sin(T*8)})`;g.lineWidth=2.5;
+    g.beginPath();g.arc(0,-46,30,0,7);g.stroke();
+    g.strokeStyle='#3a4258';g.lineWidth=5;
+    g.beginPath();g.moveTo(-5,-14);g.lineTo(-14,-4);g.moveTo(5,-14);g.lineTo(14,-4);g.stroke();
+    g.restore();
+  }
+  for(const p of parts){g.globalAlpha=1-p.life/p.max;g.fillStyle=p.col;
+    g.fillRect(sx(p.x)-3,p.y-3,6,6);}
+  g.globalAlpha=1;
+  // 规则改写滤镜
+  if(FX.heavy>0){g.fillStyle='rgba(60,40,30,0.18)';g.fillRect(0,0,W,H);}
+  if(FX.invert>0){g.fillStyle='rgba(120,60,140,0.12)';g.fillRect(0,0,W,H);}
+  // 结局:万魂流星雨
+  if(P.win){
+    for(let i=0;i<40;i++){
+      const fx2=(i*97+endT*60)%W;
+      const fy=((i*211+endT*(160+i%5*40))%(H+200))-100;
+      g.strokeStyle=`rgba(140,230,190,${0.5+0.3*Math.sin(i)})`;g.lineWidth=3;
+      g.beginPath();g.moveTo(fx2,fy);g.lineTo(fx2-14,fy+34);g.stroke();
+    }
+  }
+
+  // HUD
+  for(let i=0;i<3;i++){g.fillStyle=i<P.hp?'#e85a5a':'#443a4c';
+    g.beginPath();const hx=34+i*40,hy=36;
+    g.arc(hx-7,hy-4,9,0,7);g.arc(hx+7,hy-4,9,0,7);
+    g.moveTo(hx-15,hy);g.lineTo(hx,hy+16);g.lineTo(hx+15,hy);g.fill();}
+  g.fillStyle='#ffd76a';g.beginPath();g.arc(40,86,12,0,7);g.fill();
+  g.fillStyle='#fff';g.font='22px monospace';g.fillText('×'+coins,58,94);
+  const litN=LAMPS.filter(l=>l.on).length;
+  g.fillStyle='#8ce6be';g.font='18px monospace';g.fillText('故人灯 '+litN+'/'+LAMPS.length,34,126);
+  if(GOD){g.fillStyle='rgba(150,230,180,0.9)';g.font='20px monospace';g.fillText('无敌 ON(按G关)',W-220,40);}
+  if(msgT>0){g.font='24px sans-serif';const w2=g.measureText(msg).width;
+    g.fillStyle='rgba(30,24,16,0.8)';g.fillRect(W/2-Math.min(w2/2+20,340),150,Math.min(w2+40,680),46);
+    g.fillStyle='#ffe9c0';g.textAlign='center';g.fillText(msg,W/2,181);g.textAlign='left';}
+  if(P.dead)ov('消散在天风里…','按键从检查点再来');
+  if(P.win&&endT>1.5)ov('回 家','万魂落人间,灯火次第亮起 ·《我要上天》终 · 按键重玩');
+  g.restore();
+}
+function ov(t1,t2){
+  g.fillStyle='rgba(30,24,14,0.68)';g.fillRect(0,0,W,H);
+  g.fillStyle='#ffe9c0';g.font='56px serif';g.textAlign='center';
+  g.fillText(t1,W/2,H/2-30);
+  g.fillStyle='#e8d8b8';g.font='22px sans-serif';g.fillText(t2,W/2,H/2+34);g.textAlign='left';
+}
+let last=0;
+function loop(ts){
+  let dt=Math.min(0.033,(ts-last)/1000||0.016);last=ts;
+  if(slow>0){slow-=dt;dt*=0.4;}
+  step(dt);draw();requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
