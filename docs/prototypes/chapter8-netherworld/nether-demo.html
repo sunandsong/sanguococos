@@ -1,0 +1,934 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>冥界 Demo · 深夜庙会</title>
+<style>
+  html,body{margin:0;padding:0;background:#0e0a16;height:100%;overflow:hidden;touch-action:none}
+  #wrap{display:flex;align-items:center;justify-content:center;height:100%}
+  canvas{background:#14101e;max-height:100vh;max-width:100vw}
+  #tip{position:fixed;left:10px;top:8px;color:#a9b;font:12px/1.6 monospace;pointer-events:none;white-space:pre}
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="cv" width="720" height="1280"></canvas></div>
+<div id="tip">A/D 移动 · W/空格 跳 · J 互动(买纸船/喝孟婆汤) · 水里被怨魂手抓住=狂按方向键挣脱
+流程:彼岸花海→鬼市(认人/买纸船/点引魂灯)→忘川渡河(有船走上面,没船游下面)
+→奈何桥·孟婆亭(喝汤=回满血金币清零)→望乡台→冥街→镇墓兽Boss(J攻击)→入城 · G 无敌(默认开)</div>
+<script>
+'use strict';
+const cv=document.getElementById('cv'), g=cv.getContext('2d');
+const W=720,H=1280;
+
+// ── 世界布局(横向) ──
+const GY=1000, WY=1040, WBOT=1268;
+const FLOWER1=2400;                 // ① 彼岸花海 0..2400
+const MKT1=5600;                    // ② 鬼市 2400..5600(5摊/3故人/4灯)
+const RIV0=5700, MID0=9200, MID1=9500, RIV1=11160; // ③ 忘川3500宽(中洲=孟婆)
+const BRY=930;                      // ④ 奈何桥面(1660长)
+const TAI0=11280;                   // ⑤ 望乡台区
+const CAST=13000, GATE=15100, END=15400;  // ⑥ 冥街+城下
+const grounds=[
+  {x0:-60,x1:RIV0,y:GY},
+  {x0:MID0,x1:MID1,y:GY},
+  {x0:RIV1,x1:END+60,y:GY},
+  // 奈何桥面(缺板,5段)
+  {x0:MID1,x1:9760,y:BRY},{x0:9850,x1:10110,y:BRY},{x0:10200,x1:10460,y:BRY},
+  {x0:10550,x1:10810,y:BRY},{x0:10900,x1:RIV1+10,y:BRY},
+  // 望乡台阶梯
+  {x0:11280,x1:11400,y:920},{x0:11400,x1:11520,y:848},{x0:11520,x1:11640,y:776},{x0:11640,x1:11960,y:720},
+  // 酆都屋顶路线(摊棚→一层檐→二层檐)
+  {x0:2580,x1:2720,y:GY-196},{x0:4080,x1:4220,y:GY-196},
+  {x0:2930,x1:3150,y:GY-180},{x0:3230,x1:3450,y:GY-180},{x0:4430,x1:4650,y:GY-180},
+  {x0:3260,x1:3420,y:GY-298},{x0:4460,x1:4620,y:GY-298},
+];
+const inWater=x=>x>RIV0&&x<RIV1;
+// 引魂灯(鬼市收集)
+const lamps=[{x:2700,y:GY-160,on:0},{x:3400,y:GY-190,on:0},{x:4250,y:GY-150,on:0},{x:4950,y:GY-180,on:0},{x:12700,y:GY-170,on:0},{x:13800,y:GY-150,on:0}];
+// 怨魂手
+const hands=[];
+for(let x=RIV0+220;x<RIV1-160;x+=250)if(Math.abs(x-(MID0+90))>300)hands.push({x,ph:x%6,grab:0});
+// 商贩/NPC
+const NPCS=[
+  {x:2900,said:0,txt:'这不是…空城的瓦罐匠?!"是你呀,借个火不?"'},
+  {x:3900,said:0,txt:'渔港的老船夫…"船?我现在扎纸船咯。"'},
+  {x:4650,said:0,txt:'守夜人…"城里一夜之间,全都…唉,都来这儿了。"'},
+];
+const STALL={x:5200,bought:0};        // 纸船摊
+const MENG={x:9350,drank:0};          // 孟婆亭
+const boat={x:RIV0+70,vx:0,ride:0};   // 纸船(渡口常驻,J买票上船)
+// 任务:寻瓦罐/点灯/放河灯 + 投壶小游戏 + 屋顶金币
+const Q={pot:0,lamp:0,lantern:0};
+const POT={x:3330,y:GY-298};
+const GOLD=[{x:3050,y:GY-230,got:0},{x:3350,y:GY-350,got:0},{x:4530,y:GY-350,got:0}];
+const GAME={on:0,ph:0};
+const boatPrice=()=>Q.lantern===2?5:10;
+// 镇墓兽(城门守卫Boss)
+const ZB={x:14500,y:GY,hp:16,st:'idle',t:2,hit:0,dead:0,fx:0,tx:0,lt:0};
+const waves=[];   // 落地冲击波
+
+// ── 玩家 ──
+const P={x:120,y:GY,vx:0,vy:0,dir:1,onG:1,jumps:0,hp:3,inv:0,dead:0,win:0,
+  mode:'walk',grab:-1,mash:0,bless:0,atkT:0,hasPot:0};
+let camX=0,coins=12,GOD=1,shake=0,T=0;
+let msg='',msgT=0;
+const FLAGS={flower:0,mkt:0,river:0,bridge:0,tai:0,cast:0,wc:0};
+let gust={t:3,on:0};
+function msgQ(t,d){msg=t;msgT=d||2.6;}
+const keys={};
+onkeydown=e=>{
+  if(!keys[e.code]&&P.grab>=0&&['KeyA','KeyD','ArrowLeft','ArrowRight','KeyW','Space'].includes(e.code)){
+    P.mash++;
+  }
+  keys[e.code]=1;
+  if(['Space','KeyW'].includes(e.code)){e.preventDefault();jump();}
+  if(e.code==='KeyJ')act();
+  if(e.code==='KeyG')GOD=!GOD;};
+onkeyup=e=>keys[e.code]=0;
+let touchL={on:0,x:0};
+cv.addEventListener('touchstart',ev=>{const r=cv.getBoundingClientRect();
+  for(const t of ev.changedTouches){const x=(t.clientX-r.left)/r.width*W,y=(t.clientY-r.top)/r.height*H;
+    if(x<W/2&&y>H*0.5){touchL={on:1,x,id:t.identifier};if(P.grab>=0)P.mash++;}
+    else if(x>W*0.72&&y>H*0.72)act();
+    else {jump();if(P.grab>=0)P.mash++;}}
+  if(P.dead||P.win)restart();ev.preventDefault();},{passive:false});
+cv.addEventListener('touchmove',ev=>{const r=cv.getBoundingClientRect();
+  for(const t of ev.changedTouches){if(touchL.on&&t.identifier===touchL.id)touchL.x=(t.clientX-r.left)/r.width*W;}
+  ev.preventDefault();},{passive:false});
+cv.addEventListener('touchend',ev=>{for(const t of ev.changedTouches)if(t.identifier===touchL.id)touchL.on=0;
+  ev.preventDefault();},{passive:false});
+
+function jump(){
+  if(P.dead||P.win){restart();return;}
+  if(P.mode==='swim'){
+    if(P.y<WY+40){P.mode='walk';P.vy=-600;P.jumps=1;}   // 水面附近=直接跃出水
+    else P.vy=-340;                                      // 深处=打水上浮
+    return;
+  }
+  if(P.onG){P.vy=-620;P.onG=0;P.jumps=1;}
+  else if(P.jumps<2){P.vy=-620;P.jumps++;}
+}
+function act(){
+  if(P.dead||P.win){restart();return;}
+  // 冥街:J=挥刀(打镇墓兽)
+  if(P.x>13600){ if(P.atkT<=0)P.atkT=0.26; return; }
+  // 投壶结算
+  if(GAME.on){
+    GAME.on=0;
+    if(Math.abs(Math.sin(GAME.ph))<0.3){coins+=6;spark(P.x,P.y-80,'#ffd76a',12,1.5);msgQ('投中!+6金');}
+    else msgQ('偏了…再来?');
+    return;
+  }
+  // 投壶摊(4480)
+  if(Math.abs(P.x-4480)<80&&P.onG&&P.y===GY){
+    if(coins>=2){coins-=2;GAME.on=1;GAME.ph=Math.random()*6;msgQ('壶口正上方按 J!');}
+    else msgQ('投壶 2 金一次');
+    return;
+  }
+  // 故人任务
+  for(const n of NPCS){
+    if(Math.abs(P.x-n.x)<90&&P.onG&&P.y===GY){
+      if(n.x===2900){
+        if(Q.pot===0){Q.pot=1;msgQ('瓦罐匠:"老瓦罐落在哪家屋顶了…帮我寻来!"',3.2);}
+        else if(Q.pot===1&&P.hasPot){Q.pot=2;P.hasPot=0;coins+=8;spark(P.x,P.y-80,'#ffd76a',14,1.6);msgQ('瓦罐匠:"就是它!8金拿去!"');}
+        else if(Q.pot===1)msgQ('瓦罐匠:"多半在楼顶上,跳上去找找。"');
+        else msgQ('瓦罐匠抱着罐子直乐。');
+      } else if(n.x===3900){
+        if(Q.lantern===0){Q.lantern=1;msgQ('老船夫:"替我放盏河灯到渡口,船钱给你打对折。"',3.2);}
+        else if(Q.lantern===1)msgQ('老船夫:"渡口在城东头,河灯轻拿轻放。"');
+        else msgQ('老船夫:"灯放好了?船 5 金,随时来坐。"');
+      } else {
+        if(Q.lamp===0){Q.lamp=1;msgQ('守夜人:"城里 4 盏引魂灯,劳烦都点上。"',3.2);}
+        else if(Q.lamp===1){
+          const lit=lamps.slice(0,4).filter(l=>l.on).length;
+          if(lit>=4){Q.lamp=2;coins+=10;spark(P.x,P.y-80,'#8ce6be',14,1.6);msgQ('守夜人:"都亮了…城就暖了。10金收好。"');}
+          else msgQ('守夜人:"还差 '+(4-lit)+' 盏没亮。"');
+        } else msgQ('守夜人朝你拱了拱手。');
+      }
+      return;
+    }
+  }
+  // 渡口:走到船边 J=买票上船
+  if(!STALL.bought&&Math.abs(P.x-boat.x)<90&&P.y>GY-60){
+    const bp=boatPrice();
+    if(coins>=bp){coins-=bp;STALL.bought=1;boat.ride=1;msgQ('买了纸船!晃晃悠悠过忘川');}
+    else msgQ('纸船要 '+bp+' 金币…引魂灯攒一攒');
+    return;
+  }
+  // 买纸船
+  if(!STALL.bought&&Math.abs(P.x-STALL.x)<90&&P.onG){
+    const bp=boatPrice();
+    if(coins>=bp){coins-=bp;STALL.bought=1;msgQ('买了纸船!去河边上船,稳稳当当过忘川');}
+    else msgQ('纸船要 '+bp+' 个金币…去点引魂灯攒攒?');
+    return;
+  }
+  // 孟婆汤
+  if(!MENG.drank&&Math.abs(P.x-MENG.x)<90&&P.onG&&P.y===GY){
+    MENG.drank=1;P.hp=3;P.bless=1;const lost=coins;coins=0;
+    msgQ('喝下孟婆汤…伤都好了,身上暖暖的(金币-'+lost+')',3.2);
+    return;
+  }
+}
+function restart(){
+  if(!P.dead&&!P.win)return;
+  P.dead=0;P.win=0;P.hp=3;P.vx=0;P.vy=0;P.mode='walk';P.grab=-1;P.atkT=0;
+  P.x=P.x>13000?13200:P.x>RIV1?RIV1+80:P.x>RIV0?MKT1-100:120;P.y=GY;P.onG=1;
+  if(P.x===13200&&!ZB.dead){ZB.hp=16;ZB.st='idle';ZB.t=2;ZB.x=14500;waves.length=0;}
+}
+function hurt(n){ if(GOD){shake=4;return;} if(P.inv>0||P.dead)return;
+  P.hp-=n;P.inv=1.3;shake=9; if(P.hp<=0){P.hp=0;P.dead=1;} }
+const parts=[];
+function spark(x,y,col,n,sp){for(let i=0;i<n;i++){const a=Math.random()*6.283;
+  parts.push({x,y,vx:Math.cos(a)*sp*100,vy:Math.sin(a)*sp*100,life:0,max:0.5+Math.random()*0.3,col});}}
+
+function step(dt){
+  T+=dt;
+  if(msgT>0)msgT-=dt;
+  if(P.inv>0)P.inv-=dt;
+  if(P.atkT>0)P.atkT-=dt;
+  if(shake>0)shake=Math.max(0,shake-dt*30);
+  if(P.dead||P.win)return;
+
+  const mv=(keys.KeyD||keys.ArrowRight?1:0)-(keys.KeyA||keys.ArrowLeft?1:0)
+    ||(touchL.on?Math.sign(touchL.x-(W/4)):0);
+  if(mv)P.dir=mv;
+
+  // 被怨魂手抓住:往下拖,狂按挣脱
+  if(P.grab>=0){
+    P.y+=46*dt;
+    if(P.mash>=4){
+      hands[P.grab].grab=0;hands[P.grab].cd=3;
+      P.grab=-1;P.vy=-360;spark(P.x,P.y,'#8ce6be',10,1.4);msgQ('挣脱了!');
+    }
+    if(P.y>WBOT-20){hurt(1);P.grab=-1;P.vy=-420;}
+    return;
+  }
+
+  const water=inWater(P.x)&&P.y>WY+14&&!boat.ride;
+  if(water&&P.mode!=='swim'){P.mode='swim';P.vy*=0.3;spark(P.x,WY,'#7ac8c0',10,1.3);}
+  if(!water&&P.mode==='swim')P.mode='walk';
+
+  if(boat.ride){
+    // 乘纸船
+    boat.x+=120*dt;
+    P.x=boat.x;P.y=WY-24;P.vy=0;
+    if(boat.x>=MID0-40){boat.ride=0;P.onG=0;msgQ('到中洲了');}
+    if(keys.KeyW||keys.Space){}
+  } else if(P.mode==='swim'){
+    P.vx+=(mv*260-P.vx)*Math.min(1,dt*6);
+    P.vy+=(((keys.KeyS||keys.ArrowDown)?220:0)-P.vy)*Math.min(1,dt*4)-26*dt;
+    P.x+=P.vx*dt;P.y+=P.vy*dt;
+    if(P.y<WY){P.y=WY;if(P.vy<0)P.vy=0;}
+    if(P.y>WBOT){P.y=WBOT;P.vy=0;}
+    P.x=Math.max(RIV0+16,Math.min(RIV1-16,P.x));
+    // 怨魂手
+    for(let i=0;i<hands.length;i++){const hd=hands[i];
+      if(hd.cd>0)continue;
+      const hy=WY+90+Math.sin(T*1.4+hd.ph)*46;
+      if(Math.hypot(P.x-hd.x,P.y-hy)<44){
+        hd.grab=1;P.grab=i;P.mash=0;msgQ('被怨魂手抓住了!狂按方向键挣脱!!');
+      }
+    }
+    // 漩涡×2
+    for(const WHX of [6900,8300]){
+      if(Math.abs(P.x-WHX)<110&&P.y>WY+40){
+        P.vx+=Math.sign(WHX-P.x)*300*dt;P.vy+=140*dt;
+      }
+    }
+  } else {
+    P.vx=mv*250;
+    P.x+=P.vx*dt;
+    P.vy+=1500*dt;
+    const py0=P.y;
+    P.y+=P.vy*dt;
+    P.x=Math.max(40,Math.min(END-20,P.x));
+    P.onG=0;
+    if(P.vy>=0)for(const gr of grounds){
+      if(P.x>gr.x0-8&&P.x<gr.x1+8&&py0<=gr.y+4&&P.y>=gr.y){
+        P.y=gr.y;P.vy=0;P.onG=1;P.jumps=0;break;}
+    }
+    // 上纸船
+    if(STALL.bought&&!boat.ride&&boat.x<MID0-60&&Math.abs(P.x-boat.x)<56&&P.y>WY-90&&P.y<WY+20){
+      boat.ride=1;msgQ('坐上纸船…晃晃悠悠');
+    }
+  }
+  // 手冷却
+  for(const hd of hands)if(hd.cd>0)hd.cd-=dt;
+
+  // 桥上怨魂风
+  if(P.x>MID1&&P.x<RIV1&&P.y<=BRY+4){
+    gust.t-=dt;
+    if(gust.t<=0){gust.on=1;gust.t=4+Math.random()*2;if(!FLAGS.wc){FLAGS.wc=1;msgQ('桥上有怨魂风…注意站稳');}}
+  }
+  if(gust.on){
+    gust.dur=(gust.dur||1)-dt;
+    if(P.x>MID1&&P.x<RIV1)P.x-=300*dt;
+    if(gust.dur<=0){gust.on=0;gust.dur=1;}
+  }
+  if(GAME.on)GAME.ph+=dt*5.2;
+  // 屋顶瓦罐
+  if(!P.hasPot&&Q.pot===1&&Math.hypot(P.x-POT.x,P.y-POT.y)<52){
+    P.hasPot=1;spark(POT.x,POT.y-30,'#e8c8a0',10,1.4);msgQ('找到老瓦罐了!给瓦罐匠送回去');
+  }
+  // 屋顶金币
+  for(const gd of GOLD){
+    if(!gd.got&&Math.hypot(P.x-gd.x,P.y-40-gd.y)<40){gd.got=1;coins+=3;spark(gd.x,gd.y,'#ffd76a',8,1.2);msgQ('+3金');}
+  }
+  // 河灯投放(渡口)
+  if(Q.lantern===1&&Math.abs(P.x-(RIV0+30))<80&&P.onG&&P.y===GY){
+    Q.lantern=2;msgQ('河灯放进忘川…顺着黑水漂远了(船费半价!)',3);
+  }
+  // 引魂灯
+  for(const lp of lamps){
+    if(!lp.on&&Math.hypot(P.x-lp.x,P.y-60-lp.y)<60){
+      lp.on=1;coins+=4;spark(lp.x,lp.y,'#8ce6be',12,1.5);msgQ('点亮引魂灯 +4');
+    }
+  }
+  // NPC
+  for(const n of NPCS){
+    if(!n.said&&Math.abs(P.x-n.x)<80&&P.onG){n.said=1;msgQ(n.txt,3.4);}
+  }
+  // 摊位提示
+  if(!STALL.bought&&Math.abs(P.x-STALL.x)<90&&P.onG&&msgT<=0)msgQ('纸船摊:J 购买(10金币)——渡忘川稳当');
+  if(!MENG.drank&&Math.abs(P.x-MENG.x)<90&&P.onG&&P.y===GY&&msgT<=0)msgQ('孟婆:"喝了汤,就轻了。" J=喝(回满血/金币清零)');
+  // 阶段
+  if(!FLAGS.flower&&P.x>300){FLAGS.flower=1;msgQ('鬼门关内…漫山彼岸花');}
+  if(!FLAGS.mkt&&P.x>FLOWER1+100){FLAGS.mkt=1;msgQ('酆都鬼市——冥界第一城');}
+  if(!FLAGS.river&&P.x>RIV0-160){FLAGS.river=1;msgQ(STALL.bought?'忘川到了,上纸船':'忘川黑水…没船只能游了');}
+  if(!FLAGS.bridge&&P.x>MID1+40){FLAGS.bridge=1;msgQ('奈何桥…桥板缺了几块');}
+  if(!FLAGS.tai&&P.x>TAI0){FLAGS.tai=1;msgQ('望乡台…上去看看吧');}
+  if(!FLAGS.cast&&P.x>CAST+400){FLAGS.cast=1;msgQ('冥界城…到了');}
+  // 镇墓兽 Boss
+  if(!ZB.dead&&P.x>13900){
+    ZB.t-=dt;if(ZB.hit>0)ZB.hit-=dt;
+    if(ZB.st==='idle'){
+      if(ZB.t<=0){
+        if(Math.random()<0.55){ZB.st='pre';ZB.t=0.6;}
+        else{ZB.st='roar';ZB.t=0.5;ZB.fx=0;}
+      }
+    } else if(ZB.st==='pre'){
+      if(ZB.t<=0){ZB.st='leap';ZB.t=0.55;ZB.fx=ZB.x;ZB.tx=Math.max(13950,Math.min(GATE-260,P.x));}
+    } else if(ZB.st==='leap'){
+      const k=1-ZB.t/0.55;
+      ZB.x=ZB.fx+(ZB.tx-ZB.fx)*k;
+      ZB.lt=Math.sin(k*Math.PI)*220;
+      if(ZB.t<=0){
+        ZB.lt=0;shake=11;
+        waves.push({x:ZB.x-40,dir:-1},{x:ZB.x+40,dir:1});
+        if(P.onG&&Math.abs(P.x-ZB.x)<150)hurt(1);
+        spark(ZB.x,GY,'#b8a8c8',14,1.8);
+        ZB.st='idle';ZB.t=2.2+Math.random();
+      }
+    } else if(ZB.st==='roar'){
+      if(ZB.t<=0){
+        waves.push({x:ZB.x-60,dir:-1});
+        shake=6;
+        ZB.st='idle';ZB.t=2.4+Math.random();
+      }
+    }
+    // 玩家挥刀命中
+    if(P.atkT>0.1&&Math.abs(P.x+P.dir*70-ZB.x)<120&&Math.abs(P.y-ZB.y)<100){
+      ZB.hp--;ZB.hit=0.18;P.atkT=0.08;shake=5;spark(ZB.x,GY-80,'#d8ccе8'.replace('е','e'),10,1.5);
+      if(ZB.hp<=0){ZB.dead=1;shake=13;spark(ZB.x,GY-70,'#e8dcf8',26,2.4);msgQ('镇墓兽碎了…城门开了');}
+    }
+  }
+  // 冲击波
+  for(let i=waves.length-1;i>=0;i--){const wv=waves[i];
+    wv.x+=wv.dir*430*dt;
+    if(P.onG&&Math.abs(P.x-wv.x)<32&&Math.abs(P.y-GY)<8)hurt(1);
+    if(wv.x<13300||wv.x>GATE+100)waves.splice(i,1);
+  }
+  // 门禁:兽不死不放行
+  if(!ZB.dead&&P.x>GATE-240){P.x=GATE-240;if(msgT<=0)msgQ('镇墓兽挡在门前!J 攻击!');}
+  // 无常引路
+  if(ZB.dead&&P.x>GATE-260&&!P.win&&msgT<=0&&P.x<GATE+40)msgQ('黑白无常:"阎王有请。"',3);
+  if(ZB.dead&&P.x>GATE+80)P.win=1;
+
+  camX+=((P.x-W*0.42)-camX)*Math.min(1,dt*5);
+  camX=Math.max(0,Math.min(END-W,camX));
+
+  for(let i=parts.length-1;i>=0;i--){const p=parts[i];p.life+=dt;
+    if(p.life>p.max){parts.splice(i,1);continue;}
+    p.x+=p.vx*dt;p.y+=p.vy*dt;}
+}
+
+const sx=wx=>wx-camX;
+
+function draw(){
+  g.save();
+  if(shake>0)g.translate((Math.random()-0.5)*shake,(Math.random()-0.5)*shake);
+  // 黑底
+  const sky=g.createLinearGradient(0,0,0,H);
+  sky.addColorStop(0,'#14101e');sky.addColorStop(0.7,'#1c1428');sky.addColorStop(1,'#241a2c');
+  g.fillStyle=sky;g.fillRect(0,0,W,H);
+  // 远山剪影(花海段泛红晕)
+  g.fillStyle='rgba(40,26,44,0.9)';
+  for(let i=0;i<5;i++){
+    const hx=((i*460-camX*0.25)%(W+600)+(W+600))%(W+600)-300;
+    g.beginPath();g.moveTo(hx-200,GY-160);g.quadraticCurveTo(hx,GY-360,hx+200,GY-160);g.fill();
+  }
+  if(camX<FLOWER1){
+    g.fillStyle=`rgba(216,60,80,${0.14*(1-camX/FLOWER1)})`;
+    g.fillRect(0,GY-420,W,420);
+  }
+  // 冥界城堡剪影(后段)
+  if(camX>CAST-W){
+    const cx2=sx(14800);
+    g.fillStyle='rgba(22,14,30,0.96)';
+    g.fillRect(cx2-260,GY-680,560,680);
+    g.beginPath();g.moveTo(cx2-300,GY-680);g.lineTo(cx2-190,GY-880);g.lineTo(cx2-80,GY-680);g.fill();
+    g.beginPath();g.moveTo(cx2+40,GY-680);g.lineTo(cx2+150,GY-920);g.lineTo(cx2+260,GY-680);g.fill();
+    g.fillStyle='rgba(216,60,60,0.75)';
+    for(let r2=0;r2<4;r2++)for(let c2=0;c2<5;c2++){
+      if((r2*7+c2)%3)continue;
+      g.fillRect(cx2-220+c2*100,GY-620+r2*130,18,26);
+    }
+  }
+
+  // 地面
+  for(const gr of grounds){
+    const x0=sx(gr.x0),x1=sx(gr.x1);
+    if(x1<-40||x0>W+40)continue;
+    const isBridge=gr.y===BRY;
+    const isStep=gr.y<GY&&!isBridge;
+    g.fillStyle=isBridge?'#3a3044':isStep?'#3c3048':'#2a2032';
+    g.fillRect(x0,gr.y,x1-x0,isBridge?18:H-gr.y);
+    g.fillStyle=isBridge?'#4a3c56':'#38283e';
+    g.fillRect(x0,gr.y,x1-x0,8);
+  }
+  // ① 彼岸花海(地上花丛,只在鬼门关内侧)
+  for(let x=80;x<FLOWER1;x+=64){
+    const fx2=sx(x);
+    if(fx2<-40||fx2>W+40)continue;
+    const swy=Math.sin(T*1.6+x)*4;
+    g.strokeStyle='#3e5a34';g.lineWidth=3;
+    g.beginPath();g.moveTo(fx2,GY);g.lineTo(fx2+swy,GY-34);g.stroke();
+    g.fillStyle='#d83c50';
+    for(let a=0;a<5;a++){
+      g.beginPath();g.ellipse(fx2+swy+Math.cos(a*1.26)*9,GY-38+Math.sin(a*1.26)*9,8,3,a*1.26,0,7);g.fill();}
+    g.fillStyle='rgba(255,120,140,0.5)';g.beginPath();g.arc(fx2+swy,GY-38,3,0,7);g.fill();
+  }
+  // 花瓣(往上飘)
+  if(camX<FLOWER1+400){
+    g.fillStyle='rgba(240,90,110,0.7)';
+    for(let i=0;i<14;i++){
+      const px2=((i*137-camX*0.7)%(W+80)+(W+80))%(W+80)-40;
+      const py2=H-((i*211+T*60)%(H+100));
+      g.save();g.translate(px2,py2);g.rotate(T*2+i);
+      g.beginPath();g.ellipse(0,0,7,3,0,0,7);g.fill();g.restore();
+    }
+  }
+  // 鬼门关背面(起点)
+  {
+    const gx2=sx(-20);
+    if(gx2>-300){
+      g.fillStyle='#241a28';
+      g.fillRect(gx2-60,GY-560,80,560);
+      g.fillStyle='#38222e';g.fillRect(gx2+20,GY-530,44,530);
+    }
+  }
+  // ② 酆都鬼市:楼阁城景+牌坊+灯笼+摊位+鬼群
+  if(camX<MKT1+500&&camX>FLOWER1-W){
+    // 远排楼影(剪影)
+    g.fillStyle='#1d1528';
+    for(let x=2300;x<MKT1+300;x+=240){
+      const bx=sx(x)+40;
+      if(bx<-200||bx>W+200)continue;
+      const hh=420+((x*13)%5)*60;
+      g.fillRect(bx,GY-hh,150,hh);
+      g.beginPath();g.moveTo(bx-18,GY-hh);g.quadraticCurveTo(bx+75,GY-hh-46,bx+168,GY-hh);g.fill();
+    }
+    // 主排楼阁(飞檐+暖窗,二三层)
+    for(let i=0,x=2320;x<MKT1+120;x+=300,i++){
+      const bx=sx(x);
+      if(bx<-320||bx>W+320)continue;
+      const tiers=2+(i%2), w0=240;
+      let ty=GY;
+      for(let t2=0;t2<tiers;t2++){
+        const tw=w0-t2*52, th=140-t2*20, lx2=bx+(w0-tw)/2;
+        g.fillStyle='#221830';
+        g.fillRect(lx2,ty-th,tw,th);
+        // 暖窗(随楼固定亮法+微闪)
+        for(let wx2=lx2+20;wx2<lx2+tw-22;wx2+=52){
+          if(((i*7+t2*3+(wx2|0))%5)<2)continue;
+          const gl=0.5+0.28*Math.sin(T*2+wx2);
+          g.fillStyle=`rgba(255,178,92,${gl})`;
+          g.fillRect(wx2,ty-th+34,16,24);
+        }
+        // 飞檐
+        g.fillStyle='#2e2240';
+        g.beginPath();
+        g.moveTo(lx2-30,ty-th);
+        g.quadraticCurveTo(bx+w0/2,ty-th-46,lx2+tw+30,ty-th);
+        g.fill();
+        ty-=th+34;
+      }
+    }
+    // 入口牌坊「酆都」
+    {
+      const px2=sx(2440);
+      if(px2>-260&&px2<W+260){
+        g.fillStyle='#2a2036';
+        g.fillRect(px2-110,GY-330,26,330);g.fillRect(px2+84,GY-330,26,330);
+        g.fillRect(px2-140,GY-350,280,34);
+        g.fillStyle='#38283e';
+        g.beginPath();g.moveTo(px2-160,GY-350);g.quadraticCurveTo(px2,GY-408,px2+160,GY-350);g.fill();
+        g.fillStyle='#efe0c0';g.font='30px serif';g.textAlign='center';
+        g.fillText('酆 都',px2,GY-322);g.textAlign='left';
+        for(const lx3 of [-110,110]){
+          const gl=0.6+0.3*Math.sin(T*2.6+lx3);
+          g.fillStyle=`rgba(255,170,80,${gl})`;
+          g.beginPath();g.ellipse(px2+lx3+13*Math.sign(-lx3),GY-296,9,12,0,0,7);g.fill();
+        }
+      }
+    }
+    // 高层灯笼串(第二排)
+    g.strokeStyle='rgba(90,70,60,0.7)';g.lineWidth=2.5;
+    for(let x=FLOWER1+100;x<MKT1;x+=460){
+      const x0=sx(x),x1=sx(x+460);
+      g.beginPath();g.moveTo(x0,GY-430);g.quadraticCurveTo((x0+x1)/2,GY-378,x1,GY-430);g.stroke();
+      for(let k=1;k<4;k++){
+        const t2=k/4, lx=x0+(x1-x0)*t2, ly=GY-430+(GY-378-(GY-430))*4*t2*(1-t2);
+        const gl=0.55+0.25*Math.sin(T*2+x+k*2);
+        g.fillStyle=`rgba(255,150,90,${gl})`;
+        g.beginPath();g.ellipse(lx,ly+13,8,10,0,0,7);g.fill();
+      }
+    }
+    // 灯笼串
+    g.strokeStyle='rgba(90,70,60,0.9)';g.lineWidth=3;
+    for(let x=FLOWER1;x<MKT1;x+=420){
+      const x0=sx(x),x1=sx(x+420);
+      g.beginPath();g.moveTo(x0,GY-320);g.quadraticCurveTo((x0+x1)/2,GY-260,x1,GY-320);g.stroke();
+      for(let k=1;k<5;k++){
+        const t2=k/5, lx=x0+(x1-x0)*t2, ly=GY-320+(GY-260-(GY-320))*4*t2*(1-t2);
+        const gl=0.65+0.25*Math.sin(T*2.4+x+k);
+        g.fillStyle=`rgba(255,170,80,${gl})`;
+        g.beginPath();g.ellipse(lx,ly+16,10,13,0,0,7);g.fill();
+        g.fillStyle=`rgba(255,170,80,${gl*0.22})`;
+        g.beginPath();g.arc(lx,ly+16,30,0,7);g.fill();
+      }
+    }
+    // 摊位(纸扎铺/灯笼铺/纸船摊)
+    for(const st of [{x:2650,w:220,c:'#5a3a44',name:'纸扎'},{x:3350,w:200,c:'#4a3a56',name:'灯笼'},{x:4150,w:210,c:'#54424a',name:'杂货'},{x:4800,w:200,c:'#4a3a56',name:'香烛'},{x:5200,w:220,c:'#3a4a56',name:'纸船'}]){
+      const x0=sx(st.x-st.w/2);
+      if(x0<-300||x0>W+300)continue;
+      g.fillStyle='#3a2c38';
+      g.fillRect(x0,GY-150,st.w,150);
+      g.fillStyle=st.c;
+      g.beginPath();g.moveTo(x0-16,GY-150);g.lineTo(x0+st.w/2,GY-208);g.lineTo(x0+st.w+16,GY-150);g.fill();
+      g.fillStyle='#241a26';g.fillRect(x0+14,GY-96,st.w-28,60);
+      g.fillStyle='#efe0c0';g.font='19px serif';
+      g.fillText(st.name,x0+st.w/2-19,GY-166);
+      // 摊上货
+      if(st.name==='灯笼'){
+        for(let k=0;k<3;k++){
+          const gl=0.6+0.3*Math.sin(T*3+k);
+          g.fillStyle=`rgba(255,170,80,${gl})`;
+          g.beginPath();g.ellipse(x0+40+k*54,GY-120,11,14,0,0,7);g.fill();}
+      } else if(st.name==='纸船'){
+        g.fillStyle='#e8e8f0';
+        g.beginPath();g.moveTo(x0+30,GY-108);g.lineTo(x0+70,GY-130);g.lineTo(x0+110,GY-108);g.lineTo(x0+70,GY-100);g.fill();
+        if(STALL.bought){g.fillStyle='#8a8a96';g.font='15px sans-serif';g.fillText('售罄',x0+140,GY-110);}
+      } else {
+        g.fillStyle='#e8e2d4';
+        g.fillRect(x0+30,GY-136,30,36);
+        g.beginPath();g.arc(x0+45,GY-142,10,0,7);g.fill();
+        g.fillRect(x0+90,GY-128,26,30);
+      }
+      // 摊主(白团子鬼)
+      const vx2=x0+st.w-34, bob=Math.sin(T*2+st.x)*4;
+      g.fillStyle='rgba(238,240,248,0.92)';
+      g.beginPath();g.arc(vx2,GY-52+bob,22,Math.PI,0);
+      g.quadraticCurveTo(vx2+22,GY-16+bob,vx2+12,GY-10+bob);
+      g.quadraticCurveTo(vx2,GY-22+bob,vx2-12,GY-10+bob);
+      g.quadraticCurveTo(vx2-22,GY-16+bob,vx2-22,GY-52+bob);g.fill();
+      g.fillStyle='#222';
+      g.beginPath();g.arc(vx2-7,GY-54+bob,3,0,7);g.arc(vx2+7,GY-54+bob,3,0,7);g.fill();
+    }
+    // 摊旗幌子(竖布条)
+    for(const [fx0,ch] of [[2620,'纸'],[3320,'灯'],[4120,'杂'],[4770,'香'],[5170,'船'],[2980,'酒'],[4480,'壶']]){
+      const fx2=sx(fx0);
+      if(fx2<-40||fx2>W+40)continue;
+      const wv=Math.sin(T*2.2+fx0)*5;
+      g.fillStyle='rgba(60,44,70,0.95)';
+      g.fillRect(fx2-13+wv*0.3,GY-262,26,66);
+      g.fillStyle='#e8d8b0';g.font='19px serif';
+      g.textAlign='center';g.fillText(ch,fx2+wv*0.3,GY-218);g.textAlign='left';
+      g.strokeStyle='#4a3c56';g.lineWidth=3;
+      g.beginPath();g.moveTo(fx2,GY-262);g.lineTo(fx2,GY-286);g.stroke();
+    }
+    // 逛街的鬼群(熙熙攘攘)
+    for(let i=0;i<14;i++){
+      const bx0=2520+i*225;
+      const gx3=bx0+Math.sin(T*(0.22+(i%4)*0.07)+i*1.7)*170;
+      const px2=sx(gx3);
+      if(px2<-40||px2>W+40)continue;
+      const bob=Math.sin(T*2.2+i)*4, r2=12+(i%3)*4;
+      const shade=225+(i%3)*8;
+      g.fillStyle=`rgba(${shade},${shade+4},${shade+14},0.82)`;
+      g.beginPath();g.arc(px2,GY-24-r2+bob,r2,Math.PI,0);
+      g.quadraticCurveTo(px2+r2,GY-8+bob,px2+r2*0.5,GY-4+bob);
+      g.quadraticCurveTo(px2,GY-12+bob,px2-r2*0.5,GY-4+bob);
+      g.quadraticCurveTo(px2-r2,GY-8+bob,px2-r2,GY-24-r2+bob);g.fill();
+      g.fillStyle='#222';
+      const ed=Math.sign(Math.cos(T*(0.22+(i%4)*0.07)+i*1.7));
+      g.beginPath();g.arc(px2-4*ed,GY-26-r2+bob,2.2,0,7);g.arc(px2+4*ed,GY-26-r2+bob,2.2,0,7);g.fill();
+      if(i%4===1){   // 提灯的鬼
+        const gl=0.6+0.3*Math.sin(T*3+i);
+        g.strokeStyle='#4a3c56';g.lineWidth=2;
+        g.beginPath();g.moveTo(px2+r2*ed,GY-26+bob);g.lineTo(px2+(r2+12)*ed,GY-18+bob);g.stroke();
+        g.fillStyle=`rgba(255,170,80,${gl})`;
+        g.beginPath();g.ellipse(px2+(r2+12)*ed,GY-8+bob,6,8,0,0,7);g.fill();
+      }
+      if(i%5===2){   // 打伞的鬼
+        g.strokeStyle='#5a4a66';g.lineWidth=2.5;
+        g.beginPath();g.moveTo(px2,GY-24-r2+bob);g.lineTo(px2,GY-46-r2+bob);g.stroke();
+        g.fillStyle='rgba(150,90,110,0.9)';
+        g.beginPath();g.arc(px2,GY-46-r2+bob,16,Math.PI,0);g.fill();
+      }
+    }
+    // 屋顶老瓦罐
+    if(Q.pot<2&&!P.hasPot){
+      const px2=sx(POT.x);
+      if(px2>-40&&px2<W+40){
+        g.fillStyle='#b08a5a';
+        g.beginPath();g.ellipse(px2,POT.y-18,14,17,0,0,7);g.fill();
+        g.fillStyle='#8a6a42';g.fillRect(px2-9,POT.y-40,18,8);
+        if(Q.pot===1){g.fillStyle=`rgba(255,240,180,${0.5+0.3*Math.sin(T*4)})`;
+          g.font='20px sans-serif';g.fillText('!',px2-4,POT.y-52);}
+      }
+    }
+    // 屋顶金币
+    for(const gd of GOLD){
+      if(gd.got)continue;
+      const px2=sx(gd.x);
+      if(px2<-30||px2>W+30)continue;
+      const bob=Math.sin(T*4+gd.x)*4;
+      g.fillStyle='#ffd76a';g.beginPath();g.ellipse(px2,gd.y+bob,9,11,0,0,7);g.fill();
+      g.strokeStyle='#c8a040';g.lineWidth=2.5;g.beginPath();g.ellipse(px2,gd.y+bob,4,8,0,0,7);g.stroke();
+    }
+    // 投壶摊(4480)
+    {
+      const px2=sx(4480);
+      if(px2>-80&&px2<W+80){
+        g.fillStyle='#5a4444';g.fillRect(px2-60,GY-8,120,8);
+        g.fillStyle='#8a6a42';
+        g.beginPath();g.ellipse(px2,GY-26,15,20,0,0,7);g.fill();
+        g.fillStyle='#3a2c26';g.beginPath();g.ellipse(px2,GY-44,8,4,0,0,7);g.fill();
+        g.fillStyle='#efe0c0';g.font='15px serif';g.textAlign='center';
+        g.fillText('投壶 2金',px2,GY-64);g.textAlign='left';
+        if(GAME.on){
+          const a=Math.sin(GAME.ph)*0.9;
+          g.strokeStyle='rgba(255,240,180,0.9)';g.lineWidth=4;
+          g.save();g.translate(px2,GY-120);g.rotate(a);
+          g.beginPath();g.moveTo(0,0);g.lineTo(0,-52);g.stroke();
+          g.fillStyle='#ffd76a';g.beginPath();g.arc(0,-56,7,0,7);g.fill();
+          g.restore();
+          g.strokeStyle='rgba(140,230,190,0.7)';g.lineWidth=3;
+          g.beginPath();g.arc(px2,GY-120,60,-Math.PI/2-0.3,-Math.PI/2+0.3);g.stroke();
+        }
+      }
+    }
+    // NPC 鬼(认人)
+    for(const n of NPCS){
+      const nx=sx(n.x), bob=Math.sin(T*1.8+n.x)*5;
+      if(nx<-60||nx>W+60)continue;
+      g.fillStyle='rgba(228,232,244,0.9)';
+      g.beginPath();g.arc(nx,GY-46+bob,19,Math.PI,0);
+      g.quadraticCurveTo(nx+19,GY-12+bob,nx+10,GY-8+bob);
+      g.quadraticCurveTo(nx,GY-18+bob,nx-10,GY-8+bob);
+      g.quadraticCurveTo(nx-19,GY-12+bob,nx-19,GY-46+bob);g.fill();
+      g.fillStyle='#222';
+      g.beginPath();g.arc(nx-6,GY-48+bob,2.6,0,7);g.arc(nx+6,GY-48+bob,2.6,0,7);g.fill();
+      if(!n.said){
+        g.fillStyle=`rgba(255,240,180,${0.5+0.3*Math.sin(T*4)})`;
+        g.font='22px sans-serif';g.fillText('?',nx-6,GY-84+bob);
+      }
+    }
+  }
+  // 引魂灯
+  for(const lp of lamps){
+    const lx=sx(lp.x);
+    if(lx<-60||lx>W+60)continue;
+    g.strokeStyle='#4a3c56';g.lineWidth=4;
+    g.beginPath();g.moveTo(lx,GY);g.lineTo(lx,lp.y+26);g.stroke();
+    const gl=lp.on?0.85+0.15*Math.sin(T*3):0.15;
+    g.fillStyle=`rgba(140,230,190,${gl})`;
+    g.beginPath();g.ellipse(lx,lp.y,11,15,0,0,7);g.fill();
+    g.fillStyle=`rgba(140,230,190,${gl*0.25})`;
+    g.beginPath();g.arc(lx,lp.y,32,0,7);g.fill();
+  }
+  // ③ 忘川
+  {
+    const x0=sx(RIV0),x1=sx(RIV1);
+    if(!(x1<-40||x0>W+40)){
+      g.fillStyle='#0c0e18';
+      g.fillRect(Math.max(-40,x0),WY,Math.min(W+40,x1)-Math.max(-40,x0),WBOT-WY+20);
+      // 青色波光
+      g.strokeStyle='rgba(120,220,200,0.35)';g.lineWidth=2.5;
+      g.beginPath();
+      for(let x=Math.max(-40,x0);x<=Math.min(W+40,x1);x+=18)
+        g.lineTo(x,WY+Math.sin(x*0.03+T*2.2)*5);
+      g.stroke();
+      g.strokeStyle='rgba(120,220,200,0.14)';
+      for(let k=1;k<3;k++){
+        g.beginPath();
+        for(let x=Math.max(-40,x0);x<=Math.min(W+40,x1);x+=22)
+          g.lineTo(x,WY+50*k+Math.sin(x*0.02+T*1.6+k)*7);
+        g.stroke();
+      }
+      // 漩涡×2
+      for(const wx0 of [6900,8300]){
+        const whx=sx(wx0);
+        if(whx<-80||whx>W+80)continue;
+        g.strokeStyle='rgba(140,230,210,0.4)';g.lineWidth=3;
+        for(let k=0;k<3;k++){
+          g.beginPath();g.ellipse(whx,WY+70,70-k*20,16-k*4,0,T*2+k,T*2+k+4.5);g.stroke();}
+      }
+    }
+  }
+  // 怨魂手
+  for(const hd of hands){
+    if(hd.cd>0)continue;
+    const hx=sx(hd.x);
+    if(hx<-40||hx>W+40)continue;
+    const hy=WY+90+Math.sin(T*1.4+hd.ph)*46;
+    g.fillStyle='rgba(200,208,228,0.85)';
+    g.beginPath();g.arc(hx,hy,16,0,7);g.fill();          // 圆手套
+    for(let f=0;f<3;f++){
+      g.beginPath();g.arc(hx-8+f*8,hy-16,6,0,7);g.fill();}
+    g.strokeStyle='rgba(200,208,228,0.5)';g.lineWidth=6;
+    g.beginPath();g.moveTo(hx,hy+14);g.lineTo(hx+4,hy+60);g.stroke();
+  }
+  // 纸船(常驻渡口)
+  if(boat.x<MID0+40){
+    const bx=sx(boat.x), bob=Math.sin(T*2)*4;
+    if(!STALL.bought)g.globalAlpha=0.55;
+    g.fillStyle='#e8e8f0';
+    g.beginPath();g.moveTo(bx-52,WY-8+bob);g.lineTo(bx-20,WY-30+bob);g.lineTo(bx+20,WY-30+bob);
+    g.lineTo(bx+52,WY-8+bob);g.lineTo(bx+30,WY+8+bob);g.lineTo(bx-30,WY+8+bob);g.fill();
+    g.strokeStyle='#b8bcd0';g.lineWidth=2;
+    g.beginPath();g.moveTo(bx-20,WY-30+bob);g.lineTo(bx,WY-8+bob);g.lineTo(bx+20,WY-30+bob);g.stroke();
+    if(!STALL.bought){
+      g.globalAlpha=1;
+      g.fillStyle='rgba(255,240,180,0.85)';g.font='17px sans-serif';
+      g.textAlign='center';g.fillText('纸船 · '+boatPrice()+'金(J)',bx,WY-52+bob);g.textAlign='left';
+    }
+  }
+  // 放好的河灯(漂在忘川)
+  if(Q.lantern===2){
+    const lx=sx(RIV0+140+Math.sin(T*0.6)*30), ly=WY+Math.sin(T*2)*4;
+    g.fillStyle='rgba(255,190,110,0.9)';
+    g.beginPath();g.ellipse(lx,ly-8,8,10,0,0,7);g.fill();
+    g.fillStyle='rgba(255,190,110,0.25)';g.beginPath();g.arc(lx,ly-8,24,0,7);g.fill();
+    g.fillStyle='#d8b070';g.beginPath();g.ellipse(lx,ly+2,14,5,0,0,7);g.fill();
+  }
+  // ④ 奈何桥栏杆+白灯笼
+  {
+    const x0=sx(MID1),x1=sx(RIV1);
+    if(!(x1<-60||x0>W+60)){
+      g.strokeStyle='#4a3c56';g.lineWidth=4;
+      g.beginPath();g.moveTo(x0,BRY-40);g.lineTo(x1,BRY-40);g.stroke();
+      for(let x=MID1;x<RIV1;x+=120){
+        const px2=sx(x);
+        g.beginPath();g.moveTo(px2,BRY);g.lineTo(px2,BRY-40);g.stroke();
+        const gl=0.6+0.25*Math.sin(T*2.6+x);
+        g.fillStyle=`rgba(230,235,248,${gl})`;
+        g.beginPath();g.ellipse(px2,BRY-52,8,11,0,0,7);g.fill();
+      }
+    }
+  }
+  // 孟婆亭
+  {
+    const mx=sx(MENG.x);
+    if(mx>-200&&mx<W+200){
+      g.strokeStyle='#4a3c56';g.lineWidth=6;
+      g.beginPath();g.moveTo(mx-52,GY);g.lineTo(mx-52,GY-130);g.moveTo(mx+52,GY);g.lineTo(mx+52,GY-130);g.stroke();
+      g.fillStyle='#352a44';
+      g.beginPath();g.moveTo(mx-76,GY-130);g.lineTo(mx,GY-172);g.lineTo(mx+76,GY-130);g.fill();
+      const gl=0.6+0.3*Math.sin(T*2.8);
+      g.fillStyle=`rgba(255,180,90,${gl})`;g.beginPath();g.arc(mx,GY-112,9,0,7);g.fill();
+      g.fillStyle=`rgba(255,180,90,${gl*0.2})`;g.beginPath();g.arc(mx,GY-112,34,0,7);g.fill();
+      // 孟婆(矮圆老太太+大汤勺)
+      const bob=Math.sin(T*1.6)*3;
+      g.fillStyle='#8a7a96';
+      g.beginPath();g.arc(mx-6,GY-40+bob,24,Math.PI,0);
+      g.lineTo(mx+18,GY+bob);g.lineTo(mx-30,GY+bob);g.fill();
+      g.fillStyle='#e8d8c8';g.beginPath();g.arc(mx-6,GY-52+bob,15,0,7);g.fill();
+      g.fillStyle='#d8d8e0';g.beginPath();g.arc(mx-6,GY-62+bob,14,Math.PI,0);g.fill();
+      g.fillStyle='#222';g.beginPath();g.arc(mx-11,GY-52+bob,2.2,0,7);g.arc(mx-1,GY-52+bob,2.2,0,7);g.fill();
+      g.strokeStyle='#6a5a3a';g.lineWidth=5;
+      g.beginPath();g.moveTo(mx+14,GY-30+bob);g.lineTo(mx+52,GY-86+bob);g.stroke();
+      g.fillStyle='#8a7a58';g.beginPath();g.ellipse(mx+58,GY-92+bob,14,9,0.5,0,7);g.fill();
+      if(!MENG.drank){
+        g.fillStyle=`rgba(180,230,255,${0.5+0.3*Math.sin(T*3)})`;
+        g.beginPath();g.ellipse(mx+58,GY-96+bob,8,4,0.5,0,7);g.fill();
+      }
+    }
+  }
+  // ⑤ 望乡台(顶上记忆泡)
+  {
+    const tx=sx(11800);
+    if(tx>-300&&tx<W+300){
+      const bub=Math.sin(T*1.2)*6;
+      const scenes=[['#4e7a34','#8fd2f4'],['#5a4560','#7a5a70'],['#e0956a','#3a4a6a']];
+      const si=Math.floor(T/2.4)%3;
+      g.fillStyle='rgba(200,220,255,0.14)';
+      g.beginPath();g.arc(tx,600+bub,110,0,7);g.fill();
+      g.strokeStyle='rgba(200,220,255,0.5)';g.lineWidth=3;
+      g.beginPath();g.arc(tx,600+bub,110,0,7);g.stroke();
+      // 泡里的人间一幕(极简双色)
+      g.save();g.beginPath();g.arc(tx,600+bub,102,0,7);g.clip();
+      g.fillStyle=scenes[si][1];g.fillRect(tx-102,498+bub,204,140);
+      g.fillStyle=scenes[si][0];
+      g.beginPath();g.moveTo(tx-102,640+bub);g.quadraticCurveTo(tx,560+bub,tx+102,640+bub);
+      g.lineTo(tx+102,702+bub);g.lineTo(tx-102,702+bub);g.fill();
+      g.restore();
+      g.fillStyle='rgba(230,240,255,0.7)';g.font='17px serif';
+      g.textAlign='center';g.fillText('人 间',tx,742+bub);g.textAlign='left';
+    }
+  }
+  // ⑥ 无常与城门
+  {
+    const gx2=sx(GATE);
+    if(gx2>-300&&gx2<W+300){
+      // 城门
+      g.fillStyle='#241a28';
+      g.fillRect(gx2-40,GY-460,60,460);g.fillRect(gx2+200,GY-460,60,460);
+      g.fillRect(gx2-60,GY-500,340,60);
+      const open=ZB.dead;
+      g.fillStyle=open?'#100c18':'#2e2032';
+      g.fillRect(gx2+20,GY-440,86,440);g.fillRect(gx2+116,GY-440,86,440);
+      if(open){
+        const gl=0.35+0.25*Math.sin(T*2);
+        g.fillStyle=`rgba(216,80,80,${gl})`;g.fillRect(gx2+40,GY-420,140,420);
+      }
+      // 黑无常(高瘦)
+      const bx=gx2-120, bob=Math.sin(T*1.7)*4;
+      g.fillStyle='rgba(24,20,36,0.95)';
+      g.beginPath();g.moveTo(bx-20,GY);g.quadraticCurveTo(bx-24,GY-150+bob,bx,GY-170+bob);
+      g.quadraticCurveTo(bx+24,GY-150+bob,bx+20,GY);g.fill();
+      g.fillStyle='#e8f0ff';
+      g.beginPath();g.arc(bx-7,GY-140+bob,5,0,7);g.arc(bx+7,GY-140+bob,4,0,7);g.fill();
+      // 白无常(矮圆+高帽)
+      const wx2=gx2-60, bob2=Math.sin(T*1.7+1)*4;
+      g.fillStyle='rgba(238,240,248,0.95)';
+      g.beginPath();g.arc(wx2,GY-56+bob2,26,Math.PI,0);
+      g.lineTo(wx2+26,GY);g.lineTo(wx2-26,GY);g.fill();
+      g.fillRect(wx2-10,GY-116+bob2,20,38);
+      g.fillStyle='#222';
+      g.beginPath();g.arc(wx2-8,GY-58+bob2,3,0,7);g.arc(wx2+8,GY-58+bob2,3,0,7);g.fill();
+      g.font='13px serif';g.fillStyle='#3a3444';
+      g.save();g.translate(wx2-6,GY-108+bob2);g.fillText('一',0,0);g.fillText('见',0,14);g.restore();
+    }
+  }
+  // 镇墓兽
+  if(!ZB.dead||true){
+    const bx=sx(ZB.x), by=GY-ZB.lt;
+    if(bx>-200&&bx<W+200&&!ZB.dead){
+      const hk=ZB.hit>0, pre=ZB.st==='pre'||ZB.st==='roar';
+      g.save();g.translate(bx,by);
+      if(pre)g.translate(0,6+Math.sin(T*30)*2);
+      g.fillStyle=hk?'#f0e4ff':'#8a7a9a';
+      g.beginPath();g.ellipse(0,-66,62,52,0,0,7);g.fill();     // 石身
+      g.beginPath();g.arc(-44,-108,30,0,7);g.fill();           // 头
+      g.fillStyle='#79688a';
+      g.beginPath();g.moveTo(-44,-134);g.lineTo(-36,-170);g.lineTo(-26,-132);g.fill();  // 独角
+      g.beginPath();g.ellipse(30,-104,26,14,-0.5,0,7);g.fill(); // 翼
+      g.fillStyle='#fff';g.beginPath();g.arc(-52,-110,8,0,7);g.arc(-34,-112,6,0,7);g.fill();
+      g.fillStyle=pre?'#d83030':'#222';
+      g.beginPath();g.arc(-52,-110,3.6,0,7);g.arc(-34,-112,2.8,0,7);g.fill();
+      g.strokeStyle='#6a5a7a';g.lineWidth=6;
+      for(const lx2 of [-30,0,30]){g.beginPath();g.moveTo(lx2,-20);g.lineTo(lx2,0);g.stroke();}
+      g.restore();
+      g.fillStyle='#2a2436';g.fillRect(bx-60,by-200,120,9);
+      g.fillStyle='#d85a4a';g.fillRect(bx-60,by-200,120*ZB.hp/16,9);
+    }
+  }
+  // 冲击波
+  for(const wv of waves){
+    const wx3=sx(wv.x);
+    g.fillStyle='rgba(200,190,230,0.7)';
+    g.beginPath();g.moveTo(wx3-16,GY);g.quadraticCurveTo(wx3,GY-46,wx3+16,GY);g.fill();
+  }
+  // 磷火散点
+  for(let i=0;i<8;i++){
+    const fx2=((i*997-camX*0.8)%(W+200)+(W+200))%(W+200)-100;
+    const fl=0.3+0.25*Math.sin(T*3+i*2);
+    g.fillStyle=`rgba(140,230,190,${fl})`;
+    g.beginPath();g.arc(fx2,GY-30-((i*67)%90)+Math.sin(T*1.5+i)*8,3.4,0,7);g.fill();
+  }
+
+  // 主角
+  {
+    const px=sx(P.x), py=P.grab>=0?P.y:(boat.ride?WY-24:P.y);
+    g.save();g.translate(px,py);
+    if(P.inv>0&&Math.sin(T*30)>0)g.globalAlpha=0.4;
+    if(P.mode==='swim'&&P.grab<0)g.rotate(P.dir*0.4);
+    if(P.grab>=0)g.rotate(Math.sin(T*20)*0.12);
+    g.fillStyle='#4a5a78';g.fillRect(-11,-42,22,28);
+    g.fillStyle='#f0c8a0';g.beginPath();g.arc(0,-60,18,0,7);g.fill();
+    g.fillStyle='#3a3444';g.beginPath();g.arc(0,-67,17,Math.PI,0);g.fill();
+    g.fillStyle='#222';g.beginPath();g.arc(P.dir*7,-60,2.4,0,7);g.fill();
+    if(P.atkT>0.1){g.strokeStyle='#e8e8f0';g.lineWidth=5;
+      g.beginPath();g.arc(P.dir*10,-40,36,-1.2*P.dir,0.6*P.dir,P.dir<0);g.stroke();}
+    if(P.hasPot){
+      g.fillStyle='#b08a5a';g.beginPath();g.ellipse(0,-92,11,13,0,0,7);g.fill();
+      g.fillStyle='#8a6a42';g.fillRect(-7,-108,14,6);
+    }
+    if(Q.lantern===1){
+      g.fillStyle=`rgba(255,190,110,${0.75+0.2*Math.sin(T*4)})`;
+      g.beginPath();g.ellipse(14,-96,7,9,0,0,7);g.fill();
+    }
+    if(P.bless){
+      g.strokeStyle=`rgba(255,220,150,${0.4+0.2*Math.sin(T*4)})`;g.lineWidth=2.5;
+      g.beginPath();g.arc(0,-46,34,0,7);g.stroke();
+    }
+    g.strokeStyle='#3a4258';g.lineWidth=5;
+    g.beginPath();g.moveTo(-5,-14);g.lineTo(-7,0);g.moveTo(5,-14);g.lineTo(7,0);g.stroke();
+    g.restore();
+  }
+  for(const p of parts){g.globalAlpha=1-p.life/p.max;g.fillStyle=p.col;
+    g.fillRect(sx(p.x)-3,p.y-3,6,6);}
+  g.globalAlpha=1;
+
+  // HUD
+  for(let i=0;i<3;i++){g.fillStyle=i<P.hp?'#e85a5a':'#443a4c';
+    g.beginPath();const hx=34+i*40,hy=36;
+    g.arc(hx-7,hy-4,9,0,7);g.arc(hx+7,hy-4,9,0,7);
+    g.moveTo(hx-15,hy);g.lineTo(hx,hy+16);g.lineTo(hx+15,hy);g.fill();}
+  g.fillStyle='#ffd76a';g.beginPath();g.arc(40,86,12,0,7);g.fill();
+  g.fillStyle='#fff';g.font='22px monospace';g.fillText('×'+coins,58,94);
+  const lit=lamps.filter(l=>l.on).length;
+  g.fillStyle='#8ce6be';g.font='18px monospace';g.fillText('引魂灯 '+lit+'/'+lamps.length,34,126);
+  g.font='17px monospace';let qy=152;
+  if(Q.pot===1){g.fillStyle=P.hasPot?'#ffd76a':'#c8b8e8';g.fillText(P.hasPot?'◆ 瓦罐→送回匠人':'□ 寻老瓦罐(屋顶)',34,qy);qy+=24;}
+  if(Q.pot===2){g.fillStyle='#8a9a8a';g.fillText('✓ 瓦罐物归原主',34,qy);qy+=24;}
+  if(Q.lamp===1){g.fillStyle='#c8b8e8';g.fillText('□ 点亮城中4盏灯('+Math.min(4,lamps.slice(0,4).filter(l=>l.on).length)+'/4)',34,qy);qy+=24;}
+  if(Q.lamp===2){g.fillStyle='#8a9a8a';g.fillText('✓ 满城灯火',34,qy);qy+=24;}
+  if(Q.lantern===1){g.fillStyle='#c8b8e8';g.fillText('□ 河灯送到渡口',34,qy);qy+=24;}
+  if(Q.lantern===2){g.fillStyle='#8a9a8a';g.fillText('✓ 河灯已放(船半价)',34,qy);qy+=24;}
+  if(GOD){g.fillStyle='rgba(150,230,180,0.9)';g.font='20px monospace';g.fillText('无敌 ON(按G关)',W-220,40);}
+  if(msgT>0){g.font='24px sans-serif';const w2=g.measureText(msg).width;
+    g.fillStyle='rgba(16,12,26,0.8)';g.fillRect(W/2-w2/2-20,150,w2+40,46);
+    g.fillStyle='#e8d8ff';g.textAlign='center';g.fillText(msg,W/2,181);g.textAlign='left';}
+  if(P.dead)ov('沉入忘川…','按键从岸边爬起来');
+  if(P.win)ov('入城','冥界城堡…阎王殿见(第9关) · 按键重玩');
+  g.restore();
+}
+function ov(t1,t2){
+  g.fillStyle='rgba(8,6,16,0.75)';g.fillRect(0,0,W,H);
+  g.fillStyle='#e8d8ff';g.font='52px sans-serif';g.textAlign='center';
+  g.fillText(t1,W/2,H/2-30);
+  g.fillStyle='#cfc6e6';g.font='24px sans-serif';g.fillText(t2,W/2,H/2+30);g.textAlign='left';
+}
+let last=0;
+function loop(ts){
+  const dt=Math.min(0.033,(ts-last)/1000||0.016);last=ts;
+  step(dt);draw();requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
