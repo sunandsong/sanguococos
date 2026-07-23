@@ -1,6 +1,6 @@
 import {
   _decorator, Component, Node, Graphics, Label, LabelOutline, UITransform, UIOpacity,
-  Color, tween, Layers, input, Input, EventKeyboard, KeyCode, Sprite, SpriteFrame, Texture2D,
+  Color, tween, Layers, input, Input, EventKeyboard, KeyCode, Sprite, SpriteFrame, Texture2D, Rect,
 } from 'cc';
 import { DESIGN_W as W, DESIGN_H as H } from './Constants';
 import { AudioMgr } from './AudioMgr';
@@ -21,8 +21,8 @@ const { ccclass } = _decorator;
 //   里程倒数到 0 → 列车进站减速 → 转场铁心兽竞技场。全代码画,图位后补。
 // ─────────────────────────────────────────────────────────────
 
-interface Paper { x: number; y: number; vx: number; vy: number; ph: number; hp: number; dive: number; dead: number }
-interface Pot { x: number; y: number; vy: number; onG: boolean; hp: number; hopT: number; dead: number; dir: number }
+interface Paper { x: number; y: number; vx: number; vy: number; ph: number; hp: number; dive: number; dead: number; hit: number }
+interface Pot { x: number; y: number; vy: number; onG: boolean; hp: number; hopT: number; dead: number; dir: number; hit: number }
 interface Bullet { x: number; y: number; vx: number }
 
 @ccclass('Chapter2Train')
@@ -54,6 +54,16 @@ export class Chapter2Train extends Component {
   private arriving = false; private exiting = false;
 
   private papers: Paper[] = []; private pots: Pot[] = []; private bullets: Bullet[] = [];
+  private foeRoot!: Node;                       // 复用空城怪AI图的精灵容器
+  private trainRoot!: Node;                     // 火车真图容器(在怪之后面)
+  private carF: SpriteFrame | null = null; private carSp: Sprite[] = []; private carOK = false;
+  private locoSp: Sprite | null = null; private locoOK = false;
+  private turretSpr: Sprite | null = null; private turretOK = false;
+  private stationSp: Sprite | null = null; private stationOK = false;
+  private railSp: Sprite[] = []; private railOK = false; private railTW = 0;
+  private kiteF: SpriteFrame | null = null;     // 纸妖=city-kite
+  private potF: SpriteFrame[] = [];             // 瓦罐=city-pot-walk 8帧
+  private paperSp: Sprite[] = []; private potSpr: Sprite[] = [];
   private turretHp = 8; private turretT = 0; private turretBurst = 0;
   private spawnT = 3; private potT = 9;
   private parts: { x: number; y: number; vx: number; vy: number; t: number; c: Color; r: number }[] = [];
@@ -80,6 +90,65 @@ export class Chapter2Train extends Component {
 
     const gn = new Node('t-main'); gn.layer = Layers.Enum.UI_2D; gn.parent = this.world; gn.addComponent(UITransform);
     this.g = gn.addComponent(Graphics);
+    const tr = new Node('t-train'); tr.layer = Layers.Enum.UI_2D; tr.parent = this.world; tr.addComponent(UITransform);
+    this.trainRoot = tr;
+    AssetHub.loadSF('train-car', (sf) => {
+      if (!sf) return; (sf.texture as Texture2D).setFilters(Texture2D.Filter.LINEAR, Texture2D.Filter.LINEAR);
+      const cw = 466, ch = 466 * sf.rect.height / sf.rect.width;
+      this.carF = sf;
+      for (let i = 0; i < this.NCAR; i++) {
+        const n = new Node('car' + i); n.layer = Layers.Enum.UI_2D; n.parent = this.trainRoot;
+        const u = n.addComponent(UITransform); u.setContentSize(cw, ch); u.setAnchorPoint(0.5, 0.82);
+        const sp = n.addComponent(Sprite); sp.sizeMode = Sprite.SizeMode.CUSTOM; sp.spriteFrame = sf; this.carSp.push(sp);
+      }
+      this.carOK = true;
+    });
+    // 机车头
+    AssetHub.loadSF('train-loco', (sf) => {
+      if (!sf) return; (sf.texture as Texture2D).setFilters(Texture2D.Filter.LINEAR, Texture2D.Filter.LINEAR);
+      const w = 540, h = w * sf.rect.height / sf.rect.width;
+      const n = new Node('loco'); n.layer = Layers.Enum.UI_2D; n.parent = this.trainRoot;
+      const u = n.addComponent(UITransform); u.setContentSize(w, h); u.setAnchorPoint(0.5, 0.82);
+      const sp = n.addComponent(Sprite); sp.sizeMode = Sprite.SizeMode.CUSTOM; sp.spriteFrame = sf;
+      this.locoSp = sp; this.locoOK = true;
+    });
+    // 炮台
+    AssetHub.loadSF('train-turret', (sf) => {
+      if (!sf) return; (sf.texture as Texture2D).setFilters(Texture2D.Filter.LINEAR, Texture2D.Filter.LINEAR);
+      const w = 150, h = w * sf.rect.height / sf.rect.width;
+      const n = new Node('turret'); n.layer = Layers.Enum.UI_2D; n.parent = this.trainRoot;
+      const u = n.addComponent(UITransform); u.setContentSize(w, h); u.setAnchorPoint(0.5, 0.06);
+      const sp = n.addComponent(Sprite); sp.sizeMode = Sprite.SizeMode.CUSTOM; sp.spriteFrame = sf;
+      this.turretSpr = sp; this.turretOK = true;
+    });
+    // 站台
+    AssetHub.loadSF('train-station', (sf) => {
+      if (!sf) return; (sf.texture as Texture2D).setFilters(Texture2D.Filter.LINEAR, Texture2D.Filter.LINEAR);
+      const w = 560, h = w * sf.rect.height / sf.rect.width;
+      const n = new Node('station'); n.layer = Layers.Enum.UI_2D; n.parent = this.trainRoot;
+      const u = n.addComponent(UITransform); u.setContentSize(w, h); u.setAnchorPoint(0.5, 0.10);
+      const sp = n.addComponent(Sprite); sp.sizeMode = Sprite.SizeMode.CUSTOM; sp.spriteFrame = sf;
+      n.active = false; this.stationSp = sp; this.stationOK = true;
+    });
+    // 铁轨(横向平铺,压在车厢之下)
+    AssetHub.loadSF('train-rail', (sf) => {
+      if (!sf) return; (sf.texture as Texture2D).setFilters(Texture2D.Filter.LINEAR, Texture2D.Filter.LINEAR);
+      const h = 96, w = h * sf.rect.width / sf.rect.height; this.railTW = w;
+      const cnt = Math.ceil((W + 120) / w) + 2;
+      for (let i = 0; i < cnt; i++) {
+        const n = new Node('rail' + i); n.layer = Layers.Enum.UI_2D; n.parent = this.trainRoot;
+        const u = n.addComponent(UITransform); u.setContentSize(w, h); u.setAnchorPoint(0.5, 0.5);
+        const sp = n.addComponent(Sprite); sp.sizeMode = Sprite.SizeMode.CUSTOM; sp.spriteFrame = sf;
+        n.setSiblingIndex(0);   // 压最底(车厢之下)
+        this.railSp.push(sp);
+      }
+      this.railOK = true;
+    });
+    const fr = new Node('t-foes'); fr.layer = Layers.Enum.UI_2D; fr.parent = this.world; fr.addComponent(UITransform);
+    this.foeRoot = fr;
+    // 复用空城三怪AI图
+    AssetHub.loadSF('city-kite', (sf) => { if (!sf) return; (sf.texture as Texture2D).setFilters(Texture2D.Filter.LINEAR, Texture2D.Filter.LINEAR); this.kiteF = sf; });
+    AssetHub.loadSF('city-pot-walk', (sf) => { if (!sf) return; const tex = sf.texture as Texture2D; tex.setFilters(Texture2D.Filter.LINEAR, Texture2D.Filter.LINEAR); const cw = Math.round(tex.width / 8); for (let i = 0; i < 8; i++) { const f = new SpriteFrame(); f.texture = tex; f.rect = new Rect(i * cw, 0, cw, tex.height); this.potF.push(f); } });
 
     const fx = new Node('t-fx'); fx.layer = Layers.Enum.UI_2D; fx.parent = this.world; fx.addComponent(UITransform);
     this.hero = new HeroRig(this.world, fx);
@@ -187,12 +256,13 @@ export class Chapter2Train extends Component {
     if (type === 2 && this.onG) { this.vy = 620; this.onG = false; this.slamJump = true; }
     const reach = type === 2 ? 170 : 135;
     const hy = this.py + 46;
-    // 纸妖
+    // 纸妖:以剑气弧圆心为中心的圆形命中(与刀气视觉严丝合缝,够得着高处飞的风筝)
+    const scx = this.px + this.dir * 55, scy = this.py + 74, sr = type === 2 ? 185 : 158;
     for (const p of this.papers) {
       if (p.dead > 0 || p.hp <= 0) continue;
-      const dx = p.x - this.px;
-      if (dx * this.dir > -30 && Math.abs(dx) < reach && Math.abs(p.y - hy) < 95) {
-        p.hp--; if (p.hp <= 0) { p.dead = 0.01; this.kills++; this.burst(p.x, p.y, new Color(226, 218, 200, 255), 10); AudioMgr.inst.play('hit', 0.6); }
+      const pcy = p.y - 10;   // 风筝显示中心
+      if ((p.x - this.px) * this.dir > -40 && (p.x - scx) * (p.x - scx) + (pcy - scy) * (pcy - scy) < sr * sr) {
+        p.hp--; p.hit = 0.35; if (p.hp <= 0) { p.dead = 0.01; this.kills++; this.burst(p.x, p.y, new Color(226, 218, 200, 255), 18); AudioMgr.inst.play('hit', 0.6); }
       }
     }
     // 瓦罐妖
@@ -200,8 +270,8 @@ export class Chapter2Train extends Component {
       if (o.dead > 0 || o.hp <= 0) continue;
       const dx = o.x - this.px;
       if (dx * this.dir > -30 && Math.abs(dx) < reach && Math.abs(o.y - this.py) < 90) {
-        o.hp--; this.burst(o.x, o.y + 40, new Color(196, 150, 110, 255), 6); AudioMgr.inst.play('hit', 0.7);
-        if (o.hp <= 0) { o.dead = 0.01; this.kills++; this.burst(o.x, o.y + 40, new Color(210, 160, 116, 255), 16); }
+        o.hp--; o.hit = 0.35; this.burst(o.x, o.y + 40, new Color(196, 150, 110, 255), 13); AudioMgr.inst.play('hit', 0.7);
+        if (o.hp <= 0) { o.dead = 0.01; this.kills++; this.burst(o.x, o.y + 40, new Color(210, 160, 116, 255), 26); }
       }
     }
     // 炮妖
@@ -223,7 +293,9 @@ export class Chapter2Train extends Component {
   private addShake(v: number) { this.shake = Math.max(this.shake, v); }
   private burst(x: number, y: number, c: Color, n: number) {
     for (let i = 0; i < n; i++)
-      this.parts.push({ x, y, vx: (Math.random() - 0.5) * 360, vy: 60 + Math.random() * 300, t: 0.5 + Math.random() * 0.3, c, r: 2 + Math.random() * 3.5 });
+      this.parts.push({ x, y, vx: (Math.random() - 0.5) * 560, vy: 90 + Math.random() * 440, t: 0.5 + Math.random() * 0.4, c, r: 3 + Math.random() * 5.5 });
+    for (let i = 0; i < Math.max(3, Math.round(n / 2.5)); i++)   // 亮白火花核(打击感)
+      this.parts.push({ x, y, vx: (Math.random() - 0.5) * 340, vy: 130 + Math.random() * 300, t: 0.3 + Math.random() * 0.2, c: new Color(255, 246, 214, 255), r: 2.5 + Math.random() * 3 });
   }
 
   // ── 车厢几何 ──
@@ -248,7 +320,7 @@ export class Chapter2Train extends Component {
     if (this.lagHp > this.hp) this.lagHp = Math.max(this.hp, this.lagHp - dt * 55);
     this.hud.set(this.hp, 100, this.lagHp, this.kills);
 
-    if (this.over) { this.deadT += dt; this.drawAll(); this.applyHero(); return; }
+    if (this.over) { this.deadT += dt; this.drawAll(); this.applyHero(dt); return; }
 
     // 里程 & 到站
     if (!this.arriving) {
@@ -268,7 +340,7 @@ export class Chapter2Train extends Component {
     if (this.slideT > 0) { this.slideT -= dt; this.px += this.dir * 430 * dt; }
     else if (mx && this.fallT <= 0) { this.dir = mx as 1 | -1; this.px += mx * 250 * dt; this.walkPh += dt * 9; }
     this.px = Math.max(24, Math.min(this.NCAR * this.PITCH - this.GAP - 26, this.px));
-    if (!this.onG) {
+    if (!this.onG && this.fallT <= 0) {
       this.vy -= 2100 * dt; this.py += this.vy * dt;
       if (this.py <= this.ROOF && this.vy <= 0) {
         const ci = this.carIndexAt(this.px);
@@ -286,7 +358,7 @@ export class Chapter2Train extends Component {
         this.fallInGap();
       }
     } else if (this.carIndexAt(this.px) < 0 && this.fallT <= 0) {
-      this.onG = false; this.vy = -60;   // 走进豁口开始掉
+      this.fallInGap();   // 走进豁口:脚滑浅坑,快速拽回
     }
     if (this.fallT > 0) {
       this.fallT -= dt;
@@ -304,14 +376,14 @@ export class Chapter2Train extends Component {
         this.spawnT = 4.2 + Math.random() * 2.5 - Math.min(2, (1 - this.dist / this.DIST0) * 2.4);
         const n = this.dist < this.DIST0 * 0.5 ? 2 : 1;
         for (let i = 0; i < n; i++)
-          this.papers.push({ x: this.camX + W / 2 + 80 + i * 130, y: this.ROOF + 190 + Math.random() * 220, vx: -(150 + Math.random() * 90), vy: 0, ph: Math.random() * 6.28, hp: 1, dive: 0, dead: 0 });
+          this.papers.push({ x: this.camX + W / 2 + 80 + i * 130, y: this.ROOF + 110 + Math.random() * 150, vx: -(150 + Math.random() * 90), vy: 0, ph: Math.random() * 6.28, hp: 1, dive: 0, dead: 0, hit: 0 });
       }
       this.potT -= dt;
       if (this.potT <= 0) {
         this.potT = 10 + Math.random() * 5;
         const side = Math.random() < 0.6 ? 1 : -1;
         const spawnX = side > 0 ? Math.min(this.LEN - 60, this.camX + W / 2 + 60) : Math.max(30, this.camX - W / 2 - 60);
-        this.pots.push({ x: spawnX, y: this.ROOF, vy: 0, onG: true, hp: 3, hopT: 0.6, dead: 0, dir: (side > 0 ? -1 : 1) });
+        this.pots.push({ x: spawnX, y: this.ROOF, vy: 0, onG: true, hp: 3, hopT: 0.6, dead: 0, dir: (side > 0 ? -1 : 1), hit: 0 });
       }
     }
 
@@ -319,7 +391,7 @@ export class Chapter2Train extends Component {
     for (let i = this.papers.length - 1; i >= 0; i--) {
       const p = this.papers[i];
       if (p.dead > 0) { p.dead += dt; if (p.dead > 0.3) this.papers.splice(i, 1); continue; }
-      p.ph += dt * 5;
+      p.ph += dt * 5; if (p.hit > 0) p.hit -= dt;
       if (p.dive <= 0) {
         p.x += p.vx * dt; p.y += Math.sin(p.ph) * 46 * dt;
         if (Math.abs(p.x - this.px) < 190 && Math.random() < 0.02) p.dive = 1;   // 进入俯冲
@@ -327,19 +399,18 @@ export class Chapter2Train extends Component {
         const hy = this.py + 46;
         p.x += (this.px - p.x) * dt * 3.2; p.y += (hy - p.y) * dt * 3.4;
       }
-      if (Math.abs(p.x - this.px) < 34 && Math.abs(p.y - (this.py + 46)) < 46) { this.hurt(6, p.x); p.dead = 0.01; this.burst(p.x, p.y, new Color(226, 218, 200, 255), 8); }
+      if (Math.abs(p.x - this.px) < 34 && Math.abs(p.y - (this.py + 46)) < 46) { this.hurt(6, p.x); p.dead = 0.01; this.burst(p.x, p.y, new Color(226, 218, 200, 255), 14); }
       if (p.x < this.camX - W / 2 - 140) this.papers.splice(i, 1);
     }
     // 瓦罐妖:跳跳逼近
     for (let i = this.pots.length - 1; i >= 0; i--) {
       const o = this.pots[i];
       if (o.dead > 0) { o.dead += dt; if (o.dead > 0.3) this.pots.splice(i, 1); continue; }
-      o.dir = this.px < o.x ? -1 : 1;
+      o.dir = this.px < o.x ? -1 : 1; if (o.hit > 0) o.hit -= dt;
       if (o.onG) {
-        o.hopT -= dt;
-        if (o.hopT <= 0) { o.hopT = 0.55 + Math.random() * 0.4; o.vy = 430; o.onG = false; }
+        if (o.hit <= 0) { o.hopT -= dt; if (o.hopT <= 0) { o.hopT = 0.55 + Math.random() * 0.4; o.vy = 430; o.onG = false; } }
       } else {
-        o.vy -= 1900 * dt; o.y += o.vy * dt; o.x += o.dir * 190 * dt;
+        o.vy -= 1900 * dt; o.y += o.vy * dt; if (o.hit <= 0) o.x += o.dir * 190 * dt;
         if (o.y <= this.ROOF && o.vy <= 0) {
           if (this.carIndexAt(o.x) >= 0) { o.y = this.ROOF; o.onG = true; }
           else if (o.y < this.ROOF - 260) { this.pots.splice(i, 1); continue; }   // 自己掉豁口
@@ -379,10 +450,11 @@ export class Chapter2Train extends Component {
     this.cam.update(dt, !this.onG || this.fallT > 0, this.sx(this.px), -H / 2);
 
     this.combat.update(dt, this.sx(this.px), this.py + (this.onG ? this.carBob(this.carIndexAt(this.px)) : 0), this.dir);
-    this.drawAll(); this.applyHero();
+    this.drawAll(); this.applyHero(dt);
   }
 
-  private applyHero() {
+  private applyHero(dt: number) {
+    this.hero.updateFx(dt, this.sx(this.px), this.ROOF);   // 递减 landT/hurtT,否则卡落地蹲帧
     const ci = this.carIndexAt(this.px);
     const bob = this.onG && ci >= 0 ? this.carBob(ci) : 0;
     let mode: HeroMode = 'idle'; let p = 0;
@@ -398,12 +470,23 @@ export class Chapter2Train extends Component {
 
   private fallInGap() {
     if (this.fallT > 0) return;
-    this.fallT = 0.55; this.onG = false; this.vy = 0; this.py = this.ROOF - 320;
-    this.hurt(8);
-    this.addShake(6);
+    this.fallT = 0.4; this.onG = false; this.vy = 0; this.py = this.ROOF - 130;   // 浅坑,不坠出屏
+    this.hp = Math.max(1, this.hp - 5);   // 小惩罚,绝不摔死
+    this.inv = Math.max(this.inv, 0.9);
+    this.addShake(6); AudioMgr.inst.play('hurt', 0.5);
   }
 
   // ── 绘制 ──
+  // 精灵池:按索引取/建一个精灵节点(复用,不够就建)
+  private poolSp(pool: Sprite[], i: number, w: number, h: number, ay: number): Sprite {
+    if (!pool[i]) {
+      const n = new Node('foe'); n.layer = Layers.Enum.UI_2D; n.parent = this.foeRoot;
+      const u = n.addComponent(UITransform); u.setContentSize(w, h); u.setAnchorPoint(0.5, ay);
+      const sp = n.addComponent(Sprite); sp.sizeMode = Sprite.SizeMode.CUSTOM; pool[i] = sp;
+    }
+    pool[i].node.active = true; return pool[i];
+  }
+
   private drawAll() {
     this.placeLayers();
     const g = this.g; g.clear();
@@ -426,9 +509,20 @@ export class Chapter2Train extends Component {
     g.fillColor = new Color(96, 86, 112, 255);
     g.rect(this.camX - W * 0.75, railY - 12, W * 1.5, 6); g.fill();
 
+    // 连续铁轨(垫在车厢之后,填满车间豁口,铁轨贯通不断)
+    for (const s of this.railSp) s.node.active = false;   // 弃用铁轨真图(俯视不搭),用程序侧视轨
+    if (this.carOK) {
+      const ry = bodyTop - 155;
+      g.fillColor = new Color(58, 46, 40, 255);   // 枕木
+      for (let x = Math.floor((this.camX - W * 0.8) / 44) * 44; x < this.camX + W * 0.8; x += 44) { g.rect(x, ry - 12, 16, 26); g.fill(); }
+      g.fillColor = new Color(44, 38, 50, 255);    // 双钢轨
+      g.rect(this.camX - W * 0.8, ry, W * 1.6, 6); g.fill();
+      g.rect(this.camX - W * 0.8, ry + 15, W * 1.6, 6); g.fill();
+    }
     // ── 车厢 × 5 ──
     for (let i = 0; i < this.NCAR; i++) {
       const x0 = i * this.PITCH, bob = this.carBob(i);
+      if (this.carOK && this.carSp[i]) { this.carSp[i].node.setPosition(this.sx(x0 + this.CAR_W / 2), bodyTop + bob, 0); continue; }
       const bt = bodyTop + bob, bb = bodyBot + bob;
       // 车影
       g.fillColor = new Color(10, 8, 20, 120); g.ellipse(x0 + this.CAR_W / 2, railY - 16, this.CAR_W * 0.52, 12); g.fill();
@@ -469,6 +563,8 @@ export class Chapter2Train extends Component {
     // ── 机车头(最前,不可上) ──
     {
       const x0 = this.LEN + 6, bob = this.carBob(this.NCAR);
+      if (this.locoOK && this.locoSp) this.locoSp.node.setPosition(this.sx(x0 + 200), bodyTop + bob, 0);
+      if (!this.locoOK) {
       const bt = bodyTop + 66 + bob;
       g.fillColor = new Color(58, 48, 72, 255); g.rect(x0, bodyBot + bob, 150, bodyH + 66); g.fill();          // 驾驶室
       g.fillColor = new Color(255, 214, 130, 190); g.rect(x0 + 28, bodyBot + bob + 150, 62, 54); g.fill();     // 驾驶室亮窗
@@ -489,23 +585,28 @@ export class Chapter2Train extends Component {
       for (const wx of [x0 + 80, x0 + 190, x0 + 300]) { g.circle(wx, railY - 2 + bob * 0.3, 30); g.fill(); }
       // 前挡(拦住玩家)
       g.fillColor = new Color(96, 84, 110, 255); g.rect(x0 - 10, bodyTop + bob - 10, 12, 76); g.fill();
+      }
     }
 
-    // ── 炮妖(第4节车前缘的搭载炮) ──
+    // ── 炮妖(复用 train-turret 图) ──
     if (this.turretHp > 0) {
       const tx = this.turretX(), bob = this.carBob(3);
       const ty = roofY + bob;
-      g.fillColor = new Color(52, 44, 66, 255); g.rect(tx - 26, ty, 52, 30); g.fill();
-      g.fillColor = new Color(84, 72, 100, 255); g.circle(tx, ty + 34, 22); g.fill();
-      const dirB = this.px < tx ? -1 : 1;
-      g.strokeColor = new Color(40, 34, 54, 255); g.lineWidth = 10;
-      g.moveTo(tx, ty + 36); g.lineTo(tx + dirB * 34, ty + 40); g.stroke();
-      // 独眼
-      g.fillColor = new Color(255, 120, 90, 255); g.circle(tx + dirB * 6, ty + 38, 5.5); g.fill();
-      // 血环
+      if (this.turretOK && this.turretSpr) {
+        this.turretSpr.node.active = true;
+        const face = this.px < tx ? -1 : 1;   // 朝玩家(图默认朝右)
+        this.turretSpr.node.setScale(face, 1, 1); this.turretSpr.node.setPosition(this.sx(tx), ty, 0);
+      } else {
+        const dirB = this.px < tx ? -1 : 1;
+        g.fillColor = new Color(58, 50, 72, 255); g.rect(tx - 30, ty, 60, 22); g.fill();
+        g.fillColor = new Color(96, 84, 116, 255); g.circle(tx, ty + 40, 24); g.fill();
+        g.strokeColor = new Color(40, 34, 54, 255); g.lineWidth = 13;
+        g.moveTo(tx, ty + 42); g.lineTo(tx + dirB * 42, ty + 40); g.stroke();
+      }
+      // 血环(始终画在g)
       g.strokeColor = new Color(255, 110, 90, 200); g.lineWidth = 3;
-      g.arc(tx, ty + 34, 27, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * (this.turretHp / 8), false); g.stroke();
-    }
+      g.arc(tx, ty + 74, 30, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * (this.turretHp / 8), false); g.stroke();
+    } else if (this.turretSpr) { this.turretSpr.node.active = false; }
 
     // 子弹
     for (const b of this.bullets) {
@@ -513,30 +614,29 @@ export class Chapter2Train extends Component {
       g.moveTo(b.x - Math.sign(b.vx) * 16, b.y); g.lineTo(b.x, b.y); g.stroke();
     }
 
-    // 纸妖(飘舞纸片,俯冲时前倾)
-    for (const p of this.papers) {
-      const flap = Math.sin(p.ph * 2.4) * 8;
-      const al = p.dead > 0 ? Math.round(255 * (1 - p.dead / 0.3)) : 255;
-      g.fillColor = new Color(228, 220, 202, al);
-      const tl = p.dive > 0 ? 10 : 0;
-      g.moveTo(p.x - 20, p.y + flap - tl); g.lineTo(p.x + 20, p.y - flap * 0.6);
-      g.lineTo(p.x + 14, p.y - 26 - flap * 0.3); g.lineTo(p.x - 14, p.y - 24 + flap * 0.4); g.close(); g.fill();
-      // 墨点眼
-      g.fillColor = new Color(40, 34, 40, al); g.circle(p.x - 4, p.y - 10, 2.6); g.fill(); g.circle(p.x + 5, p.y - 11, 2.6); g.fill();
+    // 纸妖(复用 city-kite,俯冲前倾)
+    for (let i = 0; i < this.papers.length; i++) {
+      const p = this.papers[i]; if (!this.kiteF) break;
+      const sp = this.poolSp(this.paperSp, i, 86, 90, 0.5); sp.spriteFrame = this.kiteF;
+      sp.color = new Color(255, 255, 255, p.dead > 0 ? Math.round(255 * (1 - p.dead / 0.3)) : 255);
+      const face = p.x < this.px ? -1 : 1;   // 朝玩家(翻)
+      const phk = Math.max(0, p.hit / 0.35), pback = p.x > this.px ? 1 : -1;
+      sp.node.setScale(face, 1, 1); sp.node.setPosition(this.sx(p.x) + pback * 12 * phk, p.y - 10, 0);
+      sp.node.angle = (p.dive > 0 ? face * 30 : Math.sin(p.ph) * 6) + pback * -26 * phk;
     }
-    // 瓦罐妖
-    for (const o of this.pots) {
-      const al = o.dead > 0 ? Math.round(255 * (1 - o.dead / 0.3)) : 255;
-      g.fillColor = new Color(150, 108, 76, al);
-      g.ellipse(o.x, o.y + 40, 26, 32); g.fill();
-      g.fillColor = new Color(120, 84, 58, al); g.ellipse(o.x, o.y + 66, 16, 8); g.fill();   // 罐口
-      g.fillColor = new Color(255, 214, 130, al);                                            // 罐里妖火
-      g.circle(o.x, o.y + 64, 4 + Math.sin(t * 8 + o.x) * 1.5); g.fill();
-      g.fillColor = new Color(40, 32, 40, al); g.circle(o.x - 8, o.y + 44, 3); g.fill(); g.circle(o.x + 8, o.y + 44, 3); g.fill();
-      g.strokeColor = new Color(90, 62, 44, al); g.lineWidth = 4;                            // 小短腿
-      g.moveTo(o.x - 10, o.y + 10); g.lineTo(o.x - 12, o.y); g.stroke();
-      g.moveTo(o.x + 10, o.y + 10); g.lineTo(o.x + 12, o.y); g.stroke();
+    for (let i = this.papers.length; i < this.paperSp.length; i++) if (this.paperSp[i]) this.paperSp[i].node.active = false;
+    // 瓦罐妖(复用 city-pot-walk 8帧,朝向翻转)
+    for (let i = 0; i < this.pots.length; i++) {
+      const o = this.pots[i]; if (!this.potF.length) break;
+      const sp = this.poolSp(this.potSpr, i, 78, 104, 0.06);
+      sp.spriteFrame = this.potF[Math.floor(this.t * 8) % this.potF.length];
+      sp.color = new Color(255, 255, 255, o.dead > 0 ? Math.round(255 * (1 - o.dead / 0.3)) : 255);
+      const ohk = Math.max(0, o.hit / 0.35), oback = o.x > this.px ? 1 : -1;
+      sp.node.setScale(o.dir, 1, 1);
+      sp.node.setPosition(this.sx(o.x) + oback * 12 * ohk, o.y, 0);
+      sp.node.angle = oback * -24 * ohk;
     }
+    for (let i = this.pots.length; i < this.potSpr.length; i++) if (this.potSpr[i]) this.potSpr[i].node.active = false;
     // 碎片
     for (const q of this.parts) {
       g.fillColor = new Color(q.c.r, q.c.g, q.c.b, Math.round(255 * Math.min(1, q.t * 2.5)));
@@ -547,10 +647,14 @@ export class Chapter2Train extends Component {
     if (this.arriving) {
       const k = 1 - this.speedK;
       const gateX = this.LEN + 700 - k * 340;
-      g.fillColor = new Color(44, 36, 58, 255); g.rect(gateX, railY - 20, 900, H); g.fill();
-      g.fillColor = new Color(255, 196, 116, Math.round(120 + 60 * Math.sin(t * 3)));
-      g.circle(gateX + 60, roofY + 160, 14); g.fill();
-    }
+      if (this.stationOK && this.stationSp) {
+        this.stationSp.node.active = true; this.stationSp.node.setPosition(this.sx(gateX + 220), bodyBot, 0);
+      } else {
+        g.fillColor = new Color(44, 36, 58, 255); g.rect(gateX, railY - 20, 900, H); g.fill();
+        g.fillColor = new Color(255, 196, 116, Math.round(120 + 60 * Math.sin(t * 3)));
+        g.circle(gateX + 60, roofY + 160, 14); g.fill();
+      }
+    } else if (this.stationSp) { this.stationSp.node.active = false; }
 
     // 主图形层用世界坐标画,整层随相机平移
     this.g.node.setPosition(-this.camX, 0, 0);
