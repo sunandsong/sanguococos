@@ -25,9 +25,11 @@ import { Chapter2Well } from './Chapter2Well';
 import { Chapter2Cave } from './Chapter2Cave';
 import { Chapter2City } from './Chapter2City';
 import { Chapter2Arena } from './Chapter2Arena';
+import { Chapter2Train } from './Chapter2Train';
 const { ccclass } = _decorator;
 
 // 临时开关(从上往下,开哪个进哪个):空城 > 洞穴 > 井关 > 正常第一章(全 false = 开机标题→第一章)
+const START_TRAIN = false;    // true = 直接进「夜行列车」车顶打怪段(调试直入)
 const START_ARENA = false;    // true = 直接进「铁心兽竞技场」(Boss 调试)
 const START_CITY = true;       // true = 直接进第二章「空城」跑酷 Demo(街尾跳井接井关)
 const START_CAVE = false;      // true = 直接进第三章「地下坑道」场景(开发中)
@@ -87,6 +89,10 @@ export class GameRoot extends Component {
     // hud.getComponent(UITransform)!.setAnchorPoint(0, 1);
     // hud.setPosition(-DESIGN_W / 2 + 16, DESIGN_H / 2 - 12, 0);
 
+    if (START_TRAIN) {
+      make('Chapter2Train', Chapter2Train);  // 夜行列车 车顶打怪(调试直入)
+      return;
+    }
     if (START_ARENA) {
       make('Chapter2Arena', Chapter2Arena);  // 铁心兽 Boss 竞技场(调试直入)
       return;

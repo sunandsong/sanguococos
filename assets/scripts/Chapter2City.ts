@@ -12,7 +12,7 @@ import { DeathFx } from './DeathFx';
 import { AudioMgr } from './AudioMgr';
 import { JUMP, tryJump } from './JumpKit';
 import { CamZoom } from './CamZoom';
-import { Chapter2Arena } from './Chapter2Arena';
+import { Chapter2Train } from './Chapter2Train';
 
 const { ccclass } = _decorator;
 
@@ -836,8 +836,8 @@ export class Chapter2City extends Component {
       }
     }
 
-    // 街尾浓雾:井藏在雾里不用看见,走进雾就转场接井关(第三章)
-    if (this.px > this.LENGTH - 280 && !this.exiting) { this.exitToWell(); return; }
+    // 街尾停着夜行列车:走到车门口就上车(车顶打怪段)
+    if (this.px > this.LENGTH - 300 && !this.exiting) { this.exitToWell(); return; }
 
     // 屋顶金币拾取
     for (let i = 0; i < this.coinsArr.length; i++) {
@@ -1252,32 +1252,45 @@ g.fillColor = new Color(28, 20, 42, 70); g.ellipse(ox, gy - 2, 9, 3); g.fill();
       g.fillColor = new Color(218, 217, 228, 18);
       g.ellipse(cx, -H / 2 + 240 + sd * H * 0.5, 480 + sd * 240, 26 + sd * 16); g.fill();
     }
-    // 街尾浓雾墙:整团大雾裹住尽头(井在雾里看不见),走进去就是下一个场景
+    // 街尾停站的夜行列车(呆火车亲戚):代码画,亮着一扇车门等你上车
     {
-      const fogX = this.sx(this.LENGTH - 150);
-      if (fogX < W / 2 + 520) {
-        for (let i = 0; i < 10; i++) {   // 满高一列翻涌雾团
+      const trX = this.sx(this.LENGTH - 60);   // 车头朝右停在街尾
+      if (trX < W / 2 + 900) {
+        const gy2 = this.GROUND, bodyH = 210;
+        // 蒸汽氛围(轻雾,不再糊死)
+        for (let i = 0; i < 5; i++) {
           const sd = this.rnd(i * 7.7 + 880);
-          const fx3 = fogX + (sd - 0.35) * 260 + Math.sin(this.t * (0.3 + sd * 0.4) + i * 1.7) * 24;
-          const fy3 = -H / 2 + (i / 9) * H;
-          this.fogBank(g, fx3, fy3, 200 + sd * 160, 40, i + 880);
+          const fx3 = trX + (sd - 0.3) * 420 + Math.sin(this.t * (0.3 + sd * 0.4) + i * 1.7) * 24;
+          this.fogBank(g, fx3, gy2 + 60 + sd * 220, 150 + sd * 120, 26, i + 880);
         }
-        // 雾芯:完全不透(里面什么都看不见,井彻底藏死)——纯代码,无需出图
-        const solidL = this.sx(this.LENGTH - 210);
-        g.fillColor = new Color(214, 213, 226, 255);
-        g.rect(solidL, -H / 2, W + 600, H); g.fill();   // 从雾芯到屏幕右缘全糊死
-        for (let k = 0; k < 16; k++) {   // 前缘羽化:16 层细条平滑衰减(不见台阶)
-          const a = Math.round(235 * Math.pow(1 - k / 16, 1.6));
-          g.fillColor = new Color(214, 213, 226, a);
-          g.rect(solidL - (k + 1) * 20, -H / 2, 21, H); g.fill();
+        // 车身(一节车厢在街尾,车头再往右出画)
+        const cx0 = trX - 470;
+        g.fillColor = new Color(56, 46, 70, 255); g.rect(cx0, gy2 + 8, 430, bodyH); g.fill();
+        g.fillColor = new Color(74, 62, 88, 255); g.rect(cx0, gy2 + 8 + bodyH - 52, 430, 52); g.fill();
+        g.fillColor = new Color(126, 110, 138, 255);
+        for (let k = 0; k < 8; k++) { g.circle(cx0 + 30 + k * 54, gy2 + 34, 3.4); g.fill(); }
+        // 亮着的车门(上车点)
+        const doorX = cx0 + 214;
+        g.fillColor = new Color(255, 214, 130, 235); g.rect(doorX - 34, gy2 + 12, 68, 118); g.fill();
+        g.fillColor = new Color(255, 240, 190, Math.round(60 + 30 * Math.sin(this.t * 2.4)));
+        g.ellipse(doorX, gy2 + 40, 92, 30); g.fill();
+        // 车轮
+        g.fillColor = new Color(28, 22, 40, 255);
+        for (const wx of [cx0 + 70, cx0 + 150, cx0 + 290, cx0 + 370]) { g.circle(wx, gy2 + 4, 28); g.fill(); }
+        g.fillColor = new Color(96, 84, 108, 255);
+        for (const wx of [cx0 + 70, cx0 + 150, cx0 + 290, cx0 + 370]) { g.circle(wx, gy2 + 4, 9); g.fill(); }
+        // 车头(半出画):锅炉+烟囱懒烟
+        g.fillColor = new Color(48, 40, 62, 255); g.rect(cx0 + 470, gy2 + 8, 460, bodyH + 60); g.fill();
+        g.fillColor = new Color(40, 32, 54, 255); g.rect(cx0 + 640, gy2 + bodyH + 64, 40, 60); g.fill();
+        for (let k = 0; k < 3; k++) {
+          const sk = (this.t * 0.5 + k * 0.33) % 1;
+          g.fillColor = new Color(210, 206, 220, Math.round(70 * (1 - sk)));
+          g.circle(cx0 + 660 - sk * 60, gy2 + bodyH + 130 + sk * 80, 10 + sk * 18); g.fill();
         }
-        for (let i = 0; i < 12; i++) {   // 一列翻涌大雾团骑在边界上,把残余直边彻底吃掉
-          const sd = this.rnd(i * 11.3 + 940);
-          const ex = solidL - 60 - sd * 240 + Math.sin(this.t * (0.35 + sd * 0.5) + i * 2.2) * 30;
-          const ey = -H / 2 + (i / 11) * H + Math.sin(this.t * 0.6 + i) * 20;
-          g.fillColor = new Color(215, 214, 227, Math.round(120 + sd * 70));
-          g.ellipse(ex, ey, 110 + sd * 90, 80 + sd * 60); g.fill();
-        }
+        // 站牌:上车提示
+        g.fillColor = new Color(44, 36, 58, 255); g.rect(cx0 - 130, gy2, 10, 150); g.fill();
+        g.fillColor = new Color(216, 204, 232, 235); g.rect(cx0 - 176, gy2 + 130, 102, 44); g.fill();
+        g.fillColor = new Color(64, 50, 90, 255); g.rect(cx0 - 170, gy2 + 136, 90, 32); g.fill();
       }
     }
     const SPAN = W + 160;
@@ -1320,8 +1333,8 @@ g.fillColor = new Color(28, 20, 42, 70); g.ellipse(ox, gy - 2, 9, 3); g.fill();
     const op = fade.addComponent(UIOpacity); op.opacity = 0;
     tween(op).to(0.5, { opacity: 255 }).call(() => {
       this.node.destroy();
-      const n = new Node('Chapter2Arena'); n.layer = Layers.Enum.UI_2D; n.addComponent(UITransform); n.parent = parent;
-      n.addComponent(Chapter2Arena);   // 走进浓雾 → 铁心兽竞技场;打赢跳井才接井关
+      const n = new Node('Chapter2Train'); n.layer = Layers.Enum.UI_2D; n.addComponent(UITransform); n.parent = parent;
+      n.addComponent(Chapter2Train);   // 上车 → 车顶打怪段,到站接铁心兽竞技场
       fade.setSiblingIndex(parent.children.length - 1);
       tween(op).delay(0.1).to(0.45, { opacity: 0 }).call(() => fade.destroy()).start();
     }).start();
