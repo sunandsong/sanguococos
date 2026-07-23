@@ -56,6 +56,8 @@ export class Chapter2Arena extends Component {
   private _bhitT = 0;   // Boss受击闪白/弹缩
   private gunSp: Sprite | null = null;   // 机枪臂(独立旋转真图)
   private gunAsp = 1; private _muzzT = 0;
+  private discOK = false;             // (弃)新石盘
+  private yardOK = false;             // 机车库整景图已就位:代码只画动效
   private readonly GUN_FX = 0.76;   // 枪座:帧内横向比例
   private readonly GUN_FY = 0.56;   // 枪座:高度比例(自底)
   private readonly GUN_SC = 0.88;   // 枪臂缩放
@@ -101,13 +103,15 @@ export class Chapter2Arena extends Component {
   private covers: { x: number; d: number; hp: number }[] = [];   // 石墩掩体:挡机枪子弹,打3下碎,冲撞直接碾碎
 
   // 纵深带:d 0=近(下/大) 1=远(上/小);椭圆压斜(比例≈0.73,跟地板图原生透视一致)
-  private readonly CY = -H * 0.14;                                  // 广场中心 y
+  private readonly SCENE_A = true;  // 场景:机车库车间(整景图 arena-yard)
+  private readonly CY = this.SCENE_A ? -174 : -H * 0.14;            // 场心(=图中轨道中线)
   private readonly RXV = 348; private readonly RYV = 170;          // 视觉椭圆=围墙基线(台基/城影/兜底都对齐它)
   private readonly RXW = 262; private readonly RYW = 128;           // 行走椭圆(内收留墙距,半身量谁也贴不到墙)
-  private readonly NEAR_Y = this.CY - this.RYW * 0.92; private readonly FAR_Y = this.CY + this.RYW * 0.92;
+  private readonly NEAR_Y = this.SCENE_A ? -510 : this.CY - this.RYW * 0.92;   // 近沿=岩浆壳上
+  private readonly FAR_Y = this.SCENE_A ? 78 : this.CY + this.RYW * 0.92;     // 远沿=墙脚
   private dy(d: number) { return this.NEAR_Y + (this.FAR_Y - this.NEAR_Y) * d; }
   /** 深度 d 处的行走半宽(椭圆边界):圆形场地,越靠上下沿越窄 */
-  private maxX(d: number) { const yy = this.dy(d) - this.CY; const k = 1 - (yy / this.RYW) * (yy / this.RYW); return k > 0 ? this.RXW * Math.sqrt(k) : 0; }
+  private maxX(d: number) { if (this.SCENE_A) return 288; const yy = this.dy(d) - this.CY; const k = 1 - (yy / this.RYW) * (yy / this.RYW); return k > 0 ? this.RXW * Math.sqrt(k) : 0; }
   private dsc(d: number) { return (1 - d * 0.05) * 0.74; }   // 近大远小仅差5%
   private rnd(s: number) { return ((Math.sin(s * 127.1) * 43758.5) % 1 + 1) % 1; }
   // 围墙+圆盘合成图共用画布几何(圆盘已直接烘进 arena-floor,前半圈墙单独一张同画布遮挡)
@@ -145,10 +149,36 @@ export class Chapter2Arena extends Component {
     const bgN = new Node('ar-bg'); bgN.layer = Layers.Enum.UI_2D; bgN.parent = this.world; bgN.addComponent(UITransform);
     this.bgG = bgN.addComponent(Graphics);
 
+    // 空城城景(复用跑酷段的图):远景+中景两层,藏在机车库房后只露天际线
+    const cityPeek = (key: string, dw: number, hCap: number, y: number, tint: Color, ord: number) => {
+      AssetHub.loadSF(key, (sf) => {
+        if (!sf || !this.SCENE_A) return;
+        const n = new Node('ar-peek-' + key); n.layer = Layers.Enum.UI_2D; n.parent = this.world;
+        const u = n.addComponent(UITransform); u.setAnchorPoint(0.5, 0);
+        const dh = Math.min(hCap, dw * sf.rect.height / sf.rect.width * 0.62);
+        u.setContentSize(dw, dh);
+        const sp = n.addComponent(Sprite); sp.sizeMode = Sprite.SizeMode.CUSTOM; sp.spriteFrame = sf;
+        sp.color = tint;
+        n.setPosition(0, y, 0);
+        n.setSiblingIndex(bgN.getSiblingIndex() + ord);
+      });
+    };
+    cityPeek('bg-far-city', W + 80, 300, 232, new Color(172, 163, 200, 255), 1);   // 远景城:垫在整景图下,被库房天际线挡住
+    // 机车库整景图(方案A):墙+铁地+岩浆一张全包
+    AssetHub.loadSF('arena-yard', (sf) => {
+      if (!sf || !this.SCENE_A) return;
+      const n = new Node('ar-yard'); n.layer = Layers.Enum.UI_2D; n.parent = this.world;
+      const u = n.addComponent(UITransform); u.setAnchorPoint(0.5, 0.5);
+      u.setContentSize(1000, 1000 * sf.rect.height / sf.rect.width);   // 含140px出血,中央720区=设计屏
+      const sp = n.addComponent(Sprite); sp.sizeMode = Sprite.SizeMode.CUSTOM; sp.spriteFrame = sf;
+      n.setPosition(0, 0, 0);
+      n.setSiblingIndex(bgN.getSiblingIndex() + 2);   // 城景(+1)之上:图的天空已抠透明,房顶挡城
+      this.yardOK = true;
+    });
     // 天空整图槽位(arena-sky,可选):有图就盖掉代码画的天色/星/齿轮月
     const bgNRef = bgN;
     AssetHub.loadSF('arena-sky', (sf) => {
-      if (!sf) return;
+      if (!sf || this.SCENE_A) return;
       const n = new Node('ar-sky'); n.layer = Layers.Enum.UI_2D; n.parent = this.world;
       const u = n.addComponent(UITransform); u.setAnchorPoint(0.5, 0.5); u.setContentSize(W + 40, H + 40);
       const sp = n.addComponent(Sprite); sp.sizeMode = Sprite.SizeMode.CUSTOM; sp.spriteFrame = sf;
@@ -158,7 +188,7 @@ export class Chapter2Arena extends Component {
     });
     // 前景框槽位(arena-front,可选):瓦砾/栏杆/杂草的近景暗框,压在世界最前
     AssetHub.loadSF('arena-front', (sf) => {
-      if (!sf) return;
+      if (!sf || this.SCENE_A) return;
       const n = new Node('ar-front'); n.layer = Layers.Enum.UI_2D; n.parent = this.world;
       const u = n.addComponent(UITransform); u.setAnchorPoint(0.5, 0); u.setContentSize(W + 40, (W + 40) * sf.rect.height / sf.rect.width);
       const sp = n.addComponent(Sprite); sp.sizeMode = Sprite.SizeMode.CUSTOM; sp.spriteFrame = sf;
@@ -171,7 +201,7 @@ export class Chapter2Arena extends Component {
     const layers: [string, number, number][] = [['bg-far-city', 0.62, 150], ['bg-mid-city', 0.78, 128], ['bg-near-city', 0.95, 100]];
     for (const [res, k, by] of layers) {
       AssetHub.loadSF(res, (sf) => {
-        if (!sf) return;
+        if (!sf || this.SCENE_A) return;
         const n = new Node('ar-' + res); n.layer = Layers.Enum.UI_2D; n.parent = cityN;
         const u = n.addComponent(UITransform); u.setAnchorPoint(0.5, 0);
         const dw = W + 100, dh = dw * sf.rect.height / sf.rect.width * k;
@@ -183,7 +213,7 @@ export class Chapter2Arena extends Component {
     }
     // 广场地板真图(AI 生成,椭圆已抠透明):插在城景之上、道具之下
     AssetHub.loadSF('arena-floor', (sf) => {
-      if (!sf) return;
+      if (!sf || this.SCENE_A) return;
       const n = new Node('ar-floor'); n.layer = Layers.Enum.UI_2D; n.parent = this.world;
       const u = n.addComponent(UITransform); u.setAnchorPoint(0.5, 0.5);
       u.setContentSize(this.WALL_W, this.WALL_H);   // 圆盘+后半圈墙已合成一张,同画布几何
@@ -612,8 +642,260 @@ export class Chapter2Arena extends Component {
     }
   }
 
+  // ── 方案A:机车库·火车转盘(纯代码预览) ──
+  private drawYard(g: Graphics) {
+    if (this.yardOK) {
+      // 夜空(整景图天空已抠透明):渐变+星子,垫在城景后面
+      const bands = [[22, 24, 37], [30, 32, 45], [42, 44, 58], [58, 60, 74], [74, 76, 91]];
+      const top = H * 1.3, bot = 170, bh = (top - bot) / bands.length;
+      for (let i = 0; i < bands.length; i++) {
+        const c = bands[i];
+        g.fillColor = new Color(c[0], c[1], c[2], 255);
+        g.rect(-W * 1.2, top - (i + 1) * bh, W * 2.4, bh + 1); g.fill();
+      }
+      for (let i = 0; i < 16; i++) {
+        const sx = -W / 2 + ((i * 271) % W) * 0.96 + 14, sy = 350 + ((i * 157) % 270);
+        const tw = 0.4 + 0.6 * Math.sin(this.t * 1.6 + i * 2.1);
+        g.fillColor = new Color(228, 224, 248, Math.round(150 * tw));
+        g.circle(sx, sy, i % 3 === 0 ? 2.2 : 1.4); g.fill();
+      }
+      return;
+    }
+    const cy = this.CY, RX = this.RXV, RY = this.RYV, t = this.t;
+    // 夜空(暮紫烟霾)
+    g.fillColor = new Color(20, 17, 30, 255); g.rect(-W / 2 - 20, -H / 2 - 20, W + 40, H + 40); g.fill();
+    g.fillColor = new Color(52, 38, 46, 130); g.rect(-W / 2 - 20, cy + RY + 60, W + 40, 240); g.fill();
+    for (let i = 0; i < 14; i++) {
+      const sx2 = (this.rnd(i * 3.3) - 0.5) * W, sy2 = cy + RY + 130 + this.rnd(i * 7.7) * 320;
+      g.fillColor = new Color(220, 214, 236, Math.round(70 + 90 * this.rnd(i)));
+      g.circle(sx2, sy2, 1.6); g.fill();
+    }
+    // 远景:水塔+条纹烟囱+屋脊
+    const RIM = cy + RY;
+    g.fillColor = new Color(34, 28, 42, 255);
+    g.rect(-W / 2 - 20, RIM + 76, W + 40, 90); g.fill();   // 屋脊带
+    // 水塔
+    g.fillColor = new Color(40, 33, 48, 255);
+    g.rect(-286, RIM + 130, 12, 120); g.fill(); g.rect(-226, RIM + 130, 12, 120); g.fill();
+    g.ellipse(-250, RIM + 268, 58, 40); g.fill();
+    g.fillColor = new Color(52, 42, 58, 255); g.ellipse(-250, RIM + 296, 60, 18); g.fill();
+    // 烟囱(条纹)+慢烟
+    g.fillColor = new Color(44, 34, 46, 255); g.rect(214, RIM + 120, 40, 190); g.fill();
+    g.fillColor = new Color(120, 62, 58, 255); g.rect(214, RIM + 200, 40, 22); g.fill(); g.rect(214, RIM + 254, 40, 22); g.fill();
+    for (let i = 0; i < 3; i++) {
+      const k = (t * 0.24 + i * 0.33) % 1;
+      g.fillColor = new Color(120, 110, 126, Math.round(56 * (1 - k)));
+      g.circle(234 + k * 46 + Math.sin(t + i) * 6, RIM + 320 + k * 90, 10 + k * 20); g.fill();
+    }
+    // 机车库砖墙+拱门排(远侧边界:墙挡住)
+    {
+      const WY2 = cy + this.RYW + 34;   // 墙脚(远侧行走沿外)
+      g.fillColor = new Color(40, 31, 40, 255);
+      g.rect(-W / 2 - 20, WY2, W + 40, 168); g.fill();
+      g.strokeColor = new Color(30, 23, 32, 255); g.lineWidth = 2.5;
+      for (let yy = WY2 + 24; yy < WY2 + 168; yy += 24) { g.moveTo(-W / 2 - 20, yy); g.lineTo(W / 2 + 20, yy); g.stroke(); }
+      g.fillColor = new Color(58, 46, 54, 255);
+      g.rect(-W / 2 - 20, WY2, W + 40, 10); g.fill();   // 墙脚亮线
+      for (let i = 0; i < 7; i++) {
+        const ax = -W / 2 + 60 + i * (W - 120) / 6;
+        const wid = 84, hgt = 118;
+        g.fillColor = new Color(24, 18, 28, 255);   // 门洞
+        g.rect(ax - wid / 2, WY2 + 10, wid, hgt); g.fill();
+        g.ellipse(ax, WY2 + 10 + hgt, wid / 2, wid * 0.4); g.fill();
+        g.strokeColor = new Color(64, 52, 60, 255); g.lineWidth = 5;   // 拱边
+        g.ellipse(ax, WY2 + 10 + hgt, wid / 2 + 3, wid * 0.4 + 3); g.stroke();
+        if (i === 2 || i === 5) {   // 探头的呆火车
+          g.fillColor = new Color(66, 54, 70, 255);
+          g.ellipse(ax, WY2 + 52, wid * 0.32, 40); g.fill();
+          const blink = Math.sin(t * 1.4 + i) > -0.85 ? 1 : 0.12;
+          g.fillColor = new Color(255, 196, 116, Math.round(220 * blink));
+          g.circle(ax - 12, WY2 + 62, 6); g.fill();
+          g.circle(ax + 12, WY2 + 60, 4.6); g.fill();
+          g.strokeColor = new Color(30, 24, 34, 255); g.lineWidth = 2.5;
+          g.moveTo(ax - 13, WY2 + 40); g.quadraticCurveTo(ax, WY2 + 34, ax + 13, WY2 + 40); g.stroke();
+        }
+        if (i % 3 === 1) {   // 信号灯
+          const on = Math.sin(t * 2.6 + i * 2) > 0.2;
+          g.strokeColor = new Color(40, 32, 46, 255); g.lineWidth = 4;
+          g.moveTo(ax + wid / 2 + 14, WY2 + 10); g.lineTo(ax + wid / 2 + 14, WY2 + 66); g.stroke();
+          g.fillColor = on ? new Color(255, 150, 80, 235) : new Color(70, 50, 44, 235);
+          g.circle(ax + wid / 2 + 14, WY2 + 72, 5.5); g.fill();
+          if (on) { g.fillColor = new Color(255, 150, 80, 44); g.circle(ax + wid / 2 + 14, WY2 + 72, 14); g.fill(); }
+        }
+      }
+    }
+    // ── 铁板车间路面(整面铺满,远密近疏伪透视) ──
+    {
+      const FY0 = cy + RY + 46;   // 地面远沿(拱门脚下)
+      g.fillColor = new Color(63, 55, 71, 255);
+      g.rect(-W / 2 - 20, -H / 2 - 20, W + 40, FY0 + H / 2 + 20); g.fill();
+      // 远处压暗(纵深)
+      for (let i = 0; i < 4; i++) {
+        g.fillColor = new Color(36, 30, 46, 72 - 16 * i);
+        g.rect(-W / 2 - 20, FY0 - 20 - i * 24, W + 40, 24); g.fill();
+      }
+      // 铁板行:横缝+错位竖缝+稀疏铆钉
+      let ry3 = FY0, rh = 24, rowI = 0;
+      while (ry3 > -H / 2 - 40) {
+        const y2 = ry3 - rh;
+        g.strokeColor = new Color(46, 40, 56, 255); g.lineWidth = 3;
+        g.moveTo(-W / 2 - 20, y2); g.lineTo(W / 2 + 20, y2); g.stroke();
+        const pw = 92 + rowI * 12, off = (rowI % 2) * pw * 0.5;
+        g.lineWidth = 2.5;
+        for (let x = -W / 2 - 20 + off % pw; x < W / 2 + 30; x += pw) {
+          g.moveTo(x, ry3); g.lineTo(x, y2); g.stroke();
+        }
+        if (rowI % 2 === 0) {
+          g.fillColor = new Color(90, 76, 66, 235);
+          for (let x = -W / 2 - 20 + off % pw; x < W / 2 + 30; x += pw) {
+            g.circle(x + 8, ry3 - 6, 2.6); g.fill();
+            g.circle(x + pw - 8, y2 + 6, 2.6); g.fill();
+          }
+        }
+        ry3 = y2; rh *= 1.17; rowI++;
+      }
+      // 双轨横贯(全宽)+枕木
+      for (const ry2 of [cy + 13, cy - 13]) {
+        g.strokeColor = new Color(34, 28, 42, 255); g.lineWidth = 7;
+        g.moveTo(-W / 2 - 20, ry2); g.lineTo(W / 2 + 20, ry2); g.stroke();
+        g.strokeColor = new Color(150, 116, 88, 190); g.lineWidth = 2;
+        g.moveTo(-W / 2 - 20, ry2 + 2); g.lineTo(W / 2 + 20, ry2 + 2); g.stroke();
+      }
+      g.strokeColor = new Color(42, 34, 50, 220); g.lineWidth = 5;
+      for (let x = -W / 2 + 8; x < W / 2; x += 38) { g.moveTo(x, cy - 21); g.lineTo(x, cy + 21); g.stroke(); }
+      // 行走边界:左右两条竖向黄黑警戒线(磨损虚线)
+      for (const side of [-1, 1]) {
+        const lxb = side * 322, yTop = cy + this.RYW + 26, yBot = cy - this.RYW - 34;
+        g.lineWidth = 9;
+        const segs = 14;
+        for (let k = 0; k < segs; k++) {
+          if (this.rnd(k * 5.3 + side) < 0.12) continue;
+          const y0 = yBot + (yTop - yBot) * k / segs, y1 = yBot + (yTop - yBot) * (k + 0.62) / segs;
+          g.strokeColor = k % 2 ? new Color(196, 166, 66, 175) : new Color(38, 32, 40, 185);
+          g.moveTo(lxb, y0); g.lineTo(lxb, y1); g.stroke();
+        }
+      }
+      // 缓冲止挡×2(左右撞停点,红头垫)
+      for (const side of [-1, 1]) {
+        const bx = side * 356;
+        g.fillColor = new Color(44, 37, 53, 255);
+        g.moveTo(bx + side * 26, cy - 6); g.lineTo(bx - side * 12, cy + 30);
+        g.lineTo(bx - side * 12, cy - 40); g.close(); g.fill();
+        g.fillColor = new Color(52, 44, 60, 255); g.rect(bx - side * 16 - 8, cy - 46, 16, 12); g.fill();
+        g.fillColor = new Color(170, 66, 58, 255);
+        g.rect(bx - side * 12 - (side > 0 ? 10 : 0), cy - 24, 10, 30); g.fill();
+      }
+      // 吊灯光池(暖光落在地上)
+      for (const lx of [-206, 30, 238]) {
+        g.fillColor = new Color(255, 196, 116, 22);
+        g.ellipse(lx, cy + 30, 96, 28); g.fill();
+      }
+      // 油渍
+      for (let i = 0; i < 5; i++) {
+        g.fillColor = new Color(26, 22, 34, 56);
+        g.ellipse((this.rnd(i * 8.3) - 0.5) * W * 0.8, cy + (this.rnd(i * 3.9) - 0.5) * 300, 34 + this.rnd(i) * 30, 11); g.fill();
+      }
+    }
+    // ── 岩浆槽(近侧边界:铁水沟挡路) ──
+    {
+      const LY = cy - this.RYW - 38;   // 沟沿
+      // 铁水面
+      g.fillColor = new Color(188, 70, 30, 255);
+      g.rect(-W / 2 - 20, -H / 2 - 20, W + 40, LY - 16 + H / 2 + 20); g.fill();
+      // 亮流(缓慢漂移)
+      for (let i = 0; i < 6; i++) {
+        const lx = ((i * 233 + t * 34) % (W + 120)) - W / 2 - 60;
+        const ly = LY - 44 - (i * 71) % 130;
+        g.fillColor = new Color(255, 156, 62, 150);
+        g.ellipse(lx, ly, 48 + (i % 3) * 16, 8); g.fill();
+      }
+      // 泡泡(冒起来破掉)
+      for (let i = 0; i < 4; i++) {
+        const k = (t * 0.7 + i * 0.31) % 1;
+        const bx2 = ((i * 197) % (W - 60)) - W / 2 + 30;
+        g.fillColor = new Color(255, 196, 96, Math.round(190 * (1 - k)));
+        g.circle(bx2, LY - 40 - (i * 53) % 100, 3 + k * 5); g.fill();
+      }
+      // 沟沿黑壳(锯齿崩边)
+      g.fillColor = new Color(36, 28, 38, 255);
+      g.rect(-W / 2 - 20, LY - 18, W + 40, 20); g.fill();
+      g.fillColor = new Color(36, 28, 38, 255);
+      for (let x = -W / 2; x < W / 2; x += 46) {
+        const dp = 8 + this.rnd(x * 0.13) * 12;
+        g.moveTo(x, LY - 18); g.lineTo(x + 23, LY - 18 - dp); g.lineTo(x + 46, LY - 18); g.close(); g.fill();
+      }
+      // 岩浆光晕照亮地板近沿
+      g.fillColor = new Color(255, 120, 50, 26);
+      g.rect(-W / 2 - 20, LY, W + 40, 48); g.fill();
+      g.fillColor = new Color(255, 120, 50, Math.round(14 + 8 * Math.sin(t * 3)));
+      g.rect(-W / 2 - 20, LY - 16, W + 40, 16); g.fill();
+    }
+  }
+
+  // 方案A顶层:桁架+吊链工灯(画进 fxG,压在场上)
+  private drawYardFx(g: Graphics) {
+    const t = this.t;
+    // 暮紫色罩:把整景拉回空城的暮紫空气(统一章节色调)
+    g.fillColor = new Color(96, 74, 140, 22);
+    g.rect(-W * 0.8, -H * 0.8, W * 1.6, H * 1.6); g.fill();
+    // 飞舞的纸片(从空城飘进来的)
+    for (let i = 0; i < 6; i++) {
+      const k = (t * 0.11 + i * 0.19) % 1;
+      const px2 = -W / 2 - 30 + k * (W + 60);
+      const py2 = -60 + ((i * 173) % 420) + Math.sin(t * 1.8 + i * 2) * 34;
+      const rot = t * 2 + i * 1.4;
+      g.fillColor = new Color(224, 216, 198, Math.round(150 * (0.5 + 0.5 * Math.sin(k * Math.PI))));
+      const c2 = Math.cos(rot) * 9, s2 = Math.sin(rot) * 6;
+      g.moveTo(px2 - c2, py2 - s2); g.lineTo(px2 + s2, py2 - c2 * 0.6);
+      g.lineTo(px2 + c2, py2 + s2); g.lineTo(px2 - s2, py2 + c2 * 0.6); g.close(); g.fill();
+    }
+    // 岩浆动效(叠在整景图的岩浆带上)
+    if (this.yardOK) {
+      for (let i = 0; i < 6; i++) {
+        const lx = ((i * 233 + t * 30) % (W + 120)) - W / 2 - 60;
+        const ly = -H / 2 + 26 + (i * 37) % 78;
+        g.fillColor = new Color(255, 170, 72, 88);
+        g.ellipse(lx, ly, 44 + (i % 3) * 14, 7); g.fill();
+      }
+      for (let i = 0; i < 4; i++) {
+        const k = (t * 0.7 + i * 0.31) % 1;
+        const bx2 = ((i * 197) % (W - 60)) - W / 2 + 30;
+        g.fillColor = new Color(255, 200, 100, Math.round(170 * (1 - k)));
+        g.circle(bx2, -H / 2 + 30 + (i * 53) % 70 + k * 14, 2.5 + k * 4); g.fill();
+      }
+      g.fillColor = new Color(255, 140, 60, Math.round(12 + 8 * Math.sin(t * 3)));
+      g.rect(-W / 2 - 10, -H / 2 + 120, W + 20, 30); g.fill();
+    }
+    const yb = H / 2 - 168;
+    g.fillColor = new Color(30, 26, 38, 255); g.rect(-W / 2 - 20, yb, W + 40, 11); g.fill();
+    g.fillColor = new Color(26, 22, 34, 255); g.rect(-W / 2 - 20, yb + 42, W + 40, 9); g.fill();
+    g.strokeColor = new Color(34, 29, 42, 255); g.lineWidth = 4;
+    for (let x = -W / 2; x < W / 2; x += 56) {
+      g.moveTo(x, yb + 11); g.lineTo(x + 28, yb + 42); g.stroke();
+      g.moveTo(x + 56, yb + 11); g.lineTo(x + 28, yb + 42); g.stroke();
+    }
+    // 吊链+工灯(震屏时晃更凶)
+    for (let i = 0; i < 3; i++) {
+      const lx = [-206, 30, 238][i], L = 96 + i * 22;
+      const sway = Math.sin(t * 0.8 + i * 2.1) * 5 + this.shake * Math.sin(t * 26 + i) * 1.6;
+      const ex = lx + Math.sin(sway * 0.024) * L, ey = yb - Math.cos(sway * 0.024) * L;
+      g.strokeColor = new Color(58, 50, 66, 255); g.lineWidth = 3;
+      for (let m = 0; m < 6; m++) {
+        const k0 = m / 6, k1 = (m + 0.62) / 6;
+        g.moveTo(lx + (ex - lx) * k0, yb + (ey - yb) * k0);
+        g.lineTo(lx + (ex - lx) * k1, yb + (ey - yb) * k1); g.stroke();
+      }
+      g.fillColor = new Color(62, 52, 70, 255);
+      g.moveTo(ex - 13, ey); g.lineTo(ex + 13, ey); g.lineTo(ex + 5, ey - 14); g.lineTo(ex - 5, ey - 14); g.close(); g.fill();
+      const gl = 0.72 + 0.28 * Math.sin(t * 2.4 + i * 3);
+      g.fillColor = new Color(255, 196, 116, Math.round(215 * gl)); g.circle(ex, ey - 4, 5.5); g.fill();
+      g.fillColor = new Color(255, 196, 116, Math.round(36 * gl)); g.circle(ex, ey - 4, 30); g.fill();
+    }
+  }
+
   private drawBg() {
     const g = this.bgG; g.clear();
+    if (this.SCENE_A) { this.drawYard(g); return; }
     const NY = this.NEAR_Y, FY = this.FAR_Y;
     if (!this.skyOK) {
     // 暮紫天(分带)
@@ -708,7 +990,7 @@ export class Chapter2Arena extends Component {
     const g = this.propsG; g.clear();
     const cy = this.CY, RX = this.RXV, RY = this.RYV, NY = this.NEAR_Y, FY = this.FAR_Y;
     // 围墙·远半圈(角色身后):Boss 冲撞撞的就是它(有真图就不画)
-    if (!this.wallOK) this.wallArc(g, Math.PI * 0.04, Math.PI * 0.96, new Color(84, 76, 100, 255), new Color(140, 128, 158, 235));
+    if (!this.wallOK && !this.SCENE_A) this.wallArc(g, Math.PI * 0.04, Math.PI * 0.96, new Color(84, 76, 100, 255), new Color(140, 128, 158, 235));
     // 石墩掩体(挡子弹,3 下碎;裂纹随血量加深)
     for (const c of this.covers) {
       if (c.hp <= 0) continue;
@@ -983,7 +1265,9 @@ export class Chapter2Arena extends Component {
     this.hero.apply(0, this.ph2, this.dir, mode, p, -this.pvh, this.walkPh, 0, 0);
   }
   private drawFx() {
-    // Boss 入场景质感:履带底压一条接地暗带(假AO)+ 过热时腹部暖光
+    this.fxG.clear();
+    if (this.SCENE_A) this.drawYardFx(this.fxG);
+    // Boss 入场景质感:履带底压一条接地暗带(假AO)+ 过热时腹部暖光(注:必须在 clear 之后画)
     if (this.bossOK && !(this.bDead && this.bDeadT > 1.7)) {
       const g0 = this.fxG;
       const s0 = this.dsc(this.bd) * 1.05, bx0 = this.bx, by0 = this.dy(this.bd);
@@ -998,7 +1282,7 @@ export class Chapter2Arena extends Component {
         if (Math.random() < 0.25) this.spark(bx0 + (Math.random() - 0.5) * 60 * s0, by0 + 60 * s0, new Color(255, 170, 90, 200), 1, 0.5);
       }
     }
-    const g = this.fxG; g.clear();
+    const g = this.fxG;
     // 落点红圈
     for (const bo of this.bombs) {
       if (bo.st !== 'fly') continue;
@@ -1074,8 +1358,8 @@ export class Chapter2Arena extends Component {
       g.strokeColor = new Color(255, 250, 230, Math.round(230 * a)); g.lineWidth = 3; g.circle(f.x, f.y, 14 + 52 * k); g.stroke();
     }
     // 围墙·近半圈(压在角色前,遮脚=圆形围场的包裹感;有真图就不画)
-    if (!this.wallOK) this.wallArc(g, Math.PI * 1.06, Math.PI * 1.94, new Color(96, 86, 112, 255), new Color(156, 142, 174, 240));
-    if (!this.frontOK) {
+    if (!this.wallOK && !this.SCENE_A) this.wallArc(g, Math.PI * 1.06, Math.PI * 1.94, new Color(96, 86, 112, 255), new Color(156, 142, 174, 240));
+    if (!this.frontOK && !this.SCENE_A) {
     // ── 前景遮挡带(圆场四周的城市残骸剪影,压在最前=框景) ──
     // 下缘:瓦砾/箱子/车轮/杂草 暗剪影
     g.fillColor = new Color(24, 18, 36, 255);
