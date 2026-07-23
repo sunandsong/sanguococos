@@ -36,6 +36,7 @@ export class Chapter2Arena extends Component {
   private bossFrames: SpriteFrame[] = [];   // 铁心兽2帧:闭嘴待机/张嘴吼
   private bossSp: Sprite | null = null;
   private bossOK = false;
+  private _bwalk = 0; private _lastBx = 0;   // Boss走动摇摆相位
   private readonly BOSS_H = 240;   // Boss显示高(帧712等比缩)
   private heroWrap!: Node;     // 主角容器(按深度缩放/定位,HeroRig 挂里面)
   private fxG!: Graphics;      // 子弹/炸弹/火区/粒子/白光(最上层)
@@ -609,12 +610,17 @@ export class Chapter2Arena extends Component {
     const fade = this.bDead ? Math.max(0, 1 - Math.max(0, this.bDeadT - 1.2) / 0.5) : 1;
     const A = (v: number) => Math.round(v * fade);
     if (this.bossOK && this.bossSp) {
-      g.fillColor = new Color(20, 14, 30, A(115)); g.ellipse(x, gy - 6, 86 * s, 16 * s); g.fill();   // 影
+      g.fillColor = new Color(20, 14, 30, A(150)); g.ellipse(x, gy - 2, 104 * s, 21 * s); g.fill();   // 影(加大贴地,钉住)
       const br = 1 + Math.sin(this.bph * 2.2) * 0.02 + (this.charging ? Math.sin(this.t * 40) * 0.02 : 0);
       const S = s * br;
       const n = this.bossSp.node; n.active = true;
       const face = this.px < this.bx ? 1 : -1;   // 朝玩家(图默认朝左)
-      n.setScale(face * S, S, 1); n.setPosition(x, gy, 0);
+      const dx = x - this._lastBx; this._lastBx = x;
+      const moving = Math.abs(dx) > 0.4 && !this.charging;
+      this._bwalk += Math.abs(dx) * 0.05;
+      const tilt = moving ? Math.sin(this._bwalk) * 3.5 : 0;              // 履带碾地=左右摇摆
+      const bob = moving ? Math.abs(Math.sin(this._bwalk)) * 7 * S : 0;   // 一颠一颠往前挪
+      n.setScale(face * S, S, 1); n.setPosition(x, gy + bob - 10, 0); n.angle = tilt;   // -10=履带踩实地面
       this.bossSp.spriteFrame = this.bossFrames[this.charging ? 1 : 0];   // 蓄力冲撞=张嘴吼
       const hot = this.phase() === 3 || this.charging || this.coreOpen;   // 过热/蓄力/核心开=染红
       this.bossSp.color = hot ? new Color(255, 150, 138, A(255)) : new Color(255, 255, 255, A(255));
