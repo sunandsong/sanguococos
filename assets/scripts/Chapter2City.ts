@@ -196,6 +196,17 @@ export class Chapter2City extends Component {
     this.world = new Node('city-world'); this.world.layer = Layers.Enum.UI_2D; this.world.parent = this.node; this.world.addComponent(UITransform);
     this.cam = new CamZoom(this.world);
     const bgRoot = new Node('city-bgimg'); bgRoot.layer = Layers.Enum.UI_2D; bgRoot.parent = this.world; bgRoot.addComponent(UITransform);
+    // 出血底:天图顶边/地图底边都正好压屏缘,拉远会露出透明区(残留上一画面)——上接天色、下接街色
+    {
+      const bleed = new Node('city-bleed'); bleed.layer = Layers.Enum.UI_2D; bleed.parent = bgRoot; bleed.addComponent(UITransform);
+      const bg2 = bleed.addComponent(Graphics);
+      bg2.fillColor = new Color(164, 173, 182, 255);                       // 灰薄荷天(取自远景图顶部)
+      bg2.rect(-W * 0.75, this.GROUND, W * 1.5, H * 0.75 - this.GROUND); bg2.fill();
+      bg2.fillColor = new Color(97, 69, 100, 255);                         // 石板紫(接地面图中段)
+      bg2.rect(-W * 0.75, -H * 0.75, W * 1.5, H * 0.75 + this.GROUND); bg2.fill();
+      bg2.fillColor = new Color(40, 27, 57, 255);                          // 地面图底行同色,先铺过渡
+      bg2.rect(-W * 0.75, -H * 0.75, W * 1.5, H * 0.75 - H / 2 + 4); bg2.fill();
+    }
     this.makeLayer('bg-far-city', 845, 0.25, this.GROUND, bgRoot);    // 远景:灰紫薄荷天+停摆钟楼天际线
     this.makeLayer('bg-mid-city', 400, 0.62, this.GROUND, bgRoot);    // 中景:亮窗歪楼一条街
     // 中层雾幕(寂静岭氛围):压在远/中景上、近景下,楼影半隐半现
@@ -754,7 +765,7 @@ export class Chapter2City extends Component {
     if (this.stunT > 0) this.stunT -= dt;
     if (this.invulnT > 0) this.invulnT -= dt;
     // 跳跃镜头(套件):腾空拉远,落地平滑恢复;轴心=主角附近,UI 不受影响
-    this.cam.update(dt, !this.onG || this.fallT > 0, this.HERO_SX, this.GROUND + 90);
+    this.cam.update(dt, !this.onG || this.fallT > 0, this.HERO_SX, -H / 2);   // 轴心钉屏底:拉远只往上/两侧让,下边永不露缝
     if (this.over) { this.deadT += dt; this.updateHero(); this.redraw(); return; }
 
     // 裂缝跌落演出:掉进星空 → 直接死(从暗检查点复活)

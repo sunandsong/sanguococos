@@ -29,7 +29,7 @@ const { ccclass } = _decorator;
 
 // 临时开关(从上往下,开哪个进哪个):空城 > 洞穴 > 井关 > 正常第一章(全 false = 开机标题→第一章)
 const START_ARENA = false;    // true = 直接进「铁心兽竞技场」(Boss 调试)
-const START_CITY = false;      // true = 直接进第二章「空城」跑酷 Demo(街尾跳井接井关)
+const START_CITY = true;       // true = 直接进第二章「空城」跑酷 Demo(街尾跳井接井关)
 const START_CAVE = false;      // true = 直接进第三章「地下坑道」场景(开发中)
 const START_CHAPTER2 = false;  // true = 直接进第三章「投井下降」关(砸石开洞→转场进洞穴)
 

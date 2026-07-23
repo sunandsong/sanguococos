@@ -1155,8 +1155,8 @@ export class BattleScene extends Component {
 
     // 跳跃镜头:世界层打包进 world 容器(UI/屏幕装饰留在外),腾空拉远
     {
-      const stayUI = new Set(['hud', 'avatar', 'vignette', 'deadover', 'banner', 'btn-restart', 'rainclip', 'lbl', 'joybase', 'leaffx', 'dmglayer']);
-      const isUI = (n: Node) => stayUI.has(n.name) || n.name.startsWith('cbtn-') || n.name.startsWith('btn-') || n.name.startsWith('fgleaf') || n.name.startsWith('zoneintro');
+      const stayUI = new Set(['hud', 'avatar', 'vignette', 'deadover', 'banner', 'btn-restart', 'rainclip', 'lbl', 'joybase', 'dmglayer']);
+      const isUI = (n: Node) => stayUI.has(n.name) || n.name.startsWith('cbtn-') || n.name.startsWith('btn-') || n.name.startsWith('zoneintro');
       this.worldN = new Node('world'); this.worldN.layer = this.node.layer;
       this.worldN.addComponent(UITransform);
       const kids = this.node.children.slice();
@@ -4037,13 +4037,13 @@ export class BattleScene extends Component {
     if (this.deadRedT > 0) {
       const a = Math.round(150 * Math.min(1, this.deadRedT / 0.55));
       g.fillColor = new Color(140, 12, 10, a);
-      g.rect(-DESIGN_W / 2, -DESIGN_H / 2, DESIGN_W, DESIGN_H); g.fill();
+      g.rect(-DESIGN_W * 0.75, -DESIGN_H * 0.75, DESIGN_W * 1.5, DESIGN_H * 1.5); g.fill();
     }
     // 大招落地全屏压黑一闪(快速淡出,衬紫爆)
     if (this.slamDimT > 0) {
       const a = Math.round(110 * Math.min(1, this.slamDimT / 0.5));
       g.fillColor = new Color(8, 4, 16, a);
-      g.rect(-DESIGN_W / 2, -DESIGN_H / 2, DESIGN_W, DESIGN_H); g.fill();
+      g.rect(-DESIGN_W * 0.75, -DESIGN_H * 0.75, DESIGN_W * 1.5, DESIGN_H * 1.5); g.fill();
     }
 
     // 赵云挥砍大刀气（新月贴图精灵：随挥砍进度旋转 + 淡出，不再每帧 hArc 描边）
@@ -4354,7 +4354,7 @@ export class BattleScene extends Component {
   // 创建一层无缝滚动视差背景（2 块瓦片，镜像图已保证左右无缝）
   private makeScrollLayer(res: string, dispH: number, par: number, baseY: number, preload = true) {
     const L = { tiles: [] as Node[], w: 0, par, baseY, dispH };
-    for (let i = 0; i < 2; i++) {
+    for (let i = 0; i < 4; i++) {
       const n = new Node('bglayer-' + res + i);
       n.layer = this.node.layer; n.parent = this.node;
       n.addComponent(UITransform).setAnchorPoint(0, 0);
@@ -4379,7 +4379,7 @@ export class BattleScene extends Component {
         const n = L.tiles[i];
         n.getComponent(Sprite)!.spriteFrame = sf;
         n.getComponent(UITransform)!.setContentSize(L.w, L.dispH);
-        n.setPosition(-DESIGN_W / 2 - off + i * L.w, this.groundY + L.baseY, 0);
+        n.setPosition(-DESIGN_W / 2 - off + (i - 1) * L.w, this.groundY + L.baseY, 0);
       }
     };
     if (this.bgCache[res]) { apply(this.bgCache[res]); return; }
@@ -4432,7 +4432,7 @@ export class BattleScene extends Component {
       if (!L.w) continue;
       const off = (((this.camX * L.par) % L.w) + L.w) % L.w;
       for (let i = 0; i < L.tiles.length; i++) {
-        L.tiles[i].setPosition(-W / 2 - off + i * L.w, this.groundY + L.baseY, 0);
+        L.tiles[i].setPosition(-W / 2 - off + (i - 1) * L.w, this.groundY + L.baseY, 0);
       }
     }
   }
@@ -4444,8 +4444,10 @@ export class BattleScene extends Component {
     const delay = [0.0, 0.10, 0.22];   // 远/中/近 入场延迟：走向新区域时远处先出现
     const set = (t: Node, sf: SpriteFrame, x: number, y: number, dispH: number) => {
       t.getComponent(Sprite)!.spriteFrame = sf;
-      t.getComponent(UITransform)!.setContentSize(sf.rect.width * (dispH / sf.rect.height), dispH);
+      const tw = sf.rect.width * (dispH / sf.rect.height);
+      t.getComponent(UITransform)!.setContentSize(tw, dispH);
       t.setPosition(x, y, 0);
+      return tw;
     };
     for (let li = 0; li < this.layers.length; li++) {
       const L = this.layers[li];
@@ -4454,14 +4456,18 @@ export class BattleScene extends Component {
       if (!fromSf || !toSf) continue;
       const y = this.groundY + L.baseY;
       // 老场景：随走路视差左移（近层移得多、远层移得少）
-      set(L.tiles[0], fromSf, -W / 2 - p * this.ZONE_SPAN * L.par, y, L.dispH);
+      const x0 = -W / 2 - p * this.ZONE_SPAN * L.par;
+      const w0 = set(L.tiles[0], fromSf, x0, y, L.dispH);
+      set(L.tiles[2], fromSf, x0 - w0, y, L.dispH);                  // 旧图左边补一块
       // 新场景：从右滑入盖上来；终点=普通滚动落点(无缝交接，避免结束时再跳一下)
       const wNew = toSf.rect.width * (L.dispH / toSf.rect.height);
       const offEnd = (((this.targetCam * L.par) % wNew) + wNew) % wNew;
       const endX = -W / 2 - offEnd;                                  // 关底普通滚动时该层的落点
       const d = delay[Math.min(li, delay.length - 1)];
       const pn = Math.min(1, Math.max(0, (p - d) / (1 - d)));        // 远景先入、近景后入
-      set(L.tiles[1], toSf, endX + (1 - pn) * W, y, L.dispH);        // 从右一屏外滑到落点
+      const x1 = endX + (1 - pn) * W;
+      const w1 = set(L.tiles[1], toSf, x1, y, L.dispH);              // 从右一屏外滑到落点
+      set(L.tiles[3], toSf, x1 + w1, y, L.dispH);                    // 新图右边补一块
     }
   }
 
