@@ -10,6 +10,8 @@ import { AudioMgr } from './AudioMgr';
 import { AssetHub } from './AssetHub';
 import { hLine, hArc } from './HandDraw';
 import { JUMP, tryJump } from './JumpKit';
+import { Chapter2City } from './Chapter2City';
+import { CamZoom } from './CamZoom';
 import { TouchControls } from './TouchControls';
 const { ccclass, property } = _decorator;
 
@@ -243,6 +245,8 @@ export class BattleScene extends Component {
   private banner!: Node;
   private bannerLbl!: Label;
   private restartBtn!: Node;
+  private worldN!: Node;            // 游戏世界容器(跳跃镜头缩放用,UI 在外)
+  private cam!: CamZoom;            // 跳跃镜头:腾空拉远/落地恢复(全章共用)
 
   private groundY = 0;
 
@@ -1149,6 +1153,18 @@ export class BattleScene extends Component {
     }
     this.restartBtn.active = false;
 
+    // 跳跃镜头:世界层打包进 world 容器(UI/屏幕装饰留在外),腾空拉远
+    {
+      const stayUI = new Set(['hud', 'avatar', 'vignette', 'deadover', 'banner', 'btn-restart', 'rainclip', 'lbl', 'joybase', 'leaffx', 'dmglayer']);
+      const isUI = (n: Node) => stayUI.has(n.name) || n.name.startsWith('cbtn-') || n.name.startsWith('btn-') || n.name.startsWith('fgleaf') || n.name.startsWith('zoneintro');
+      this.worldN = new Node('world'); this.worldN.layer = this.node.layer;
+      this.worldN.addComponent(UITransform);
+      const kids = this.node.children.slice();
+      this.node.insertChild(this.worldN, 0);
+      for (const k of kids) if (!isUI(k)) k.parent = this.worldN;
+      this.cam = new CamZoom(this.worldN, { out: 0.93 });
+    }
+
     this.node.active = false;
   }
 
@@ -1169,6 +1185,7 @@ export class BattleScene extends Component {
 
   private startGame() {
     AudioMgr.inst.playBgm('bgm-battle');
+    this.cam?.reset();
     // this.scheduleOnce(() => this.showZoneIntro('第 1 关', new Color(255, 224, 130)), 0.1);   // 关数大字已关闭
     this.camX = 0; this.zone = 0; this.zoneState = 'cleared'; this.targetCam = 0;   // 一路连贯推进：开局即自由行进，小怪沿路刷
     this.curBiome = -1; this.transActive = false; this.applyBiome(0);   // 复位背景组到第一组
@@ -1367,6 +1384,7 @@ export class BattleScene extends Component {
     if (this.over && this.hero.state === 'dead') this.deadT2 += dt;
     if (this.slowMoT > 0) { this.slowMoT -= dt; dt *= 0.35; }   // 慢动作(胜利/坠落)
     this.animT += dt;
+    this.cam.update(dt, this.airborne() && !this.over, this.hero.x - this.camX, this.groundY + 90);
 
     // 性能显示：每 0.5s 刷新一次 FPS + 存活敌人数（用真实帧间隔，未受慢动作缩放）
     if (this.fpsLbl) {
@@ -2658,13 +2676,31 @@ export class BattleScene extends Component {
     AudioMgr.inst.playStinger('win', 0.85, 0.8);   // 庆祝乐淡入
     this.bannerLbl.color = new Color(255, 224, 130);
     this.bannerLbl.fontSize = 44; this.bannerLbl.lineHeight = 56;
-    this.bannerLbl.string = `勾魂使已诛 · 黄泉路开\n—— 第二章「地府」待续 ——`;
+    this.bannerLbl.string = `勾魂使已诛 · 黄泉路开\n—— 第二章 · 空城 ——`;
     this.banner.active = true;
     this.bannerOp.opacity = 255;
-    this.restartBtn.active = true;
-    this.restartOp.opacity = 255;
     this.banner.setScale(0.3, 0.3, 1);
     tween(this.banner).to(0.35, { scale: new Vec3(1, 1, 1) }, { easing: 'backOut' }).start();
+    this.scheduleOnce(() => this.exitToChapter2(), 3.4);   // 横幅看一眼,自动进第二章
+  }
+
+  // 胜利 → 黑幕 → 第二章「空城」
+  private exitToChapter2() {
+    if (!this.node.isValid || !this.over) return;
+    const parent = this.node.parent!;
+    const fade = new Node('c1-fade'); fade.layer = this.node.layer; fade.parent = parent;
+    fade.addComponent(UITransform).setContentSize(DESIGN_W, DESIGN_H);
+    const fg = fade.addComponent(Graphics); fg.fillColor = new Color(0, 0, 0, 255);
+    fg.rect(-DESIGN_W / 2, -DESIGN_H / 2, DESIGN_W, DESIGN_H); fg.fill();
+    const op = fade.addComponent(UIOpacity); op.opacity = 0;
+    tween(op).to(0.6, { opacity: 255 }).call(() => {
+      const layer = this.node.layer;
+      this.node.destroy();
+      const n = new Node('Chapter2City'); n.layer = layer; n.addComponent(UITransform); n.parent = parent;
+      n.addComponent(Chapter2City);
+      fade.setSiblingIndex(parent.children.length - 1);
+      tween(op).delay(0.1).to(0.45, { opacity: 0 }).call(() => fade.destroy()).start();
+    }).start();
   }
 
   private gameOver() {
@@ -4102,9 +4138,9 @@ export class BattleScene extends Component {
   private drawSceneTint(g: Graphics) {
     const W = DESIGN_W, H = DESIGN_H;
     const gr = this.gradeColor(this.theme());
-    g.fillColor = gr; g.rect(-W / 2, -H / 2, W, H); g.fill();
+    g.fillColor = gr; g.rect(-W * 0.75, -H * 0.75, W * 1.5, H * 1.5); g.fill();
     const dk = this.timeOfDay().dark;
-    if (dk > 0) { g.fillColor = this._scratchC.set(6, 12, 32, Math.round(dk * 255)); g.rect(-W / 2, -H / 2, W, H); g.fill(); }
+    if (dk > 0) { g.fillColor = this._scratchC.set(6, 12, 32, Math.round(dk * 255)); g.rect(-W * 0.75, -H * 0.75, W * 1.5, H * 1.5); g.fill(); }
   }
 
   // 地面装饰：世界坐标网格伪随机散布（近大远小、随机镜像、随镜头滚动）
@@ -4228,11 +4264,11 @@ export class BattleScene extends Component {
     const sky = this.timeOfDay().sky;
     const skyBot = sky.map(v => Math.min(255, v * 1.14 + 14));
     const skyTop = sky.map(v => v * 0.84);
-    const skyRegion = H / 2 - gy, sb = 26, sbh = skyRegion / sb;
+    const skyRegion = H * 0.75 - gy, sb = 26, sbh = skyRegion / sb;   // 超采:拉远也不露边
     for (let i = 0; i < sb; i++) {
       const c = this.blend(skyBot, skyTop, i / (sb - 1));
       g.fillColor = new Color(c[0], c[1], c[2], 255);
-      g.rect(-W / 2, gy + i * sbh, W, sbh + 1); g.fill();
+      g.rect(-W * 0.75, gy + i * sbh, W * 1.5, sbh + 1); g.fill();
     }
 
     // 云已移到 cloudG 单独层（drawBg 顶部每帧画）
@@ -4244,7 +4280,7 @@ export class BattleScene extends Component {
       // 不垫的话该区域全透明,相机不清底色,会残留上一个画面(标题页)的帧
       // 底色取 Q版石头图底部的深土色,和贴图自然接续
       g.fillColor = new Color(104, 64, 50, 255);
-      g.rect(-W / 2, -H / 2, W, gy + H / 2); g.fill();
+      g.rect(-W * 0.75, -H * 0.75, W * 1.5, gy + H * 0.75); g.fill();
       return;
     }
     const top = [52, 68, 42];   // 地平线附近 ≈ 草色
