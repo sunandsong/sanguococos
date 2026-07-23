@@ -23,7 +23,7 @@ const { ccclass } = _decorator;
 //   打赢 → 雾散老井显形 → 走到井边跳井 → 接井关。套件全复用。
 // ─────────────────────────────────────────────────────────────
 
-type Bullet = { x: number; d: number; vx: number };
+type Bullet = { x: number; d: number; vx: number; y0?: number; t?: number };
 type Bomb = { st: 'fly' | 'back'; x: number; y: number; tx: number; td: number; vx: number; vy: number; t: number; T: number };
 type Zone = { x: number; d: number; life: number; max: number };
 type Part = { x: number; y: number; vx: number; vy: number; life: number; max: number; r: number; col: Color };
@@ -38,6 +38,55 @@ export class Chapter2Arena extends Component {
   private bossOK = false;
   private _bwalk = 0; private _lastBx = 0;   // Boss走动摇摆相位
   private readonly BOSS_H = 240;   // Boss显示高(帧712等比缩)
+  private bossAsp = 1;                        // 帧宽高比(烟囱定位用)
+  private bossTrackFrames: SpriteFrame[] = []; // 履带条(残影用)
+  private trackGhosts: Sprite[] = [];          // 履带运动残影
+  private smoke: { x: number; y: number; vx: number; r0: number; t: number; max: number; dark: boolean }[] = [];
+  private smokeT = 0; private smokeCi = 0;
+  private dustFrames: SpriteFrame[] = [];      // 履带尘雾3帧
+  private dustPool: Sprite[] = [];
+  private dusts: { x: number; y: number; t: number; max: number; sc: number; fl: number; dir: number }[] = [];
+  private dustT = 0; private _dustLastBx = 0;
+  private boomFrames: SpriteFrame[] = [];      // 爆炸4帧
+  private boomPool: Sprite[] = [];
+  private booms: { x: number; y: number; t: number; max: number; sc: number }[] = [];
+  private _dieBoomT = 0; private _dieBigDone = false;
+  private bombSF: SpriteFrame | null = null;   // 炸弹真图
+  private bombPool: Sprite[] = [];
+  private _bhitT = 0;   // Boss受击闪白/弹缩
+  private gunSp: Sprite | null = null;   // 机枪臂(独立旋转真图)
+  private gunAsp = 1; private _muzzT = 0;
+  private readonly GUN_FX = 0.76;   // 枪座:帧内横向比例
+  private readonly GUN_FY = 0.56;   // 枪座:高度比例(自底)
+  private readonly GUN_SC = 0.88;   // 枪臂缩放
+  /** 爆炸一响(x/y 世界坐标,sc 大小倍率) */
+  private boomAt(x: number, y: number, sc: number) {
+    if (this.booms.length >= 8) this.booms.shift();
+    this.booms.push({ x, y, t: 0, max: 0.42, sc });
+  }
+
+  /** 出膛:从枪口发射,保证起点在玩家来路一侧(贴脸时不穿到身后) */
+  private fireBullet(d: number) {
+    const mp = this.muzzlePos();
+    const bdir = this.px < this.bx ? -1 : 1;
+    let sx2 = mp.x;
+    if (bdir < 0) sx2 = Math.max(sx2, this.px + 50);
+    else sx2 = Math.min(sx2, this.px - 50);
+    this.bullets.push({ x: sx2, d, vx: 760 * bdir, y0: mp.y, t: 0 });
+    this._muzzT = 0.07;
+  }
+
+  /** 枪口世界坐标(随瞄准角) */
+  private muzzlePos() {
+    const s = this.dsc(this.bd) * 1.05, face = this.px < this.bx ? 1 : -1;
+    const BW = this.BOSS_H * this.bossAsp;
+    const gx = this.bx + (this.GUN_FX - 0.5) * BW * s * face;
+    const gy = this.dy(this.bd) - 10 + this.GUN_FY * this.BOSS_H * s;
+    const ml = 100 * this.gunAsp * (this.GUN_SC * s) * 0.80;
+    return { x: gx + Math.cos(this.gunA) * ml, y: gy + Math.sin(this.gunA) * ml };
+  }
+  // 烟囱口位置(帧内比例:x, 距顶y)——图默认朝左,烟囱在右侧
+  private readonly CHIM: [number, number][] = [[0.66, 0.13], [0.76, 0.115], [0.86, 0.18]];
   private heroWrap!: Node;     // 主角容器(按深度缩放/定位,HeroRig 挂里面)
   private fxG!: Graphics;      // 子弹/炸弹/火区/粒子/白光(最上层)
   private hero!: HeroRig; private combat!: HeroCombat;
@@ -59,7 +108,7 @@ export class Chapter2Arena extends Component {
   private dy(d: number) { return this.NEAR_Y + (this.FAR_Y - this.NEAR_Y) * d; }
   /** 深度 d 处的行走半宽(椭圆边界):圆形场地,越靠上下沿越窄 */
   private maxX(d: number) { const yy = this.dy(d) - this.CY; const k = 1 - (yy / this.RYW) * (yy / this.RYW); return k > 0 ? this.RXW * Math.sqrt(k) : 0; }
-  private dsc(d: number) { return (1.12 - d * 0.34) * 0.74; }   // 全场角色/Boss 缩身量
+  private dsc(d: number) { return (1 - d * 0.05) * 0.74; }   // 近大远小仅差5%
   private rnd(s: number) { return ((Math.sin(s * 127.1) * 43758.5) % 1 + 1) % 1; }
   // 围墙+圆盘合成图共用画布几何(圆盘已直接烘进 arena-floor,前半圈墙单独一张同画布遮挡)
   private readonly WALL_W = 700;
@@ -156,7 +205,49 @@ export class Chapter2Arena extends Component {
       const n = new Node('ar-boss-sp'); n.layer = Layers.Enum.UI_2D; n.parent = bossN;
       const u = n.addComponent(UITransform); u.setContentSize(this.BOSS_H * cw / ch, this.BOSS_H); u.setAnchorPoint(0.5, 0.02);
       const sp = n.addComponent(Sprite); sp.sizeMode = Sprite.SizeMode.CUSTOM; sp.spriteFrame = this.bossFrames[0];
+      this.bossAsp = cw / ch;
+      // 履带条(底部24%)切两帧,做运动残影
+      for (let i = 0; i < 2; i++) {
+        const f = new SpriteFrame(); f.texture = tex;
+        f.rect = new Rect(i * cw, Math.round(ch * 0.76), cw, Math.round(ch * 0.24));
+        this.bossTrackFrames.push(f);
+      }
+      for (let k = 0; k < 2; k++) {
+        const gn = new Node('trk-ghost' + k); gn.layer = Layers.Enum.UI_2D; gn.parent = n;
+        const gu = gn.addComponent(UITransform); gu.setAnchorPoint(0.5, 0);
+        gu.setContentSize(this.BOSS_H * cw / ch, this.BOSS_H * 0.24);
+        const gs = gn.addComponent(Sprite); gs.sizeMode = Sprite.SizeMode.CUSTOM; gs.spriteFrame = this.bossTrackFrames[0];
+        gn.active = false; this.trackGhosts.push(gs);
+      }
       this.bossSp = sp; this.bossOK = true;
+      if (this.gunSp) this.gunSp.node.setSiblingIndex(bossN.children.length - 1);           // 枪压在本体前
+      for (const ds of this.dustPool) ds.node.setSiblingIndex(bossN.children.length - 1);   // 尘雾压最上
+    });
+    // 机枪臂真图:肩盘(图内18%,50%)为旋转轴,实时追瞄玩家
+    AssetHub.loadSF('arena-gun', (sf) => {
+      if (!sf) return;
+      const tex = sf.texture as Texture2D; tex.setFilters(Texture2D.Filter.LINEAR, Texture2D.Filter.LINEAR);
+      this.gunAsp = tex.width / tex.height;
+      const gn = new Node('ar-boss-gun'); gn.layer = Layers.Enum.UI_2D; gn.parent = bossN;
+      const gu = gn.addComponent(UITransform); gu.setAnchorPoint(0.18, 0.5);
+      gu.setContentSize(100 * this.gunAsp, 100);
+      const gs = gn.addComponent(Sprite); gs.sizeMode = Sprite.SizeMode.CUSTOM; gs.spriteFrame = sf;
+      gn.active = false; this.gunSp = gs;
+      gn.setSiblingIndex(bossN.children.length - 1);                                        // 枪压在本体前
+      for (const ds of this.dustPool) ds.node.setSiblingIndex(bossN.children.length - 1);   // 尘雾保持最上
+    });
+    // 履带尘雾3帧(移动时在履带后方冒,遮住轮子=滚动感)
+    AssetHub.loadSF('arena-dust', (sf) => {
+      if (!sf) return;
+      const tex = sf.texture as Texture2D; tex.setFilters(Texture2D.Filter.LINEAR, Texture2D.Filter.LINEAR);
+      const cw = Math.round(tex.width / 3), ch = tex.height;
+      for (let i = 0; i < 3; i++) { const f = new SpriteFrame(); f.texture = tex; f.rect = new Rect(i * cw, 0, cw, ch); this.dustFrames.push(f); }
+      for (let k = 0; k < 12; k++) {
+        const dn = new Node('dust' + k); dn.layer = Layers.Enum.UI_2D; dn.parent = bossN;
+        const du = dn.addComponent(UITransform); du.setAnchorPoint(0.5, 0.22); du.setContentSize(120, 120);
+        const dsp = dn.addComponent(Sprite); dsp.sizeMode = Sprite.SizeMode.CUSTOM; dsp.spriteFrame = this.dustFrames[0];
+        dn.active = false; this.dustPool.push(dsp);
+      }
     });
 
     this.heroWrap = new Node('ar-herowrap'); this.heroWrap.layer = Layers.Enum.UI_2D; this.heroWrap.parent = this.world; this.heroWrap.addComponent(UITransform);
@@ -167,6 +258,30 @@ export class Chapter2Arena extends Component {
 
     const fxN = new Node('ar-fx2'); fxN.layer = Layers.Enum.UI_2D; fxN.parent = this.world; fxN.addComponent(UITransform);
     this.fxG = fxN.addComponent(Graphics);
+    // 爆炸4帧(白闪→火球→炸开→烟圈)+精灵池
+    AssetHub.loadSF('arena-boom', (sf) => {
+      if (!sf) return;
+      const tex = sf.texture as Texture2D; tex.setFilters(Texture2D.Filter.LINEAR, Texture2D.Filter.LINEAR);
+      const cw = Math.round(tex.width / 4), ch = tex.height;
+      for (let i = 0; i < 4; i++) { const f = new SpriteFrame(); f.texture = tex; f.rect = new Rect(i * cw, 0, cw, ch); this.boomFrames.push(f); }
+      for (let k = 0; k < 8; k++) {
+        const bn = new Node('boom' + k); bn.layer = Layers.Enum.UI_2D; bn.parent = fxN;
+        const bu = bn.addComponent(UITransform); bu.setAnchorPoint(0.5, 0.5); bu.setContentSize(110, 110);
+        const bs2 = bn.addComponent(Sprite); bs2.sizeMode = Sprite.SizeMode.CUSTOM; bs2.spriteFrame = this.boomFrames[0];
+        bn.active = false; this.boomPool.push(bs2);
+      }
+    });
+    // 炸弹真图(骷髅铁球)+精灵池
+    AssetHub.loadSF('arena-bomb', (sf) => {
+      if (!sf) return;
+      this.bombSF = sf;
+      for (let k = 0; k < 6; k++) {
+        const bn = new Node('bomb' + k); bn.layer = Layers.Enum.UI_2D; bn.parent = fxN;
+        const bu = bn.addComponent(UITransform); bu.setAnchorPoint(0.5, 0.5); bu.setContentSize(30, 30);
+        const bs2 = bn.addComponent(Sprite); bs2.sizeMode = Sprite.SizeMode.CUSTOM; bs2.spriteFrame = sf;
+        bn.active = false; this.bombPool.push(bs2);
+      }
+    });
 
 
     this.controls = new TouchControls(this.node, {
@@ -239,7 +354,7 @@ export class Chapter2Arena extends Component {
     // 命中 Boss:身前一刀 + 深度接近
     if (!this.bDead && Math.abs(this.px + this.dir * 55 - this.bx) < 100 && Math.abs(this.pd - this.bd) < 0.22) {
       const dmg = this.coreOpen ? 24 : 12;
-      this.bhp -= dmg; this.addStop(0.05); this.addShake(7);
+      this.bhp -= dmg; this._bhitT = 0.14; this.addStop(0.05); this.addShake(7);
       this.flash(this.bx - 40 * Math.sign(this.bx - this.px), this.dy(this.bd) + 90 * this.dsc(this.bd));
       this.spark(this.bx - 30, this.dy(this.bd) + 80, new Color(255, 216, 144, 255), 8, 1.2);
       AudioMgr.inst.play('hit', 0.7);
@@ -254,6 +369,8 @@ export class Chapter2Arena extends Component {
   }
   private killBoss() {
     this.bhp = 0; this.bDead = true; this.bDeadT = 0; this.slow = 1.2;
+    this._dieBoomT = 0; this._dieBigDone = false;
+    this.boomAt(this.bx, this.dy(this.bd) + 80, 1.5);
     AudioMgr.inst.play('kill', 0.8);
   }
   private hurt(dmg: number, fx?: number) {
@@ -309,10 +426,10 @@ export class Chapter2Arena extends Component {
   }
   private bossAct(dt: number) {
     if (this.bDead) return;
-    if (this.bst === 'fire') { this.fireT -= dt; if (this.fireT <= 0) { this.fireT = 0.09; this.bullets.push({ x: this.bx - 70, d: this.aimD, vx: -760 }); AudioMgr.inst.play('hit', 0.2); } }
+    if (this.bst === 'fire') { this.fireT -= dt; if (this.fireT <= 0) { this.fireT = 0.09; this.fireBullet(this.aimD); AudioMgr.inst.play('hit', 0.2); } }
     if (this.bst === 'fanFire') {
       this.fanD += this.sweepDir * dt / 0.9; this.fireT -= dt;
-      if (this.fireT <= 0) { this.fireT = 0.07; this.bullets.push({ x: this.bx - 70, d: Math.min(1, Math.max(0, this.fanD)), vx: -760 }); }
+      if (this.fireT <= 0) { this.fireT = 0.07; this.fireBullet(Math.min(1, Math.max(0, this.fanD))); }
     }
     if (this.bst === 'charge') {
       this.bx += this.chDir * 640 * dt;
@@ -365,7 +482,7 @@ export class Chapter2Arena extends Component {
 
     // 子弹
     for (let i = this.bullets.length - 1; i >= 0; i--) {
-      const b = this.bullets[i]; b.x += b.vx * dt;
+      const b = this.bullets[i]; b.x += b.vx * dt; if (b.t !== undefined) b.t += dt;
       // 石墩掩体挡子弹(打3下碎)
       let blocked = false;
       for (const c of this.covers) {
@@ -377,8 +494,12 @@ export class Chapter2Arena extends Component {
         }
       }
       if (blocked) { this.bullets.splice(i, 1); continue; }
-      if (Math.abs(b.x - this.px) < 26 && Math.abs(b.d - this.pd) < 0.14 && this.ph2 < 46) this.hurt(7, b.x);
-      if (b.x < -W / 2 - 40) this.bullets.splice(i, 1);
+      const bx0 = b.x - b.vx * dt;
+      const crossed = (bx0 - this.px) * (b.x - this.px) <= 0;
+      if ((crossed || Math.abs(b.x - this.px) < 26) && Math.abs(b.d - this.pd) < 0.16 && this.ph2 < 46) {
+        this.hurt(7, b.x); this.bullets.splice(i, 1); continue;
+      }
+      if (b.x < -W / 2 - 40 || b.x > W / 2 + 40) this.bullets.splice(i, 1);
     }
     // 炸弹
     for (let i = this.bombs.length - 1; i >= 0; i--) {
@@ -389,6 +510,7 @@ export class Chapter2Arena extends Component {
         bo.x = x0 + (bo.tx - x0) * k; bo.y = y0 + (ty - y0) * k + Math.sin(k * Math.PI) * 170;
         if (k >= 1) {
           this.zones.push({ x: bo.tx, d: bo.td, life: 0, max: 2 });
+          this.boomAt(bo.tx, ty + 34, 1.15);
           this.addShake(9); this.spark(bo.tx, ty + 8, new Color(255, 176, 96, 255), 16, 1.6);
           AudioMgr.inst.play('land', 0.6);
           if (Math.abs(this.px - bo.tx) < 70 && Math.abs(this.pd - bo.td) < 0.18 && this.ph2 < 50) this.hurt(16, bo.tx);
@@ -397,8 +519,9 @@ export class Chapter2Arena extends Component {
       } else {
         bo.x += bo.vx * dt; bo.vy -= 900 * dt; bo.y += bo.vy * dt;
         if (!this.bDead && Math.abs(bo.x - this.bx) < 90 && Math.abs(bo.y - (this.dy(this.bd) + 80)) < 100) {
-          this.bhp -= 40; this.addStop(0.08); this.addShake(12); this.flash(bo.x, bo.y);
+          this.bhp -= 40; this._bhitT = 0.2; this.addStop(0.08); this.addShake(12); this.flash(bo.x, bo.y);
           this.spark(bo.x, bo.y, new Color(255, 176, 96, 255), 18, 1.7);
+          this.boomAt(bo.x, bo.y, 1.0);
           if (this.bhp <= 0) this.killBoss();
           this.bombs.splice(i, 1);
         } else if (bo.x > W / 2 + 60 || bo.y < -H / 2) this.bombs.splice(i, 1);
@@ -423,8 +546,11 @@ export class Chapter2Arena extends Component {
     if (this.win && !this.exiting && this.px > 0 && this.px > this.maxX(this.pd) - 70) { this.exitToWell(); return; }
 
     this.cam.update(dt, this.ph2 > 0, this.px, this.dy(this.pd) + 60);
+    this.combat.scale = this.dsc(this.pd);
+    this.hero.fxScale = this.dsc(this.pd);
     this.combat.update(dt, this.px, this.dy(this.pd) + this.ph2, this.dir);
     this.hero.updateFx(dt, this.px, this.dy(this.pd));
+    this.stepSmoke(dt);
     this.drawBg(); this.drawProps(); this.drawBoss(); this.drawHero(); this.drawFx();
     // 深度排序:远的在后(heroWrap/bossG 兄弟序)
     const heroFar = this.pd > this.bd;
@@ -603,6 +729,70 @@ export class Chapter2Arena extends Component {
       g.fillColor = new Color(150, 230, 210, Math.round(120 * gl2)); g.ellipse(wx2, wy2 + 18, 26, 10); g.fill();
     }
   }
+  // 烟囱冒烟:代码帧动画(蓄力/过热时更急更黑)
+  private stepSmoke(dt: number) {
+    for (let i = this.smoke.length - 1; i >= 0; i--) {
+      const p = this.smoke[i]; p.t += dt;
+      if (p.t > p.max) { this.smoke.splice(i, 1); continue; }
+      p.x += p.vx * dt; p.y += (34 + 18 * (p.t / p.max)) * dt;
+    }
+    // 履带尘雾:按移动速度连环冒
+    const dx2 = this.bx - this._dustLastBx; this._dustLastBx = this.bx;
+    const spd = Math.abs(dx2) / Math.max(dt, 1e-4);
+    for (let i = this.dusts.length - 1; i >= 0; i--) {
+      const d = this.dusts[i]; d.t += dt;
+      if (d.t > d.max) { this.dusts.splice(i, 1); continue; }
+      d.x -= d.dir * 34 * dt; d.y += 24 * dt;
+    }
+    if (this.bossOK && !this.bDead && spd > 50 && this.dusts.length < 12) {
+      this.dustT -= dt;
+      if (this.dustT <= 0) {
+        this.dustT = Math.max(0.06, 0.2 - spd * 0.00012);
+        const S = this.dsc(this.bd) * 1.05;
+        this.dusts.push({
+          x: this.bx - Math.sign(dx2) * (26 + Math.random() * 52) * S,
+          y: this.dy(this.bd) + 2 + Math.random() * 8,
+          t: 0, max: 0.5 + Math.random() * 0.2,
+          sc: (0.4 + Math.random() * 0.28) * S,
+          fl: Math.random() < 0.5 ? -1 : 1,
+          dir: Math.sign(dx2) || 1,
+        });
+      }
+    }
+    // 爆炸帧老化
+    for (let i = this.booms.length - 1; i >= 0; i--) {
+      const bm = this.booms[i]; bm.t += dt;
+      if (bm.t > bm.max) this.booms.splice(i, 1);
+    }
+    // Boss 死亡:连环小爆→终场大爆
+    if (this.bDead) {
+      if (this.bDeadT < 1.4) {
+        this._dieBoomT -= dt;
+        if (this._dieBoomT <= 0) {
+          this._dieBoomT = 0.16;
+          this.boomAt(this.bx + (Math.random() - 0.5) * 170, this.dy(this.bd) + 20 + Math.random() * 130, 0.6 + Math.random() * 0.5);
+        }
+      } else if (!this._dieBigDone) {
+        this._dieBigDone = true;
+        this.boomAt(this.bx, this.dy(this.bd) + 80, 2.3);
+        this.addShake(14);
+      }
+    }
+    if (!this.bossOK || this.bDead) return;
+    this.smokeT -= dt;
+    const rush = this.charging || this.coreOpen || this.phase() === 3;
+    if (this.smokeT > 0) return;
+    this.smokeT = rush ? 0.12 : 0.32;
+    const S = this.dsc(this.bd) * 1.05;
+    const face = this.px < this.bx ? 1 : -1;
+    const BW = this.BOSS_H * this.bossAsp;
+    this.smokeCi = (this.smokeCi + 1) % this.CHIM.length;
+    const [fx, fyTop] = this.CHIM[this.smokeCi];
+    const tx = this.bx + (fx - 0.5) * BW * S * face;
+    const ty = this.dy(this.bd) - 10 + ((1 - fyTop) - 0.02) * this.BOSS_H * S;
+    this.smoke.push({ x: tx, y: ty, vx: face * 4 + (Math.random() - 0.5) * 14, r0: (5 + Math.random() * 2) * S, t: 0, max: rush ? 0.8 : 1.15, dark: rush });
+  }
+
   private drawBoss() {
     const g = this.bossG; g.clear();
     if (this.bDead && this.bDeadT > 1.7) { if (this.bossSp) this.bossSp.node.active = false; return; }
@@ -610,7 +800,10 @@ export class Chapter2Arena extends Component {
     const fade = this.bDead ? Math.max(0, 1 - Math.max(0, this.bDeadT - 1.2) / 0.5) : 1;
     const A = (v: number) => Math.round(v * fade);
     if (this.bossOK && this.bossSp) {
-      g.fillColor = new Color(20, 14, 30, A(150)); g.ellipse(x, gy - 2, 104 * s, 21 * s); g.fill();   // 影(加大贴地,钉住)
+      if (this._bhitT > 0) this._bhitT -= 1 / 60;
+      // 背光轮廓(把剪影从暗底里托出来=在场景里被月光照着)
+      g.fillColor = new Color(196, 184, 228, A(20)); g.ellipse(x, gy + 100 * s, 122 * s, 108 * s); g.fill();
+      g.fillColor = new Color(196, 184, 228, A(12)); g.ellipse(x, gy + 100 * s, 148 * s, 130 * s); g.fill();
       const br = 1 + Math.sin(this.bph * 2.2) * 0.02 + (this.charging ? Math.sin(this.t * 40) * 0.02 : 0);
       const S = s * br;
       const n = this.bossSp.node; n.active = true;
@@ -620,10 +813,84 @@ export class Chapter2Arena extends Component {
       this._bwalk += Math.abs(dx) * 0.05;
       const tilt = moving ? Math.sin(this._bwalk) * 3.5 : 0;              // 履带碾地=左右摇摆
       const bob = moving ? Math.abs(Math.sin(this._bwalk)) * 7 * S : 0;   // 一颠一颠往前挪
-      n.setScale(face * S, S, 1); n.setPosition(x, gy + bob - 10, 0); n.angle = tilt;   // -10=履带踩实地面
+      // 双层影:半影+本影,颠起来影子略缩(接地感)
+      const shk = 1 - bob * 0.012;
+      g.fillColor = new Color(20, 14, 30, A(80)); g.ellipse(x, gy - 2, 122 * s * shk, 25 * s * shk); g.fill();
+      g.fillColor = new Color(14, 9, 22, A(160)); g.ellipse(x, gy - 2, 92 * s * shk, 17 * s * shk); g.fill();
+      // 呼吸=轻微压扁拉伸(不只缩放);受击=弹缩一下
+      const bsq = Math.sin(this.bph * 2.2) * 0.012;
+      const pop = this._bhitT > 0 ? 1 + this._bhitT * 0.5 : 1;
+      n.setScale(face * S * (1 + bsq) * pop, S * (1 - bsq) * (2 - pop), 1);
+      n.setPosition(x, gy + bob - 10, 0); n.angle = tilt;   // -10=履带踩实地面
       this.bossSp.spriteFrame = this.bossFrames[this.charging ? 1 : 0];   // 蓄力冲撞=张嘴吼
       const hot = this.phase() === 3 || this.charging || this.coreOpen;   // 过热/蓄力/核心开=染红
-      this.bossSp.color = hot ? new Color(255, 150, 138, A(255)) : new Color(255, 255, 255, A(255));
+      this.bossSp.color = this._bhitT > 0 ? new Color(255, 244, 238, A(255))
+        : hot ? new Color(255, 150, 138, A(255))
+        : new Color(236, 228, 248, A(255));   // 暮紫环境染色,不再纯白直贴
+      // 履带残影:移动时拖两层半透明履带条(反方向),像在转
+      const spdPx = Math.abs(dx);
+      const blur = Math.min(15, spdPx * 2.0);
+      for (let k = 0; k < this.trackGhosts.length; k++) {
+        const gsp = this.trackGhosts[k];
+        const on = this.charging && spdPx > 0.8 && !this.bDead;   // 残影只在冲撞时,平时交给尘雾
+        gsp.node.active = on;
+        if (on) {
+          gsp.spriteFrame = this.bossTrackFrames[this.charging ? 1 : 0];
+          const offL = -(k + 1) * blur * Math.sign(dx) * face;   // local×face=屏幕方向,拖影在运动反向
+          gsp.node.setPosition(offL, -0.02 * this.BOSS_H, 0);
+          gsp.color = new Color(255, 255, 255, A(k === 0 ? 92 : 46));
+        }
+      }
+      // 机枪臂:挂肩盘,追瞄玩家(俯仰),开火枪口白闪
+      if (this.gunSp) {
+        const gn2 = this.gunSp.node;
+        gn2.active = !this.bDead || this.bDeadT < 1.2;
+        if (gn2.active) {
+          const BW2 = this.BOSS_H * this.bossAsp;
+          const gx2 = x + (this.GUN_FX - 0.5) * BW2 * S * face;
+          const gy2 = (gy + bob - 10) + this.GUN_FY * this.BOSS_H * S;
+          const tx2 = this.px, ty2 = this.dy(this.pd) + 46 + this.ph2;
+          const ta2 = Math.atan2(ty2 - gy2, tx2 - gx2);
+          let dA = ta2 - this.gunA;
+          while (dA > Math.PI) dA -= Math.PI * 2;
+          while (dA < -Math.PI) dA += Math.PI * 2;
+          this.gunA += dA * 0.12;
+          gn2.setPosition(gx2, gy2, 0);
+          gn2.angle = this.gunA * 180 / Math.PI;
+          const GS = this.GUN_SC * S;
+          gn2.setScale(GS, (Math.abs(this.gunA) > Math.PI / 2 ? -1 : 1) * GS, 1);   // 弹鼓朝下
+          this.gunSp.color = this._bhitT > 0 ? new Color(255, 244, 238, A(255))
+            : hot ? new Color(255, 160, 148, A(255)) : new Color(236, 228, 248, A(255));
+          if (this._muzzT > 0) {
+            this._muzzT -= 1 / 60;
+            const ml = 100 * this.gunAsp * GS * 0.80;
+            const mx2 = gx2 + Math.cos(this.gunA) * ml, my2 = gy2 + Math.sin(this.gunA) * ml;
+            g.fillColor = new Color(255, 240, 190, A(200)); g.circle(mx2, my2, 12 * S); g.fill();
+            g.fillColor = new Color(255, 200, 120, A(120)); g.circle(mx2, my2, 20 * S); g.fill();
+          }
+        }
+      }
+      // 履带尘雾(3帧图:小→中→大,后方拖着冒)
+      for (let i = 0; i < this.dustPool.length; i++) {
+        const sp2 = this.dustPool[i], d = this.dusts[i];
+        if (!d || !this.dustFrames.length) { sp2.node.active = false; continue; }
+        const k2 = d.t / d.max;
+        sp2.node.active = true;
+        sp2.spriteFrame = this.dustFrames[Math.min(2, (k2 * 3) | 0)];
+        sp2.node.setPosition(d.x, d.y, 0);
+        sp2.node.setScale(d.sc * d.fl * (1 + k2 * 0.25), d.sc * (1 + k2 * 0.25), 1);
+        sp2.color = new Color(255, 255, 255, A(Math.round(235 * (1 - k2 * 0.85))));
+      }
+      // 烟囱烟(帧动画感:三档半径的双瓣卡通云)
+      for (const p of this.smoke) {
+        const k = p.t / p.max;
+        const stg = k < 0.34 ? 0 : k < 0.67 ? 1 : 2;
+        const r = p.r0 * (1 + stg * 0.75);
+        const al = A(Math.round((p.dark ? 120 : 88) * (1 - k)));
+        g.fillColor = p.dark ? new Color(96, 86, 100, al) : new Color(214, 208, 222, al);
+        g.circle(p.x, p.y, r); g.fill();
+        g.circle(p.x + r * 0.55, p.y - r * 0.35, r * 0.6); g.fill();
+      }
       return;
     }
     // 影
@@ -716,6 +983,21 @@ export class Chapter2Arena extends Component {
     this.hero.apply(0, this.ph2, this.dir, mode, p, -this.pvh, this.walkPh, 0, 0);
   }
   private drawFx() {
+    // Boss 入场景质感:履带底压一条接地暗带(假AO)+ 过热时腹部暖光
+    if (this.bossOK && !(this.bDead && this.bDeadT > 1.7)) {
+      const g0 = this.fxG;
+      const s0 = this.dsc(this.bd) * 1.05, bx0 = this.bx, by0 = this.dy(this.bd);
+      const fade0 = this.bDead ? Math.max(0, 1 - Math.max(0, this.bDeadT - 1.2) / 0.5) : 1;
+      g0.fillColor = new Color(12, 8, 20, Math.round(70 * fade0));
+      g0.ellipse(bx0, by0 + 6, 96 * s0, 12 * s0); g0.fill();
+      const hot0 = this.phase() === 3 || this.charging || this.coreOpen;
+      if (hot0 && !this.bDead) {
+        const gl0 = 0.5 + 0.5 * Math.sin(this.t * 7);
+        g0.fillColor = new Color(255, 150, 70, Math.round((26 + gl0 * 26) * fade0));
+        g0.ellipse(bx0, by0 + 72 * s0, 52 * s0, 40 * s0); g0.fill();
+        if (Math.random() < 0.25) this.spark(bx0 + (Math.random() - 0.5) * 60 * s0, by0 + 60 * s0, new Color(255, 170, 90, 200), 1, 0.5);
+      }
+    }
     const g = this.fxG; g.clear();
     // 落点红圈
     for (const bo of this.bombs) {
@@ -737,17 +1019,47 @@ export class Chapter2Arena extends Component {
     }
     // 子弹曳光
     for (const b of this.bullets) {
-      const s = this.dsc(b.d), y = this.dy(b.d) + 40 * s;
+      const s = this.dsc(b.d);
+      const y = b.y0 !== undefined ? b.y0 : this.dy(b.d) + 40 * s;   // 从枪口那条线直飞
       g.strokeColor = new Color(255, 216, 140, 230); g.lineWidth = 3 * s;
       g.moveTo(b.x + 16, y); g.lineTo(b.x - 10, y); g.stroke();
       g.fillColor = new Color(255, 246, 214, 255); g.circle(b.x - 10, y, 2.4 * s); g.fill();
     }
-    // 空中炸弹
-    for (const bo of this.bombs) {
-      g.fillColor = new Color(44, 38, 50, 255); g.circle(bo.x, bo.y, 11); g.fill();
-      g.fillColor = new Color(74, 66, 84, 255); g.rect(bo.x - 3, bo.y + 9, 6, 6); g.fill();
-      g.fillColor = new Color(255, 180, 80, Math.round(128 + 127 * Math.sin(this.t * 20)));
-      g.circle(bo.x, bo.y + 17, 3); g.fill();
+    // 空中炸弹(真图:旋转铁球+代码引线火花;无图退回圆球)
+    if (this.bombSF) {
+      for (let i = 0; i < this.bombPool.length; i++) {
+        const sp2 = this.bombPool[i], bo = this.bombs[i];
+        if (!bo) { sp2.node.active = false; continue; }
+        sp2.node.active = true;
+        const bs = this.dsc(bo.td) * 1.1;
+        sp2.node.setPosition(bo.x, bo.y, 0);
+        sp2.node.setScale(bs, bs, 1);
+        sp2.node.angle = (bo.st === 'fly' ? -1 : 1.6) * this.t * 300 % 360;
+        // 引线火花(顶上一闪一闪)
+        g.fillColor = new Color(255, 200, 90, Math.round(150 + 100 * Math.sin(this.t * 22 + i)));
+        g.circle(bo.x + Math.sin(this.t * 3 + i) * 2, bo.y + 19 * bs, 3.4 * bs); g.fill();
+        g.fillColor = new Color(255, 240, 190, Math.round(120 + 90 * Math.sin(this.t * 26 + i)));
+        g.circle(bo.x, bo.y + 19 * bs, 1.8 * bs); g.fill();
+      }
+    } else {
+      for (const bo of this.bombs) {
+        g.fillColor = new Color(44, 38, 50, 255); g.circle(bo.x, bo.y, 11); g.fill();
+        g.fillColor = new Color(74, 66, 84, 255); g.rect(bo.x - 3, bo.y + 9, 6, 6); g.fill();
+        g.fillColor = new Color(255, 180, 80, Math.round(128 + 127 * Math.sin(this.t * 20)));
+        g.circle(bo.x, bo.y + 17, 3); g.fill();
+      }
+    }
+    // 爆炸帧(池)
+    for (let i = 0; i < this.boomPool.length; i++) {
+      const sp2 = this.boomPool[i], bm = this.booms[i];
+      if (!bm || !this.boomFrames.length) { sp2.node.active = false; continue; }
+      const k = bm.t / bm.max;
+      sp2.node.active = true;
+      sp2.spriteFrame = this.boomFrames[Math.min(3, (k * 4) | 0)];
+      sp2.node.setPosition(bm.x, bm.y, 0);
+      const bsc = bm.sc * (0.72 + k * 0.55);
+      sp2.node.setScale(bsc, bsc, 1);
+      sp2.color = new Color(255, 255, 255, Math.round(k > 0.75 ? 255 * (1 - (k - 0.75) / 0.25) : 255));
     }
     // 粒子
     for (const p of this.parts) {

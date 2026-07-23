@@ -99,17 +99,18 @@ export class HeroRig {
   sndSwing(type: number) { AudioMgr.inst.play(type === 2 ? 'swing2' : 'swing', 0.9); }
 
   /** 挨揍表现(套件统一,对齐第一章):身体后仰42°随0.3s回正 + 红闪。音效/喷血/击退仍由场景管 */
+  fxScale = 1;   // 落地冲击/闪电特效缩放(角色被场景缩小时同步)
   hurtFx() { this.hurtT = 0.3; }
 
   /** 跳劈落地特效(屏幕坐标触发):x/y=冲击点,topY=闪电起点高度(一般传画面顶);自带落地闷响 */
   slamImpactFx(x: number, y: number, topY: number) {
     AudioMgr.inst.play('land', 0.7);
     this.slamFxT = this.SLAM_FX_DUR; this.fxX = x; this.fxY = y;
-    const steps = 9, sx = (Math.random() - 0.5) * 140, top = topY - y;
+    const steps = 9, sx = (Math.random() - 0.5) * 140 * this.fxScale, top = topY - y;
     const pts: number[][] = [];
     for (let i = 0; i <= steps; i++) {
       const t = i / steps;
-      pts.push([sx * (1 - t) + (i > 0 && i < steps ? (Math.random() - 0.5) * 52 : 0), top * (1 - t)]);
+      pts.push([sx * (1 - t) + (i > 0 && i < steps ? (Math.random() - 0.5) * 52 * this.fxScale : 0), top * (1 - t)]);
     }
     pts[steps] = [0, 0];   // 末端钉在冲击点
     this.bolt = pts; this.boltT = 0.26;
@@ -143,7 +144,7 @@ export class HeroRig {
         const fi = Math.min(3, Math.floor(p * 4));
         this.fxSlamN.active = true;
         this.fxSlamN.setPosition(this.fxX, this.fxY + 2, 0);
-        this.fxSlamN.setScale(3.75, 1.8, 1);   // 冲击环再放大1.5倍
+        this.fxSlamN.setScale(3.75 * this.fxScale, 1.8 * this.fxScale, 1);   // 冲击环×场景缩放
         this.fxSlamSp.spriteFrame = this.fxSlamFrames[fi];
         this.fxSlamSp.color = new Color(255, 255, 255, fi === 3 ? 200 : 255);
       }
@@ -159,8 +160,8 @@ export class HeroRig {
           g.moveTo(this.fxX + this.bolt[0][0], this.fxY + this.bolt[0][1]);
           for (let i = 1; i < this.bolt.length; i++) g.lineTo(this.fxX + this.bolt[i][0], this.fxY + this.bolt[i][1]);
         };
-        g.strokeColor = new Color(196, 132, 255, Math.round(130 * a)); g.lineWidth = 13; path(); g.stroke();   // 紫电外发光
-        g.strokeColor = new Color(252, 238, 255, Math.round(248 * a)); g.lineWidth = 4; path(); g.stroke();   // 粉白亮芯
+        g.strokeColor = new Color(196, 132, 255, Math.round(130 * a)); g.lineWidth = 13 * this.fxScale; path(); g.stroke();   // 紫电外发光
+        g.strokeColor = new Color(252, 238, 255, Math.round(248 * a)); g.lineWidth = Math.max(2, 4 * this.fxScale); path(); g.stroke();   // 粉白亮芯
       }
     }
   }

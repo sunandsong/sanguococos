@@ -11,6 +11,7 @@ import { HeroRig } from './HeroRig';
 // ─────────────────────────────────────────────────────────────
 export class HeroCombat {
   atkType = 0; atkTimer = 0; atkDur = 0.42; comboT = 0; specialCd = 0;
+  scale = 1;   // 特效整体缩放(角色被场景缩小时同步,如竞技场)
   readonly ATK_DUR = 0.42; readonly COMBO_WINDOW = 0.5; readonly SPECIAL_CD = 1.0;
 
   private hero: HeroRig;
@@ -73,13 +74,14 @@ export class HeroCombat {
     if (this.atkTimer > 0 && this.slashSp.spriteFrame) {
       const s = 1 - this.atkTimer / this.atkDur, a = 1 - Math.abs(s - 0.4) / 0.6;
       if (a > 0.05) {
-        const cx = heroSX + dir * 55, cy = heroSY + 74;   // 刀气加大后再前推
+        const cx = heroSX + dir * 55 * this.scale, cy = heroSY + 74 * this.scale;   // 刀气加大后再前推
         const c0 = dir > 0 ? 0 : Math.PI;
         const vert = this.atkType === 1 ? 0.9 - 1.9 * s : this.atkType === 2 ? 0.15 + 0.5 * s : -0.9 + 1.9 * s;
         this.slashN.active = true;
         this.slashN.setPosition(cx, cy, 0);
         this.slashN.angle = (c0 - dir * vert) * 57.29578;
-        this.slashN.setScale(2.55, 2.55, 1);   // 刀气=原始1.5倍(紫焰新月)
+        const ss = 2.55 * this.scale;
+        this.slashN.setScale(ss, ss, 1);   // 刀气=原始1.5倍(紫焰新月)×场景缩放
         this.slashSp.color = new Color(255, 255, 255, Math.round(230 * a));   // 纯白不染色,保紫焰本色
         slashOn = true;
       }
@@ -94,7 +96,7 @@ export class HeroCombat {
       const fx = this.waveFx(wi); if (!fx) break; wi++;
       const a = Math.max(0, 1 - w.life / w.max);
       fx.n.active = true; fx.n.setPosition(w.x, w.y, 0);
-      fx.n.angle = w.dir > 0 ? 0 : 180; fx.n.setScale(0.95, 0.95, 1);
+      fx.n.angle = w.dir > 0 ? 0 : 180; fx.n.setScale(0.95 * this.scale, 0.95 * this.scale, 1);
       fx.sp.color = new Color(150, 235, 255, Math.round(240 * a));   // 青白剑气
     }
     for (; wi < this.wavePool.length; wi++) this.wavePool[wi].n.active = false;
