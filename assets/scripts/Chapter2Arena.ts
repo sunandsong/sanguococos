@@ -58,6 +58,7 @@ export class Chapter2Arena extends Component {
   private gunAsp = 1; private _muzzT = 0;
   private discOK = false;             // (弃)新石盘
   private yardOK = false;             // 机车库整景图已就位:代码只画动效
+  private cartN: Node | null = null;  // 左上角小推车(空城图复用)
   private readonly GUN_FX = 0.76;   // 枪座:帧内横向比例
   private readonly GUN_FY = 0.56;   // 枪座:高度比例(自底)
   private readonly GUN_SC = 0.88;   // 枪臂缩放
@@ -149,21 +150,6 @@ export class Chapter2Arena extends Component {
     const bgN = new Node('ar-bg'); bgN.layer = Layers.Enum.UI_2D; bgN.parent = this.world; bgN.addComponent(UITransform);
     this.bgG = bgN.addComponent(Graphics);
 
-    // 空城城景(复用跑酷段的图):远景+中景两层,藏在机车库房后只露天际线
-    const cityPeek = (key: string, dw: number, hCap: number, y: number, tint: Color, ord: number) => {
-      AssetHub.loadSF(key, (sf) => {
-        if (!sf || !this.SCENE_A) return;
-        const n = new Node('ar-peek-' + key); n.layer = Layers.Enum.UI_2D; n.parent = this.world;
-        const u = n.addComponent(UITransform); u.setAnchorPoint(0.5, 0);
-        const dh = Math.min(hCap, dw * sf.rect.height / sf.rect.width * 0.62);
-        u.setContentSize(dw, dh);
-        const sp = n.addComponent(Sprite); sp.sizeMode = Sprite.SizeMode.CUSTOM; sp.spriteFrame = sf;
-        sp.color = tint;
-        n.setPosition(0, y, 0);
-        n.setSiblingIndex(bgN.getSiblingIndex() + ord);
-      });
-    };
-    cityPeek('bg-far-city', W + 80, 300, 232, new Color(172, 163, 200, 255), 1);   // 远景城:垫在整景图下,被库房天际线挡住
     // 机车库整景图(方案A):墙+铁地+岩浆一张全包
     AssetHub.loadSF('arena-yard', (sf) => {
       if (!sf || !this.SCENE_A) return;
@@ -172,8 +158,21 @@ export class Chapter2Arena extends Component {
       u.setContentSize(1000, 1000 * sf.rect.height / sf.rect.width);   // 含140px出血,中央720区=设计屏
       const sp = n.addComponent(Sprite); sp.sizeMode = Sprite.SizeMode.CUSTOM; sp.spriteFrame = sf;
       n.setPosition(0, 0, 0);
-      n.setSiblingIndex(bgN.getSiblingIndex() + 2);   // 城景(+1)之上:图的天空已抠透明,房顶挡城
+      n.setSiblingIndex(bgN.getSiblingIndex() + 1);
       this.yardOK = true;
+    });
+    // 左上角小推车(复用空城的图,场景点缀)
+    AssetHub.loadSF('city-cart', (sf) => {
+      if (!sf || !this.SCENE_A) return;
+      const n = new Node('ar-cart'); n.layer = Layers.Enum.UI_2D; n.parent = this.world;
+      const u = n.addComponent(UITransform); u.setAnchorPoint(0.5, 0);
+      const dw = 150;
+      u.setContentSize(dw, dw * sf.rect.height / sf.rect.width);
+      const sp = n.addComponent(Sprite); sp.sizeMode = Sprite.SizeMode.CUSTOM; sp.spriteFrame = sf;
+      sp.color = new Color(235, 230, 242, 255);   // 夜色微调(轻)
+      n.setPosition(240, 86, 0);                  // 右上角,墙脚边
+      n.setSiblingIndex(bgN.getSiblingIndex() + 2);
+      this.cartN = n;
     });
     // 天空整图槽位(arena-sky,可选):有图就盖掉代码画的天色/星/齿轮月
     const bgNRef = bgN;
@@ -540,7 +539,7 @@ export class Chapter2Arena extends Component {
         bo.x = x0 + (bo.tx - x0) * k; bo.y = y0 + (ty - y0) * k + Math.sin(k * Math.PI) * 170;
         if (k >= 1) {
           this.zones.push({ x: bo.tx, d: bo.td, life: 0, max: 2 });
-          this.boomAt(bo.tx, ty + 34, 1.15);
+          this.boomAt(bo.tx, ty + 34, 1.7);
           this.addShake(9); this.spark(bo.tx, ty + 8, new Color(255, 176, 96, 255), 16, 1.6);
           AudioMgr.inst.play('land', 0.6);
           if (Math.abs(this.px - bo.tx) < 70 && Math.abs(this.pd - bo.td) < 0.18 && this.ph2 < 50) this.hurt(16, bo.tx);
@@ -551,7 +550,7 @@ export class Chapter2Arena extends Component {
         if (!this.bDead && Math.abs(bo.x - this.bx) < 90 && Math.abs(bo.y - (this.dy(this.bd) + 80)) < 100) {
           this.bhp -= 40; this._bhitT = 0.2; this.addStop(0.08); this.addShake(12); this.flash(bo.x, bo.y);
           this.spark(bo.x, bo.y, new Color(255, 176, 96, 255), 18, 1.7);
-          this.boomAt(bo.x, bo.y, 1.0);
+          this.boomAt(bo.x, bo.y, 1.5);
           if (this.bhp <= 0) this.killBoss();
           this.bombs.splice(i, 1);
         } else if (bo.x > W / 2 + 60 || bo.y < -H / 2) this.bombs.splice(i, 1);
@@ -644,23 +643,9 @@ export class Chapter2Arena extends Component {
 
   // ── 方案A:机车库·火车转盘(纯代码预览) ──
   private drawYard(g: Graphics) {
-    if (this.yardOK) {
-      // 夜空(整景图天空已抠透明):渐变+星子,垫在城景后面
-      const bands = [[22, 24, 37], [30, 32, 45], [42, 44, 58], [58, 60, 74], [74, 76, 91]];
-      const top = H * 1.3, bot = 170, bh = (top - bot) / bands.length;
-      for (let i = 0; i < bands.length; i++) {
-        const c = bands[i];
-        g.fillColor = new Color(c[0], c[1], c[2], 255);
-        g.rect(-W * 1.2, top - (i + 1) * bh, W * 2.4, bh + 1); g.fill();
-      }
-      for (let i = 0; i < 16; i++) {
-        const sx = -W / 2 + ((i * 271) % W) * 0.96 + 14, sy = 350 + ((i * 157) % 270);
-        const tw = 0.4 + 0.6 * Math.sin(this.t * 1.6 + i * 2.1);
-        g.fillColor = new Color(228, 224, 248, Math.round(150 * tw));
-        g.circle(sx, sy, i % 3 === 0 ? 2.2 : 1.4); g.fill();
-      }
-      return;
-    }
+    if (this.yardOK) return;   // 整景图自带天空+140px出血
+
+
     const cy = this.CY, RX = this.RXV, RY = this.RYV, t = this.t;
     // 夜空(暮紫烟霾)
     g.fillColor = new Color(20, 17, 30, 255); g.rect(-W / 2 - 20, -H / 2 - 20, W + 40, H + 40); g.fill();
