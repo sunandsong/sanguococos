@@ -54,6 +54,7 @@ export class Chapter2Arena extends Component {
   private bombSF: SpriteFrame | null = null;   // 炸弹真图
   private bombPool: Sprite[] = [];
   private _bhitT = 0;   // Boss受击闪白/弹缩
+  private _bhitDir = 1;  // 受击来向(往反方向后仰)
   private gunSp: Sprite | null = null;   // 机枪臂(独立旋转真图)
   private gunAsp = 1; private _muzzT = 0;
   private discOK = false;             // (弃)新石盘
@@ -75,7 +76,7 @@ export class Chapter2Arena extends Component {
     let sx2 = mp.x;
     if (bdir < 0) sx2 = Math.max(sx2, this.px + 50);
     else sx2 = Math.min(sx2, this.px - 50);
-    this.bullets.push({ x: sx2, d, vx: 760 * bdir, y0: mp.y, t: 0 });
+    this.bullets.push({ x: sx2, d, vx: 1050 * bdir, y0: mp.y, t: 0 });
     this._muzzT = 0.07;
   }
 
@@ -135,6 +136,7 @@ export class Chapter2Arena extends Component {
   private bDead = false; private bDeadT = 0;
 
   private bullets: Bullet[] = []; private bombs: Bomb[] = []; private zones: Zone[] = [];
+  private bombWarns: { tx: number; td: number }[] = [];   // 落点预警(扔之前先亮一会)
   private parts: Part[] = []; private flashes: { x: number; y: number; life: number; max: number }[] = [];
   private t = 0; private shake = 0; private hitStop = 0; private slow = 0;
   private win = false; private exiting = false;
@@ -380,10 +382,11 @@ export class Chapter2Arena extends Component {
     const type = this.combat.tryAttack();
     if (type < 0) return;
     if (type === 2 && this.ph2 <= 0) { this.pvh = 620; this.ph2 = 1; this.slamJump = true; }
-    // 命中 Boss:身前一刀 + 深度接近
-    if (!this.bDead && Math.abs(this.px + this.dir * 55 - this.bx) < 100 && Math.abs(this.pd - this.bd) < 0.22) {
+    // 命中 Boss:刀气弧中心(随缩放)对上 Boss 车身实际宽度,视觉挨着才算打着
+    const sc2 = this.dsc(this.pd), bs3 = this.dsc(this.bd);
+    if (!this.bDead && Math.abs(this.px + this.dir * 55 * sc2 - this.bx) < 130 * sc2 + 102 * bs3 && Math.abs(this.pd - this.bd) < 0.34) {
       const dmg = this.coreOpen ? 24 : 12;
-      this.bhp -= dmg; this._bhitT = 0.14; this.addStop(0.05); this.addShake(7);
+      this.bhp -= dmg; this._bhitT = 0.14; this._bhitDir = Math.sign(this.bx - this.px) || 1; this.addStop(0.05); this.addShake(7);
       this.flash(this.bx - 40 * Math.sign(this.bx - this.px), this.dy(this.bd) + 90 * this.dsc(this.bd));
       this.spark(this.bx - 30, this.dy(this.bd) + 80, new Color(255, 216, 144, 255), 8, 1.2);
       AudioMgr.inst.play('hit', 0.7);
@@ -431,9 +434,18 @@ export class Chapter2Arena extends Component {
       case 'idle': {
         const r = Math.random(), p3 = ph === 3;
         if (r < 0.34) { this.bst = 'aim'; this.bstT = p3 ? 0.4 : 0.62; this.aimD = this.pd; }
-        else if (r < 0.62) { this.bst = 'bomb'; this.bstT = 0.5; this.bombN = ph >= 2 ? 3 : 1; }
+        else if (r < 0.62) {
+          this.bst = 'bomb'; this.bstT = 1.0; this.bombN = ph >= 2 ? 3 : 1;
+          this.bombWarns = [];
+          for (let i = 0; i < this.bombN; i++) {
+            const td = ph >= 2 ? Math.min(1, Math.max(0, this.pd + (Math.random() - 0.5) * 0.7)) : this.pd;
+            const mxT = Math.max(60, this.maxX(td) - 40);
+            const tx = Math.max(-mxT, Math.min(mxT, this.px + (Math.random() - 0.5) * (i ? 260 : 40)));
+            this.bombWarns.push({ tx, td });
+          }
+        }
         else if (r < 0.8 && ph >= 2) { this.bst = 'fan'; this.bstT = 0.5; this.sweepDir = Math.random() < 0.5 ? 1 : -1; this.fanD = this.sweepDir > 0 ? 0 : 1; }
-        else { this.bst = 'chargePre'; this.bstT = 0.7; this.chDir = this.px < this.bx ? -1 : 1; }
+        else { this.bst = 'chargePre'; this.bstT = 0.9; this.chDir = this.px < this.bx ? -1 : 1; }
         break;
       }
       case 'aim': this.bst = 'fire'; this.bstT = 0.55; this.fireT = 0; break;
@@ -441,12 +453,11 @@ export class Chapter2Arena extends Component {
       case 'fan': this.bst = 'fanFire'; this.bstT = 0.9; break;
       case 'fanFire': this.bst = 'idle'; this.bstT = 1.1; break;
       case 'bomb': {
-        for (let i = 0; i < this.bombN; i++) {
-          const td = this.phase() >= 2 ? Math.min(1, Math.max(0, this.pd + (Math.random() - 0.5) * 0.7)) : this.pd;
-          const mxT = Math.max(60, this.maxX(td) - 40);
-          const tx = Math.max(-mxT, Math.min(mxT, this.px + (Math.random() - 0.5) * (i ? 260 : 40)));
-          this.bombs.push({ st: 'fly', x: this.bx - 20, y: this.dy(this.bd) + 150, tx, td, vx: 0, vy: 0, t: 0, T: 0.9 + i * 0.22 });
+        for (let i = 0; i < this.bombWarns.length; i++) {
+          const wz = this.bombWarns[i];
+          this.bombs.push({ st: 'fly', x: this.bx - 20, y: this.dy(this.bd) + 150, tx: wz.tx, td: wz.td, vx: 0, vy: 0, t: 0, T: 0.9 + i * 0.22 });
         }
+        this.bombWarns = [];
         this.bst = 'idle'; this.bstT = ph === 3 ? 0.9 : 1.6; break;
       }
       case 'chargePre': this.bst = 'charge'; this.charging = true; this.bstT = 2.2; break;
@@ -548,7 +559,7 @@ export class Chapter2Arena extends Component {
       } else {
         bo.x += bo.vx * dt; bo.vy -= 900 * dt; bo.y += bo.vy * dt;
         if (!this.bDead && Math.abs(bo.x - this.bx) < 90 && Math.abs(bo.y - (this.dy(this.bd) + 80)) < 100) {
-          this.bhp -= 40; this._bhitT = 0.2; this.addStop(0.08); this.addShake(12); this.flash(bo.x, bo.y);
+          this.bhp -= 40; this._bhitT = 0.2; this._bhitDir = Math.sign(this.bx - bo.x) || 1; this.addStop(0.08); this.addShake(12); this.flash(bo.x, bo.y);
           this.spark(bo.x, bo.y, new Color(255, 176, 96, 255), 18, 1.7);
           this.boomAt(bo.x, bo.y, 1.5);
           if (this.bhp <= 0) this.killBoss();
@@ -1074,7 +1085,7 @@ export class Chapter2Arena extends Component {
       const br = 1 + Math.sin(this.bph * 2.2) * 0.02 + (this.charging ? Math.sin(this.t * 40) * 0.02 : 0);
       const S = s * br;
       const n = this.bossSp.node; n.active = true;
-      const face = this.px < this.bx ? 1 : -1;   // 朝玩家(图默认朝左)
+      const face = (this.bst === 'chargePre' || this.charging) ? -this.chDir : (this.px < this.bx ? 1 : -1);   // 朝玩家;蓄力/冲撞锁定冲刺方向不回头
       const dx = x - this._lastBx; this._lastBx = x;
       const moving = Math.abs(dx) > 0.4 && !this.charging;
       this._bwalk += Math.abs(dx) * 0.05;
@@ -1088,7 +1099,9 @@ export class Chapter2Arena extends Component {
       const bsq = Math.sin(this.bph * 2.2) * 0.012;
       const pop = this._bhitT > 0 ? 1 + this._bhitT * 0.5 : 1;
       n.setScale(face * S * (1 + bsq) * pop, S * (1 - bsq) * (2 - pop), 1);
-      n.setPosition(x, gy + bob - 10, 0); n.angle = tilt;   // -10=履带踩实地面
+      const recoil = this._bhitT > 0 ? Math.min(1, this._bhitT / 0.14) * 9 : 0;   // 挨揍后仰
+      n.setPosition(x + this._bhitDir * recoil * 1.2, gy + bob - 10, 0);
+      n.angle = tilt - this._bhitDir * recoil;   // -10=履带踩实地面
       this.bossSp.spriteFrame = this.bossFrames[this.charging ? 1 : 0];   // 蓄力冲撞=张嘴吼
       const hot = this.phase() === 3 || this.charging || this.coreOpen;   // 过热/蓄力/核心开=染红
       this.bossSp.color = this._bhitT > 0 ? new Color(255, 244, 238, A(255))
@@ -1214,13 +1227,7 @@ export class Chapter2Arena extends Component {
       if ((this.bst === 'fire' || this.bst === 'fanFire') && Math.floor(this.t * 30) % 2 === 0) {
         g.fillColor = new Color(255, 216, 144, 255); g.circle(ax + ca * 96 * s, ay + sa * 96 * s, 7 * s); g.fill();
       }
-      // 瞄准预警(虚线用短段拼)
-      if (this.bst === 'aim') {
-        const ly = this.dy(this.aimD) + 40 * this.dsc(this.aimD);
-        g.strokeColor = new Color(255, 80, 70, Math.round(120 + 100 * Math.sin(this.t * 18))); g.lineWidth = 2.5;
-        for (let sx2 = ax - 20; sx2 > -this.maxX(this.aimD) - 40; sx2 -= 22) { g.moveTo(sx2, ly); g.lineTo(sx2 - 12, ly); }
-        g.stroke();
-      }
+
       if (this.bst === 'chargePre') {
         g.fillColor = new Color(255, 90, 70, Math.round(60 + 40 * Math.sin(this.t * 20)));
         g.ellipse(x, gy - 2, 96 * s, 18 * s); g.fill();
@@ -1269,6 +1276,80 @@ export class Chapter2Arena extends Component {
     }
     const g = this.fxG;
     // 落点红圈
+    // 落点预警(还没扔:大红圈收缩读秒+感叹号)
+    if (this.bst === 'bomb') {
+      const kk = 1 - Math.max(0, this.bstT) / 1.0;   // 0→1
+      for (const wz of this.bombWarns) {
+        const sw = this.dsc(wz.td), wy = this.dy(wz.td);
+        const pulse3 = 0.55 + 0.45 * Math.sin(this.t * 16);
+        g.fillColor = new Color(255, 60, 46, Math.round(56 + 60 * kk));
+        g.ellipse(wz.tx, wy, 84 * sw, 22 * sw); g.fill();
+        g.strokeColor = new Color(255, 90, 74, Math.round(170 + 85 * pulse3)); g.lineWidth = 4.5;
+        g.ellipse(wz.tx, wy, 84 * sw, 22 * sw); g.stroke();
+        g.strokeColor = new Color(255, 140, 96, Math.round(130 + 90 * pulse3)); g.lineWidth = 3;
+        g.ellipse(wz.tx, wy, 84 * sw * (1.7 - 0.7 * kk), 22 * sw * (1.7 - 0.7 * kk)); g.stroke();
+        // 感叹号
+        const eh = 30 * sw;
+        g.fillColor = new Color(255, 236, 200, Math.round(200 + 55 * pulse3));
+        g.rect(wz.tx - 3.5 * sw, wy + 14 * sw + eh * 0.32, 7 * sw, eh); g.fill();
+        g.circle(wz.tx, wy + 10 * sw, 4.5 * sw); g.fill();
+      }
+    }
+    // 瞄准激光(真图/代码 Boss 都走这层)
+    if (this.bst === 'aim' && !this.bDead) {
+      const mp = this.muzzlePos();
+      const bdir = this.px < this.bx ? -1 : 1;
+      const ex2 = bdir * (W / 2 + 40);
+      const pulse = 0.6 + 0.4 * Math.sin(this.t * 18);
+      g.strokeColor = new Color(255, 50, 40, Math.round(70 * pulse)); g.lineWidth = 10;
+      g.moveTo(mp.x, mp.y); g.lineTo(ex2, mp.y); g.stroke();
+      g.strokeColor = new Color(255, 80, 70, 235); g.lineWidth = 3;
+      g.moveTo(mp.x, mp.y); g.lineTo(ex2, mp.y); g.stroke();
+      g.fillColor = new Color(255, 130, 110, Math.round(240 * pulse));
+      g.circle(mp.x, mp.y, 6); g.fill();
+    }
+    // 冲撞预警:贴地危险区(软边渐变+流动斜纹+亮轨+撞点闪条)
+    if (this.bst === 'chargePre' && !this.bDead) {
+      const cs = this.dsc(this.bd), cgy = this.dy(this.bd);
+      const ex3 = this.chDir * (this.maxX(this.bd) + 50);
+      const bFront = this.bx + this.chDir * 130 * cs;   // Boss 车头前再留段距离
+      const x0 = Math.min(bFront, ex3), x1 = Math.max(bFront, ex3);
+      const bandH = 52 * cs, yB = cgy - bandH * 0.2;
+      const pulse2 = 0.5 + 0.5 * Math.sin(this.t * 16);
+      // 软边底:三层堆叠,中间实、上下虚(去掉硬边贴图感)
+      g.fillColor = new Color(255, 60, 46, Math.round(18 + 14 * pulse2));
+      g.rect(x0, yB - bandH * 0.18, x1 - x0, bandH * 1.36); g.fill();
+      g.fillColor = new Color(255, 64, 48, Math.round(34 + 26 * pulse2));
+      g.rect(x0, yB, x1 - x0, bandH); g.fill();
+      g.fillColor = new Color(255, 80, 56, Math.round(30 + 24 * pulse2));
+      g.rect(x0, yB + bandH * 0.3, x1 - x0, bandH * 0.4); g.fill();
+      // 流动斜纹(工地警戒带,顺冲刺方向滚动)
+      g.fillColor = new Color(255, 130, 90, Math.round(40 + 26 * pulse2));
+      const stripeW = 16, gap = 44;
+      const off = (this.t * 240 * this.chDir) % gap;
+      for (let sx3 = x0 - bandH + off - gap; sx3 < x1 + gap; sx3 += gap) {
+        const a0 = Math.max(x0, Math.min(x1, sx3)), a1 = Math.max(x0, Math.min(x1, sx3 + stripeW));
+        const b0 = Math.max(x0, Math.min(x1, sx3 + bandH * 0.55)), b1 = Math.max(x0, Math.min(x1, sx3 + bandH * 0.55 + stripeW));
+        if (a1 - a0 < 1 && b1 - b0 < 1) continue;
+        g.moveTo(a0, yB); g.lineTo(a1, yB); g.lineTo(b1, yB + bandH); g.lineTo(b0, yB + bandH); g.close(); g.fill();
+      }
+      // 上下亮轨(细线,像通电的警戒边)
+      g.strokeColor = new Color(255, 110, 84, Math.round(150 + 80 * pulse2)); g.lineWidth = 2.5;
+      g.moveTo(x0, yB); g.lineTo(x1, yB); g.stroke();
+      g.moveTo(x0, yB + bandH); g.lineTo(x1, yB + bandH); g.stroke();
+      // 撞点闪条(墙那头,竖着急闪)
+      const hit = Math.floor(this.t * 12) % 2 === 0;
+      g.fillColor = new Color(255, hit ? 190 : 90, hit ? 120 : 60, hit ? 230 : 130);
+      g.rect(ex3 - this.chDir * 8 - 4, yB - bandH * 0.3, 8, bandH * 1.6); g.fill();
+      // 方向箭头(略小,融进纹理)
+      g.fillColor = new Color(255, 150, 110, Math.round(160 + 70 * pulse2));
+      for (let k = 0; k < 3; k++) {
+        const axx = bFront + this.chDir * ((this.t * 300 + k * 100) % 280);
+        if (this.chDir > 0 ? axx < ex3 - 24 : axx > ex3 + 24) {
+          g.moveTo(axx, yB + bandH * 0.82); g.lineTo(axx + this.chDir * 20 * cs, yB + bandH * 0.5); g.lineTo(axx, yB + bandH * 0.18); g.close(); g.fill();
+        }
+      }
+    }
     for (const bo of this.bombs) {
       if (bo.st !== 'fly') continue;
       const s = this.dsc(bo.td), k = Math.min(1, bo.t / bo.T);
